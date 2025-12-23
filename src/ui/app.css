@@ -1,0 +1,248 @@
+.app-root {
+  --color-bg: #f7f4ef;
+  --color-fg: #1b1b1b;
+  --color-accent: #ffda79;
+  --color-border: #1b1b1b;
+  --color-surface: #fff7e6;
+  --color-surface-alt: #ffe7a3;
+  --color-danger: #b30000;
+  --color-danger-bg: #ffd6d6;
+  min-height: 100vh;
+  background: var(--color-bg);
+  color: var(--color-fg);
+  padding: 32px 16px 64px;
+}
+
+.app {
+  max-width: 960px;
+  margin: 0 auto;
+  padding: 24px;
+  background: var(--color-surface);
+  border: 2px solid var(--color-border);
+  box-shadow: 8px 8px 0 var(--color-border);
+}
+
+.title {
+  margin: 0 0 12px;
+  font-size: 28px;
+}
+
+.status {
+  margin: 0 0 16px;
+  padding: 12px;
+  background: var(--color-surface-alt);
+  border: 1px solid var(--color-border);
+}
+
+.status .button {
+  margin: 6px 0;
+}
+
+.meta {
+  margin: 0;
+}
+
+.error {
+  margin: 8px 0 0;
+  color: var(--color-danger);
+}
+
+.button {
+  padding: 10px 16px;
+  border: 2px solid var(--color-border);
+  background: var(--color-fg);
+  color: var(--color-bg);
+}
+
+.audit {
+  margin: 8px 0 0;
+  padding: 8px;
+  background: var(--color-bg);
+  border: 1px dashed var(--color-border);
+  white-space: pre-wrap;
+  font-size: 12px;
+}
+
+.kanban {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 12px;
+  margin-top: 8px;
+}
+
+.kanban-column {
+  background: var(--color-bg);
+  border: 1px solid var(--color-border);
+  padding: 8px;
+}
+
+.kanban-title {
+  font-weight: 700;
+  margin-bottom: 6px;
+  text-transform: uppercase;
+  font-size: 12px;
+}
+
+.kanban-card {
+  border: 1px solid var(--color-border);
+  background: var(--color-surface);
+  padding: 6px;
+  margin-bottom: 6px;
+}
+
+.kanban-card.blocked {
+  background: var(--color-danger-bg);
+  border-color: var(--color-danger);
+}
+
+.kanban-meta {
+  font-size: 11px;
+  opacity: 0.7;
+}
+
+.kanban-empty {
+  font-size: 12px;
+  opacity: 0.6;
+}
+
+.calendar {
+  margin-top: 8px;
+}
+
+.calendar-header {
+  display: grid;
+  grid-template-columns: repeat(7, 1fr);
+  border: 1px solid var(--color-border);
+  border-bottom: none;
+  background: var(--color-bg);
+}
+
+.calendar-header-cell {
+  padding: 6px;
+  text-align: center;
+  border-right: 1px solid var(--color-border);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.calendar-header-cell:last-child {
+  border-right: none;
+}
+
+.calendar-grid {
+  display: grid;
+  grid-template-columns: repeat(7, 1fr);
+  border: 1px solid var(--color-border);
+  background: repeating-linear-gradient(
+    to bottom,
+    var(--color-bg),
+    var(--color-bg) var(--hour-height),
+    var(--color-surface) var(--hour-height),
+    var(--color-surface) calc(var(--hour-height) * 2)
+  );
+  height: calc(var(--hour-height) * 14);
+  position: relative;
+}
+
+.calendar-day {
+  position: relative;
+  border-right: 1px solid var(--color-border);
+}
+
+.calendar-day:last-child {
+  border-right: none;
+}
+
+.calendar-block {
+  position: absolute;
+  left: 6px;
+  right: 6px;
+  background: var(--color-fg);
+  color: var(--color-bg);
+  padding: 6px;
+  border: 1px solid var(--color-border);
+  cursor: grab;
+  user-select: none;
+}
+
+.calendar-block:active {
+  cursor: grabbing;
+}
+
+.calendar-block-title {
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.calendar-block-time {
+  font-size: 11px;
+  opacity: 0.8;
+}
+
+.calendar-block-handle {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 6px;
+  background: var(--color-accent);
+  cursor: ns-resize;
+}
+
+.due-pin {
+  position: absolute;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--color-danger);
+  border: 2px solid var(--color-bg);
+}
+
+.select,
+.input {
+  width: 100%;
+  padding: 6px;
+  border: 1px solid var(--color-border);
+  background: var(--color-bg);
+  font: inherit;
+  margin-top: 6px;
+}
+
+.detail {
+  margin-top: 8px;
+}
+
+.detail-section {
+  margin-top: 12px;
+}
+
+.detail-title {
+  font-weight: 700;
+  margin-bottom: 6px;
+}
+
+.detail-list {
+  font-size: 12px;
+}
+
+.detail-row {
+  display: grid;
+  gap: 6px;
+  margin-top: 6px;
+}
+
+.detail-blockers {
+  list-style: none;
+  padding: 0;
+  margin: 6px 0 0;
+  font-size: 12px;
+}
+
+.detail-blockers li {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 6px;
+}

@@ -1,6 +1,9 @@
 import sqlite3InitModule from "@sqlite.org/sqlite-wasm";
 import type { RpcRequest, RpcResponse } from "../rpc/types";
 import initSql from "./migrations/0001_init.sql?raw";
+import blockersKindTextSql from "./migrations/0002_blockers_kind_text.sql?raw";
+import runningTimersSql from "./migrations/0003_running_timers.sql?raw";
+import sortOrderSql from "./migrations/0004_sort_order.sql?raw";
 
 const ctx: DedicatedWorkerGlobalScope = self as DedicatedWorkerGlobalScope;
 
@@ -36,7 +39,7 @@ type MutateEnvelope = {
 type MutateResult = {
   ok: boolean;
   result?: unknown;
-  error?: string;
+  error?: string | { code: string; message: string };
   warnings?: string[];
   invalidate?: string[];
 };
@@ -65,6 +68,18 @@ const migrations = [
     version: 1,
     sql: initSql,
   },
+  {
+    version: 2,
+    sql: blockersKindTextSql,
+  },
+  {
+    version: 3,
+    sql: runningTimersSql,
+  },
+  {
+    version: 4,
+    sql: sortOrderSql,
+  },
 ];
 
 const ensureString = (value: unknown, name: string) => {
@@ -79,6 +94,41 @@ const ensureNumber = (value: unknown, name: string) => {
     throw new Error(`${name} must be a number`);
   }
   return value;
+};
+
+const ensureInteger = (value: unknown, name: string) => {
+  if (typeof value !== "number" || !Number.isFinite(value) || !Number.isInteger(value)) {
+    throw new Error(`${name} must be an integer`);
+  }
+  return value;
+};
+
+const minNullable = (a: number | null, b: number | null) => {
+  if (a === null) return b;
+  if (b === null) return a;
+  return Math.min(a, b);
+};
+
+const maxNullable = (a: number | null, b: number | null) => {
+  if (a === null) return b;
+  if (b === null) return a;
+  return Math.max(a, b);
+};
+
+const ensureNonNegativeInteger = (value: unknown, name: string) => {
+  const intValue = ensureInteger(value, name);
+  if (intValue < 0) {
+    throw new Error(`${name} must be 0 or greater`);
+  }
+  return intValue;
+};
+
+const ensurePositiveInteger = (value: unknown, name: string) => {
+  const intValue = ensureInteger(value, name);
+  if (intValue <= 0) {
+    throw new Error(`${name} must be greater than 0`);
+  }
+  return intValue;
 };
 
 const ensureArray = (value: unknown, name: string) => {
@@ -106,6 +156,280 @@ const ensureOptionalNumber = (value: unknown, name: string) => {
     throw new Error(`${name} must be a number or null`);
   }
   return value;
+};
+
+const buildPlaceholders = (count: number) =>
+  count > 0 ? Array.from({ length: count }, () => "?").join(", ") : "";
+
+const getScheduleSummaryMap = (db: any, ids: string[]) => {
+  const map = new Map<
+    string,
+    { count: number; total: number; start: number | null; end: number | null }
+  >();
+  if (ids.length === 0) {
+    return map;
+  }
+  const placeholders = buildPlaceholders(ids.length);
+  const rows = db.exec({
+    sql: `SELECT item_id,
+      COUNT(*) AS block_count,
+      SUM(duration_minutes) AS total_minutes,
+      MIN(start_at) AS start_at,
+      MAX(start_at + duration_minutes * 60000) AS end_at
+      FROM scheduled_blocks
+      WHERE item_id IN (${placeholders})
+      GROUP BY item_id;`,
+    rowMode: "array",
+    returnValue: "resultRows",
+    bind: ids,
+  }) as Array<[string, number, number | null, number | null, number | null]>;
+  for (const row of rows) {
+    map.set(row[0], {
+      count: Number(row[1]),
+      total: row[2] ? Number(row[2]) : 0,
+      start: row[3] !== null ? Number(row[3]) : null,
+      end: row[4] !== null ? Number(row[4]) : null,
+    });
+  }
+  return map;
+};
+
+const getBlockedStatusMap = (db: any, ids: string[]) => {
+  const map = new Map<
+    string,
+    { hasBlocker: boolean; hasUnmetDep: boolean; is_blocked: boolean }
+  >();
+  if (ids.length === 0) {
+    return map;
+  }
+  const placeholders = buildPlaceholders(ids.length);
+  const rows = db.exec({
+    sql: `SELECT id,
+      EXISTS(SELECT 1 FROM blockers b WHERE b.item_id = items.id AND b.cleared_at IS NULL) AS has_blocker,
+      EXISTS(
+        SELECT 1 FROM dependencies d
+        LEFT JOIN items di ON di.id = d.depends_on_id
+        WHERE d.item_id = items.id AND (di.id IS NULL OR di.status != 'done')
+      ) AS has_unmet_dep
+      FROM items WHERE id IN (${placeholders});`,
+    rowMode: "array",
+    returnValue: "resultRows",
+    bind: ids,
+  }) as Array<[string, number, number]>;
+  for (const row of rows) {
+    const hasBlocker = Boolean(row[1]);
+    const hasUnmetDep = Boolean(row[2]);
+    map.set(row[0], {
+      hasBlocker,
+      hasUnmetDep,
+      is_blocked: hasBlocker || hasUnmetDep,
+    });
+  }
+  return map;
+};
+
+const getAssigneesMap = (db: any, ids: string[]) => {
+  const map = new Map<string, string[]>();
+  if (ids.length === 0) {
+    return map;
+  }
+  const placeholders = buildPlaceholders(ids.length);
+  const rows = db.exec({
+    sql: `SELECT item_id, assignee_id FROM item_assignees WHERE item_id IN (${placeholders});`,
+    rowMode: "array",
+    returnValue: "resultRows",
+    bind: ids,
+  }) as Array<[string, string]>;
+  for (const row of rows) {
+    const list = map.get(row[0]) ?? [];
+    list.push(row[1]);
+    map.set(row[0], list);
+  }
+  return map;
+};
+
+const getTagsMap = (db: any, ids: string[]) => {
+  const map = new Map<string, string[]>();
+  if (ids.length === 0) {
+    return map;
+  }
+  const placeholders = buildPlaceholders(ids.length);
+  const rows = db.exec({
+    sql: `SELECT item_id, tag FROM item_tags WHERE item_id IN (${placeholders});`,
+    rowMode: "array",
+    returnValue: "resultRows",
+    bind: ids,
+  }) as Array<[string, string]>;
+  for (const row of rows) {
+    const list = map.get(row[0]) ?? [];
+    list.push(row[1]);
+    map.set(row[0], list);
+  }
+  return map;
+};
+
+const getDependentsCountMap = (db: any, ids: string[]) => {
+  const map = new Map<string, number>();
+  if (ids.length === 0) {
+    return map;
+  }
+  const placeholders = buildPlaceholders(ids.length);
+  const rows = db.exec({
+    sql: `SELECT depends_on_id, COUNT(*) FROM dependencies
+      WHERE depends_on_id IN (${placeholders})
+      GROUP BY depends_on_id;`,
+    rowMode: "array",
+    returnValue: "resultRows",
+    bind: ids,
+  }) as Array<[string, number]>;
+  for (const row of rows) {
+    map.set(row[0], Number(row[1]));
+  }
+  return map;
+};
+
+const getActiveBlockerCountMap = (db: any, ids: string[]) => {
+  const map = new Map<string, number>();
+  if (ids.length === 0) {
+    return map;
+  }
+  const placeholders = buildPlaceholders(ids.length);
+  const rows = db.exec({
+    sql: `SELECT item_id, COUNT(*) FROM blockers
+      WHERE item_id IN (${placeholders}) AND cleared_at IS NULL
+      GROUP BY item_id;`,
+    rowMode: "array",
+    returnValue: "resultRows",
+    bind: ids,
+  }) as Array<[string, number]>;
+  for (const row of rows) {
+    map.set(row[0], Number(row[1]));
+  }
+  return map;
+};
+
+const getUnmetDependencyMap = (db: any, ids: string[]) => {
+  const map = new Map<string, { count: number; ids: string[] }>();
+  if (ids.length === 0) {
+    return map;
+  }
+  const placeholders = buildPlaceholders(ids.length);
+  const rows = db.exec({
+    sql: `SELECT d.item_id, d.depends_on_id
+      FROM dependencies d
+      LEFT JOIN items di ON di.id = d.depends_on_id
+      WHERE d.item_id IN (${placeholders})
+        AND (di.id IS NULL OR di.status != 'done');`,
+    rowMode: "array",
+    returnValue: "resultRows",
+    bind: ids,
+  }) as Array<[string, string]>;
+  for (const row of rows) {
+    const entry = map.get(row[0]) ?? { count: 0, ids: [] };
+    entry.count += 1;
+    entry.ids.push(row[1]);
+    map.set(row[0], entry);
+  }
+  return map;
+};
+
+const getActiveBlockerIdsMap = (db: any, ids: string[]) => {
+  const map = new Map<string, string[]>();
+  if (ids.length === 0) {
+    return map;
+  }
+  const placeholders = buildPlaceholders(ids.length);
+  const rows = db.exec({
+    sql: `SELECT blocker_id, item_id FROM blockers
+      WHERE item_id IN (${placeholders}) AND cleared_at IS NULL;`,
+    rowMode: "array",
+    returnValue: "resultRows",
+    bind: ids,
+  }) as Array<[string, string]>;
+  for (const row of rows) {
+    const list = map.get(row[1]) ?? [];
+    list.push(row[0]);
+    map.set(row[1], list);
+  }
+  return map;
+};
+
+const buildHierarchyMaps = (
+  rows: Array<[string, string, string | null]>,
+  rootId: string | null
+) => {
+  const parentMap = new Map<string, string | null>();
+  const typeMap = new Map<string, string>();
+  for (const row of rows) {
+    parentMap.set(row[0], row[2]);
+    typeMap.set(row[0], row[1]);
+  }
+
+  const depthMap = new Map<string, number>();
+  const projectMap = new Map<string, string>();
+
+  const resolveDepth = (id: string): number => {
+    if (depthMap.has(id)) {
+      return depthMap.get(id)!;
+    }
+    const parentId = parentMap.get(id) ?? null;
+    if (rootId && id === rootId) {
+      depthMap.set(id, 0);
+      return 0;
+    }
+    if (!parentId || parentId === id) {
+      depthMap.set(id, 0);
+      return 0;
+    }
+    const depth = resolveDepth(parentId) + 1;
+    depthMap.set(id, depth);
+    return depth;
+  };
+
+  const resolveProjectId = (id: string): string => {
+    if (projectMap.has(id)) {
+      return projectMap.get(id)!;
+    }
+    if (typeMap.get(id) === "project") {
+      projectMap.set(id, id);
+      return id;
+    }
+    const parentId = parentMap.get(id) ?? null;
+    if (!parentId || parentId === id) {
+      projectMap.set(id, id);
+      return id;
+    }
+    const projectId = resolveProjectId(parentId);
+    projectMap.set(id, projectId);
+    return projectId;
+  };
+
+  for (const row of rows) {
+    resolveDepth(row[0]);
+    resolveProjectId(row[0]);
+  }
+
+  return { depthMap, projectMap };
+};
+
+const computeSequenceRank = (data: {
+  is_overdue: boolean;
+  is_blocked: boolean;
+  due_at: number;
+  priority: number;
+  dependents: number;
+}) => {
+  const overdueScore = data.is_overdue ? 0 : 1;
+  const blockedScore = data.is_blocked ? 1 : 0;
+  const dueKey = Math.floor(data.due_at / 60000);
+  const priorityScore = 5 - data.priority;
+  return (
+    overdueScore * 1e15 +
+    blockedScore * 1e14 +
+    dueKey * 1e4 +
+    priorityScore * 1e2 -
+    data.dependents
+  );
 };
 
 const getSettings = (db: any) => {
@@ -157,10 +481,10 @@ const exportData = (db: any) => {
   }) as Array<[string, string]>;
 
   const blockerRows = db.exec({
-    sql: "SELECT blocker_id, item_id, reason, created_at, cleared_at FROM blockers;",
+    sql: "SELECT blocker_id, item_id, kind, text, created_at, cleared_at FROM blockers;",
     rowMode: "array",
     returnValue: "resultRows",
-  }) as Array<[string, string, string | null, number, number | null]>;
+  }) as Array<[string, string, string, string, number, number | null]>;
 
   const blockRows = db.exec({
     sql: "SELECT block_id, item_id, start_at, duration_minutes, locked, source FROM scheduled_blocks;",
@@ -173,6 +497,12 @@ const exportData = (db: any) => {
     rowMode: "array",
     returnValue: "resultRows",
   }) as Array<[string, string, number, number, number, string | null, string]>;
+
+  const runningTimerRows = db.exec({
+    sql: "SELECT item_id, start_at, note FROM running_timers;",
+    rowMode: "array",
+    returnValue: "resultRows",
+  }) as Array<[string, number, string | null]>;
 
   const tagRows = db.exec({
     sql: "SELECT item_id, tag FROM item_tags;",
@@ -216,9 +546,10 @@ const exportData = (db: any) => {
     blockers: blockerRows.map((row) => ({
       blocker_id: row[0],
       item_id: row[1],
-      reason: row[2],
-      created_at: row[3],
-      cleared_at: row[4],
+      kind: row[2],
+      text: row[3],
+      created_at: row[4],
+      cleared_at: row[5],
     })),
     scheduled_blocks: blockRows.map((row) => ({
       block_id: row[0],
@@ -237,6 +568,11 @@ const exportData = (db: any) => {
       note: row[5],
       source: row[6],
     })),
+    running_timers: runningTimerRows.map((row) => ({
+      item_id: row[0],
+      start_at: row[1],
+      note: row[2],
+    })),
     item_tags: tagRows.map((row) => ({
       item_id: row[0],
       tag: row[1],
@@ -249,13 +585,13 @@ const exportData = (db: any) => {
   };
 };
 
-const computeDueMetrics = (dueAt: number, now: number) => {
+const computeDueMetrics = (dueAt: number, now: number, status: string) => {
   const dayMs = 24 * 60 * 60 * 1000;
   const diffMs = dueAt - now;
-  const isOverdue = diffMs < 0;
+  const isOverdue = diffMs < 0 && status !== "done" && status !== "canceled";
   return {
     is_overdue: isOverdue,
-    days_until_due: isOverdue ? 0 : Math.ceil(diffMs / dayMs),
+    days_until_due: isOverdue ? 0 : Math.max(0, Math.ceil(diffMs / dayMs)),
     days_overdue: isOverdue ? Math.ceil(Math.abs(diffMs) / dayMs) : 0,
   };
 };
@@ -422,21 +758,32 @@ const handleMutate = (envelope: MutateEnvelope): MutateResult => {
             break;
           }
           const title = ensureString(args.title, "title");
-          const dueAt = ensureNumber(args.due_at, "due_at");
-          const estimateMinutes = ensureNumber(
+          const dueAt = ensureInteger(args.due_at, "due_at");
+          const estimateMinutes = ensureNonNegativeInteger(
             args.estimate_minutes,
             "estimate_minutes"
           );
+          const parentId =
+            typeof args.parent_id === "string" ? args.parent_id : null;
           const id = crypto.randomUUID();
           const now = Date.now();
+          const sortOrderRows = dbHandle.exec({
+            sql: "SELECT parent_id, MAX(sort_order) FROM items WHERE parent_id IS ?;",
+            rowMode: "array",
+            returnValue: "resultRows",
+            bind: [parentId],
+          }) as Array<[string | null, number | null]>;
+          const maxSortOrder =
+            sortOrderRows.length > 0 && sortOrderRows[0][1] !== null
+              ? Number(sortOrderRows[0][1])
+              : 0;
+          const sortOrder = maxSortOrder + 1;
           const estimateMode =
             typeof args.estimate_mode === "string"
               ? args.estimate_mode
               : type === "task"
               ? "manual"
               : "rollup";
-          const parentId =
-            typeof args.parent_id === "string" ? args.parent_id : null;
           const status =
             typeof args.status === "string" ? args.status : "backlog";
           const priority =
@@ -448,7 +795,7 @@ const handleMutate = (envelope: MutateEnvelope): MutateResult => {
           const notes = typeof args.notes === "string" ? args.notes : null;
 
           dbHandle.exec(
-            "INSERT INTO items (id, type, title, parent_id, status, priority, due_at, estimate_mode, estimate_minutes, health, health_mode, notes, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);",
+            "INSERT INTO items (id, type, title, parent_id, status, priority, due_at, estimate_mode, estimate_minutes, health, health_mode, notes, created_at, updated_at, sort_order) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);",
             {
               bind: [
                 id,
@@ -465,6 +812,7 @@ const handleMutate = (envelope: MutateEnvelope): MutateResult => {
                 notes,
                 now,
                 now,
+                sortOrder,
               ],
             }
           );
@@ -493,11 +841,13 @@ const handleMutate = (envelope: MutateEnvelope): MutateResult => {
             "health",
             "health_mode",
             "notes",
+            "sort_order",
           ]);
           const numericFields = new Set([
             "due_at",
             "estimate_minutes",
             "priority",
+            "sort_order",
           ]);
           const updates: string[] = [];
           const bind: unknown[] = [];
@@ -539,6 +889,33 @@ const handleMutate = (envelope: MutateEnvelope): MutateResult => {
         case "set_status": {
           const id = ensureString(args.id, "id");
           const status = ensureString(args.status, "status");
+          const override = args.override === true;
+          if (status === "in_progress") {
+            const blockRows = dbHandle.exec({
+              sql: `SELECT
+                EXISTS(SELECT 1 FROM blockers b WHERE b.item_id = ? AND b.cleared_at IS NULL) AS has_blocker,
+                EXISTS(
+                  SELECT 1 FROM dependencies d
+                  LEFT JOIN items di ON di.id = d.depends_on_id
+                  WHERE d.item_id = ? AND (di.id IS NULL OR di.status != 'done')
+                ) AS has_unmet;`,
+              rowMode: "array",
+              returnValue: "resultRows",
+              bind: [id, id],
+            }) as Array<[number, number]>;
+            const hasBlocker = blockRows[0]?.[0] === 1;
+            const hasUnmet = blockRows[0]?.[1] === 1;
+            if ((hasBlocker || hasUnmet) && !override) {
+              result = {
+                ok: false,
+                error: {
+                  code: "BLOCKED",
+                  message: "Item is blocked and cannot move to in_progress.",
+                },
+              };
+              break;
+            }
+          }
           dbHandle.exec(
             "UPDATE items SET status = ?, updated_at = ? WHERE id = ?;",
             {
@@ -554,8 +931,8 @@ const handleMutate = (envelope: MutateEnvelope): MutateResult => {
         }
         case "create_block": {
           const itemId = ensureString(args.item_id, "item_id");
-          const startAt = ensureNumber(args.start_at, "start_at");
-          const durationMinutes = ensureNumber(
+          const startAt = ensureInteger(args.start_at, "start_at");
+          const durationMinutes = ensurePositiveInteger(
             args.duration_minutes,
             "duration_minutes"
           );
@@ -591,7 +968,7 @@ const handleMutate = (envelope: MutateEnvelope): MutateResult => {
         }
         case "resize_block": {
           const blockId = ensureString(args.block_id, "block_id");
-          const durationMinutes = ensureNumber(
+          const durationMinutes = ensurePositiveInteger(
             args.duration_minutes,
             "duration_minutes"
           );
@@ -615,6 +992,185 @@ const handleMutate = (envelope: MutateEnvelope): MutateResult => {
             ok: true,
             result: { block_id: blockId },
             invalidate: ["blocks"],
+          };
+          break;
+        }
+        case "delete_item": {
+          const itemId = ensureString(args.item_id, "item_id");
+          const idsRows = dbHandle.exec({
+            sql: `WITH RECURSIVE subtree AS (
+              SELECT id FROM items WHERE id = ?
+              UNION ALL
+              SELECT i.id FROM items i JOIN subtree s ON i.parent_id = s.id
+            )
+            SELECT id FROM subtree;`,
+            rowMode: "array",
+            returnValue: "resultRows",
+            bind: [itemId],
+          }) as Array<[string]>;
+          const deletedIds = idsRows.map((row) => row[0]);
+          if (deletedIds.length === 0) {
+            result = { ok: false, error: "item not found" };
+            break;
+          }
+          const placeholders = buildPlaceholders(deletedIds.length);
+          dbHandle.exec(`DELETE FROM dependencies WHERE item_id IN (${placeholders}) OR depends_on_id IN (${placeholders});`, {
+            bind: [...deletedIds, ...deletedIds],
+          });
+          dbHandle.exec(`DELETE FROM blockers WHERE item_id IN (${placeholders});`, {
+            bind: deletedIds,
+          });
+          dbHandle.exec(`DELETE FROM scheduled_blocks WHERE item_id IN (${placeholders});`, {
+            bind: deletedIds,
+          });
+          dbHandle.exec(`DELETE FROM time_entries WHERE item_id IN (${placeholders});`, {
+            bind: deletedIds,
+          });
+          dbHandle.exec(`DELETE FROM running_timers WHERE item_id IN (${placeholders});`, {
+            bind: deletedIds,
+          });
+          dbHandle.exec(`DELETE FROM item_tags WHERE item_id IN (${placeholders});`, {
+            bind: deletedIds,
+          });
+          dbHandle.exec(`DELETE FROM item_assignees WHERE item_id IN (${placeholders});`, {
+            bind: deletedIds,
+          });
+          dbHandle.exec(`DELETE FROM items WHERE id IN (${placeholders});`, {
+            bind: deletedIds,
+          });
+          result = {
+            ok: true,
+            result: { deleted_ids: deletedIds },
+            invalidate: [
+              "items",
+              "dependencies",
+              "blockers",
+              "blocks",
+              "time_entries",
+              "running_timers",
+            ],
+          };
+          break;
+        }
+        case "reorder_item": {
+          const itemId = ensureString(args.item_id, "item_id");
+          const direction = ensureString(args.direction, "direction");
+          if (direction !== "up" && direction !== "down") {
+            result = { ok: false, error: "direction must be up or down" };
+            break;
+          }
+          const rows = dbHandle.exec({
+            sql: "SELECT parent_id, sort_order FROM items WHERE id = ? LIMIT 1;",
+            rowMode: "array",
+            returnValue: "resultRows",
+            bind: [itemId],
+          }) as Array<[string | null, number]>;
+          if (rows.length === 0) {
+            result = { ok: false, error: "item not found" };
+            break;
+          }
+          const parentId = rows[0][0] ?? null;
+          const sortOrder = Number(rows[0][1]);
+          const siblingRows = dbHandle.exec({
+            sql:
+              "SELECT id, sort_order FROM items WHERE parent_id IS ? ORDER BY sort_order ASC, due_at ASC, title ASC;",
+            rowMode: "array",
+            returnValue: "resultRows",
+            bind: [parentId],
+          }) as Array<[string, number]>;
+          const index = siblingRows.findIndex((row) => row[0] === itemId);
+          if (index === -1) {
+            result = { ok: false, error: "item not found" };
+            break;
+          }
+          const swapWith =
+            direction === "up" ? siblingRows[index - 1] : siblingRows[index + 1];
+          if (!swapWith) {
+            result = { ok: true, result: { id: itemId, sort_order: sortOrder } };
+            break;
+          }
+          const otherId = swapWith[0];
+          const otherSort = Number(swapWith[1]);
+          dbHandle.exec("UPDATE items SET sort_order = ? WHERE id = ?;", {
+            bind: [otherSort, itemId],
+          });
+          dbHandle.exec("UPDATE items SET sort_order = ? WHERE id = ?;", {
+            bind: [sortOrder, otherId],
+          });
+          result = {
+            ok: true,
+            result: { id: itemId, sort_order: otherSort },
+            invalidate: ["items", `item:${itemId}`],
+          };
+          break;
+        }
+        case "move_item": {
+          const itemId = ensureString(args.item_id, "item_id");
+          const parentId =
+            typeof args.parent_id === "string" ? args.parent_id : null;
+          const beforeId =
+            typeof args.before_id === "string" ? args.before_id : null;
+          const afterId =
+            typeof args.after_id === "string" ? args.after_id : null;
+          if (!beforeId && !afterId) {
+            result = { ok: false, error: "before_id or after_id required" };
+            break;
+          }
+          if (beforeId && afterId) {
+            result = { ok: false, error: "provide only before_id or after_id" };
+            break;
+          }
+          const itemRows = dbHandle.exec({
+            sql: "SELECT parent_id FROM items WHERE id = ? LIMIT 1;",
+            rowMode: "array",
+            returnValue: "resultRows",
+            bind: [itemId],
+          }) as Array<[string | null]>;
+          if (itemRows.length === 0) {
+            result = { ok: false, error: "item not found" };
+            break;
+          }
+          const currentParent = itemRows[0][0] ?? null;
+          if (currentParent !== parentId) {
+            result = { ok: false, error: "parent_id must match current parent" };
+            break;
+          }
+          const siblingRows = dbHandle.exec({
+            sql:
+              "SELECT id FROM items WHERE parent_id IS ? ORDER BY sort_order ASC, due_at ASC, title ASC;",
+            rowMode: "array",
+            returnValue: "resultRows",
+            bind: [currentParent],
+          }) as Array<[string]>;
+          const siblings = siblingRows.map((row) => row[0]);
+          const currentIndex = siblings.indexOf(itemId);
+          if (currentIndex === -1) {
+            result = { ok: false, error: "item not found" };
+            break;
+          }
+          const targetId = beforeId ?? afterId!;
+          const targetIndex = siblings.indexOf(targetId);
+          if (targetIndex === -1) {
+            result = { ok: false, error: "target not found" };
+            break;
+          }
+          const nextOrder = siblings.filter((id) => id !== itemId);
+          const insertIndex =
+            beforeId !== null ? targetIndex : targetIndex + 1;
+          nextOrder.splice(insertIndex, 0, itemId);
+          const updates: Array<[number, string]> = [];
+          nextOrder.forEach((id, index) => {
+            updates.push([(index + 1) * 10, id]);
+          });
+          for (const [order, id] of updates) {
+            dbHandle.exec("UPDATE items SET sort_order = ? WHERE id = ?;", {
+              bind: [order, id],
+            });
+          }
+          result = {
+            ok: true,
+            result: { id: itemId },
+            invalidate: ["items", `item:${itemId}`],
           };
           break;
         }
@@ -647,6 +1203,94 @@ const handleMutate = (envelope: MutateEnvelope): MutateResult => {
             ok: true,
             result: { entry_id: entryId },
             invalidate: ["time_entries", `item:${itemId}`],
+          };
+          break;
+        }
+        case "start_timer": {
+          const itemId = ensureString(args.item_id, "item_id");
+          const startAt =
+            typeof args.start_at === "number"
+              ? ensureInteger(args.start_at, "start_at")
+              : Date.now();
+          const note = typeof args.note === "string" ? args.note : null;
+          const runningRows = dbHandle.exec({
+            sql: "SELECT COUNT(*) FROM running_timers;",
+            rowMode: "array",
+            returnValue: "resultRows",
+          }) as Array<[number]>;
+          const runningCount = Number(runningRows[0]?.[0] ?? 0);
+          if (runningCount > 0) {
+            result = {
+              ok: false,
+              error: {
+                code: "TIMER_ALREADY_RUNNING",
+                message: "Another timer is already running.",
+              },
+            };
+            break;
+          }
+          dbHandle.exec(
+            "INSERT INTO running_timers (item_id, start_at, note) VALUES (?, ?, ?);",
+            {
+              bind: [itemId, startAt, note],
+            }
+          );
+          result = {
+            ok: true,
+            result: { item_id: itemId, start_at: startAt },
+            invalidate: ["running_timers", `item:${itemId}`],
+          };
+          break;
+        }
+        case "stop_timer": {
+          const itemId = ensureString(args.item_id, "item_id");
+          const endAt =
+            typeof args.end_at === "number"
+              ? ensureInteger(args.end_at, "end_at")
+              : Date.now();
+          const rows = dbHandle.exec({
+            sql: "SELECT item_id, start_at, note FROM running_timers WHERE item_id = ? LIMIT 1;",
+            rowMode: "array",
+            returnValue: "resultRows",
+            bind: [itemId],
+          }) as Array<[string, number, string | null]>;
+          if (rows.length === 0) {
+            result = {
+              ok: false,
+              error: {
+                code: "NO_RUNNING_TIMER",
+                message: "No running timer found for this item.",
+              },
+            };
+            break;
+          }
+          const startAt = rows[0][1];
+          const durationMinutes = Math.max(
+            0,
+            Math.ceil((endAt - startAt) / 60000)
+          );
+          const entryId = crypto.randomUUID();
+          dbHandle.exec(
+            "INSERT INTO time_entries (entry_id, item_id, start_at, end_at, duration_minutes, note, source) VALUES (?, ?, ?, ?, ?, ?, ?);",
+            {
+              bind: [
+                entryId,
+                itemId,
+                startAt,
+                endAt,
+                durationMinutes,
+                rows[0][2],
+                "timer",
+              ],
+            }
+          );
+          dbHandle.exec("DELETE FROM running_timers WHERE item_id = ?;", {
+            bind: [itemId],
+          });
+          result = {
+            ok: true,
+            result: { entry_id: entryId, duration_minutes: durationMinutes },
+            invalidate: ["time_entries", "running_timers", `item:${itemId}`],
           };
           break;
         }
@@ -741,6 +1385,20 @@ const handleMutate = (envelope: MutateEnvelope): MutateResult => {
                 throw new Error(`blockers[${index}] must be an object`);
               }
               const blocker = value as Record<string, unknown>;
+              const legacyReason =
+                typeof blocker.reason === "string" ? blocker.reason : null;
+              const textValue =
+                typeof blocker.text === "string"
+                  ? blocker.text
+                  : legacyReason ?? "";
+              const text = textValue.trim();
+              if (!text) {
+                throw new Error(`blockers[${index}].text must be a non-empty string`);
+              }
+              const kind =
+                typeof blocker.kind === "string" && blocker.kind.trim()
+                  ? blocker.kind.trim()
+                  : "general";
               return {
                 blocker_id: ensureString(
                   blocker.blocker_id,
@@ -750,10 +1408,8 @@ const handleMutate = (envelope: MutateEnvelope): MutateResult => {
                   blocker.item_id,
                   `blockers[${index}].item_id`
                 ),
-                reason: ensureOptionalString(
-                  blocker.reason ?? null,
-                  `blockers[${index}].reason`
-                ),
+                kind,
+                text,
                 created_at: ensureNumber(
                   blocker.created_at,
                   `blockers[${index}].created_at`
@@ -838,6 +1494,27 @@ const handleMutate = (envelope: MutateEnvelope): MutateResult => {
             }
           );
 
+          const runningTimers = ensureArray(
+            record.running_timers ?? [],
+            "running_timers"
+          ).map((value, index) => {
+            if (!value || typeof value !== "object") {
+              throw new Error(`running_timers[${index}] must be an object`);
+            }
+            const timer = value as Record<string, unknown>;
+            return {
+              item_id: ensureString(timer.item_id, `running_timers[${index}].item_id`),
+              start_at: ensureNumber(
+                timer.start_at,
+                `running_timers[${index}].start_at`
+              ),
+              note: ensureOptionalString(
+                timer.note ?? null,
+                `running_timers[${index}].note`
+              ),
+            };
+          });
+
           const itemTags = ensureArray(record.item_tags, "item_tags").map(
             (value, index) => {
               if (!value || typeof value !== "object") {
@@ -890,6 +1567,7 @@ const handleMutate = (envelope: MutateEnvelope): MutateResult => {
           dbHandle.exec("DELETE FROM blockers;");
           dbHandle.exec("DELETE FROM scheduled_blocks;");
           dbHandle.exec("DELETE FROM time_entries;");
+          dbHandle.exec("DELETE FROM running_timers;");
           dbHandle.exec("DELETE FROM items;");
           dbHandle.exec("DELETE FROM settings;");
 
@@ -926,12 +1604,13 @@ const handleMutate = (envelope: MutateEnvelope): MutateResult => {
 
           for (const blocker of blockers) {
             dbHandle.exec(
-              "INSERT INTO blockers (blocker_id, item_id, reason, created_at, cleared_at) VALUES (?, ?, ?, ?, ?);",
+              "INSERT INTO blockers (blocker_id, item_id, kind, text, created_at, cleared_at) VALUES (?, ?, ?, ?, ?, ?);",
               {
                 bind: [
                   blocker.blocker_id,
                   blocker.item_id,
-                  blocker.reason,
+                  blocker.kind,
+                  blocker.text,
                   blocker.created_at,
                   blocker.cleared_at,
                 ],
@@ -972,6 +1651,15 @@ const handleMutate = (envelope: MutateEnvelope): MutateResult => {
             );
           }
 
+          for (const timer of runningTimers) {
+            dbHandle.exec(
+              "INSERT INTO running_timers (item_id, start_at, note) VALUES (?, ?, ?);",
+              {
+                bind: [timer.item_id, timer.start_at, timer.note],
+              }
+            );
+          }
+
           for (const tag of itemTags) {
             dbHandle.exec("INSERT INTO item_tags (item_id, tag) VALUES (?, ?);", {
               bind: [tag.item_id, tag.tag],
@@ -1001,6 +1689,7 @@ const handleMutate = (envelope: MutateEnvelope): MutateResult => {
                 blockers: blockers.length,
                 scheduled_blocks: scheduledBlocks.length,
                 time_entries: timeEntries.length,
+                running_timers: runningTimers.length,
                 item_tags: itemTags.length,
                 item_assignees: itemAssignees.length,
                 settings: settings.length,
@@ -1012,6 +1701,7 @@ const handleMutate = (envelope: MutateEnvelope): MutateResult => {
               "blockers",
               "blocks",
               "time_entries",
+              "running_timers",
               "settings",
             ],
           };
@@ -1059,14 +1749,19 @@ const handleMutate = (envelope: MutateEnvelope): MutateResult => {
         }
         case "add_blocker": {
           const itemId = ensureString(args.item_id, "item_id");
-          const kind = ensureString(args.kind, "kind");
+          const kind =
+            typeof args.kind === "string" && args.kind.trim()
+              ? args.kind.trim()
+              : "general";
           const text = typeof args.text === "string" ? args.text.trim() : "";
-          const reason = text ? `${kind}: ${text}` : kind;
+          if (!text) {
+            throw new Error("text must be a non-empty string");
+          }
           const blockerId = crypto.randomUUID();
           dbHandle.exec(
-            "INSERT INTO blockers (blocker_id, item_id, reason, created_at, cleared_at) VALUES (?, ?, ?, ?, ?);",
+            "INSERT INTO blockers (blocker_id, item_id, kind, text, created_at, cleared_at) VALUES (?, ?, ?, ?, ?, ?);",
             {
-              bind: [blockerId, itemId, reason, envelope.ts, null],
+              bind: [blockerId, itemId, kind, text, envelope.ts, null],
             }
           );
           result = {
@@ -1085,6 +1780,62 @@ const handleMutate = (envelope: MutateEnvelope): MutateResult => {
             ok: true,
             result: { blocker_id: blockerId },
             invalidate: ["items", "blockers"],
+          };
+          break;
+        }
+        case "set_item_tags": {
+          const itemId = ensureString(args.item_id, "item_id");
+          const tagsRaw = ensureArray(args.tags, "tags") as unknown[];
+          const tags = Array.from(
+            new Set(
+              tagsRaw
+                .map((tag) => (typeof tag === "string" ? tag.trim() : ""))
+                .filter((tag) => tag.length > 0)
+            )
+          );
+          dbHandle.exec("DELETE FROM item_tags WHERE item_id = ?;", {
+            bind: [itemId],
+          });
+          for (const tag of tags) {
+            dbHandle.exec("INSERT INTO item_tags (item_id, tag) VALUES (?, ?);", {
+              bind: [itemId, tag],
+            });
+          }
+          result = {
+            ok: true,
+            result: { item_id: itemId, tags },
+            invalidate: ["items", `item:${itemId}`],
+          };
+          break;
+        }
+        case "set_item_assignees": {
+          const itemId = ensureString(args.item_id, "item_id");
+          const assigneesRaw = ensureArray(
+            args.assignee_ids,
+            "assignee_ids"
+          ) as unknown[];
+          const assigneeIds = Array.from(
+            new Set(
+              assigneesRaw
+                .map((value) => (typeof value === "string" ? value.trim() : ""))
+                .filter((value) => value.length > 0)
+            )
+          );
+          dbHandle.exec("DELETE FROM item_assignees WHERE item_id = ?;", {
+            bind: [itemId],
+          });
+          for (const assigneeId of assigneeIds) {
+            dbHandle.exec(
+              "INSERT INTO item_assignees (item_id, assignee_id) VALUES (?, ?);",
+              {
+                bind: [itemId, assigneeId],
+              }
+            );
+          }
+          result = {
+            ok: true,
+            result: { item_id: itemId, assignee_ids: assigneeIds },
+            invalidate: ["items", `item:${itemId}`],
           };
           break;
         }
@@ -1273,13 +2024,13 @@ const handleRequest = async (message: RpcRequest): Promise<RpcResponse> => {
           }) as Array<[string, string | null]>;
 
           const blockersRows = dbHandle.exec({
-            sql: "SELECT blocker_id, reason, created_at, cleared_at FROM blockers WHERE item_id = ? ORDER BY created_at DESC;",
+            sql: "SELECT blocker_id, kind, text, created_at, cleared_at FROM blockers WHERE item_id = ? ORDER BY created_at DESC;",
             rowMode: "array",
             returnValue: "resultRows",
             bind: [itemId],
-          }) as Array<[string, string | null, number, number | null]>;
+          }) as Array<[string, string, string, number, number | null]>;
 
-          const hasActiveBlocker = blockersRows.some((row) => row[3] === null);
+          const hasActiveBlocker = blockersRows.some((row) => row[4] === null);
           const hasUnmetDep = depsRows.some(
             (row) => row[1] === null || row[1] !== "done"
           );
@@ -1290,7 +2041,7 @@ const handleRequest = async (message: RpcRequest): Promise<RpcResponse> => {
               ? (settings.get("capacity_minutes_per_day") as number)
               : null;
           const now = Date.now();
-          const dueMetrics = computeDueMetrics(rows[0][6], now);
+          const dueMetrics = computeDueMetrics(rows[0][6], now, rows[0][4]);
           const actualRows = dbHandle.exec({
             sql: "SELECT SUM(duration_minutes) FROM time_entries WHERE item_id = ?;",
             rowMode: "array",
@@ -1298,7 +2049,40 @@ const handleRequest = async (message: RpcRequest): Promise<RpcResponse> => {
             bind: [itemId],
           }) as Array<[number | null]>;
           const actualMinutes = actualRows[0]?.[0] ? Number(actualRows[0][0]) : 0;
+          const timeEntryRows = dbHandle.exec({
+            sql: "SELECT entry_id, start_at, end_at, duration_minutes, note, source FROM time_entries WHERE item_id = ? ORDER BY start_at DESC LIMIT 10;",
+            rowMode: "array",
+            returnValue: "resultRows",
+            bind: [itemId],
+          }) as Array<[string, number, number, number, string | null, string]>;
+          const runningTimerRows = dbHandle.exec({
+            sql: "SELECT item_id, start_at, note FROM running_timers WHERE item_id = ? LIMIT 1;",
+            rowMode: "array",
+            returnValue: "resultRows",
+            bind: [itemId],
+          }) as Array<[string, number, string | null]>;
+          const runningTimer =
+            runningTimerRows.length > 0
+              ? {
+                  item_id: runningTimerRows[0][0],
+                  start_at: runningTimerRows[0][1],
+                  note: runningTimerRows[0][2],
+                }
+              : null;
           const remainingMinutes = Math.max(0, rows[0][8] - actualMinutes);
+          const scheduleRows = dbHandle.exec({
+            sql: "SELECT COUNT(*), SUM(duration_minutes), MIN(start_at), MAX(start_at + duration_minutes * 60000) FROM scheduled_blocks WHERE item_id = ?;",
+            rowMode: "array",
+            returnValue: "resultRows",
+            bind: [itemId],
+          }) as Array<[number, number | null, number | null, number | null]>;
+          const scheduleRow = scheduleRows[0] ?? [0, null, null, null];
+          const scheduledCount = Number(scheduleRow[0]);
+          const scheduledMinutesTotal = scheduleRow[1] ? Number(scheduleRow[1]) : 0;
+          const scheduleStartAt =
+            scheduleRow[2] !== null ? Number(scheduleRow[2]) : null;
+          const scheduleEndAt =
+            scheduleRow[3] !== null ? Number(scheduleRow[3]) : null;
           const health = computeHealth(
             dueMetrics.is_overdue,
             remainingMinutes,
@@ -1324,18 +2108,51 @@ const handleRequest = async (message: RpcRequest): Promise<RpcResponse> => {
               dependencies: depsRows.map((row) => row[0]),
               blockers: blockersRows.map((row) => ({
                 blocker_id: row[0],
-                reason: row[1],
-                created_at: row[2],
-                cleared_at: row[3],
+                kind: row[1],
+                text: row[2],
+                created_at: row[3],
+                cleared_at: row[4],
               })),
               is_blocked: hasActiveBlocker || hasUnmetDep,
               days_until_due: dueMetrics.days_until_due,
               days_overdue: dueMetrics.days_overdue,
               is_overdue: dueMetrics.is_overdue,
+              has_scheduled_blocks: scheduledCount > 0,
+              scheduled_minutes_total: scheduledMinutesTotal,
+              schedule_start_at: scheduleStartAt,
+              schedule_end_at: scheduleEndAt,
+              running_timer: runningTimer,
+              time_entries: timeEntryRows.map((row) => ({
+                entry_id: row[0],
+                start_at: row[1],
+                end_at: row[2],
+                duration_minutes: row[3],
+                note: row[4],
+                source: row[5],
+              })),
               rollup_actual_minutes: actualMinutes,
               rollup_remaining_minutes: remainingMinutes,
               health_auto: health,
             },
+          };
+          break;
+        }
+        case "get_running_timer": {
+          const rows = dbHandle.exec({
+            sql: "SELECT item_id, start_at, note FROM running_timers ORDER BY start_at ASC LIMIT 1;",
+            rowMode: "array",
+            returnValue: "resultRows",
+          }) as Array<[string, number, string | null]>;
+          result = {
+            ok: true,
+            result:
+              rows.length > 0
+                ? {
+                    item_id: rows[0][0],
+                    start_at: rows[0][1],
+                    note: rows[0][2],
+                  }
+                : null,
           };
           break;
         }
@@ -1349,7 +2166,7 @@ const handleRequest = async (message: RpcRequest): Promise<RpcResponse> => {
             )
             SELECT id, type, title, parent_id, status, priority, due_at, estimate_mode, estimate_minutes, health, health_mode, notes
             FROM tree
-            ORDER BY due_at ASC;`,
+            ORDER BY sort_order ASC, due_at ASC, title ASC;`,
             rowMode: "array",
             returnValue: "resultRows",
             bind: [projectId],
@@ -1362,6 +2179,9 @@ const handleRequest = async (message: RpcRequest): Promise<RpcResponse> => {
               ? (settings.get("capacity_minutes_per_day") as number)
               : null;
           const now = Date.now();
+          const dueMetricsMap = new Map(
+            rows.map((row) => [row[0], computeDueMetrics(row[6], now, row[4])])
+          );
 
           const timeMap = new Map<string, number>();
           if (ids.length > 0) {
@@ -1374,6 +2194,54 @@ const handleRequest = async (message: RpcRequest): Promise<RpcResponse> => {
             }) as Array<[string, number]>;
             for (const row of timeRows) {
               timeMap.set(row[0], Number(row[1]));
+            }
+          }
+
+          const scheduleMap = new Map<
+            string,
+            { start: number | null; end: number | null }
+          >();
+          if (ids.length > 0) {
+            const placeholders = ids.map(() => "?").join(", ");
+            const scheduleRows = dbHandle.exec({
+              sql: `SELECT item_id,
+                MIN(start_at) AS start_at,
+                MAX(start_at + duration_minutes * 60000) AS end_at
+                FROM scheduled_blocks
+                WHERE item_id IN (${placeholders})
+                GROUP BY item_id;`,
+              rowMode: "array",
+              returnValue: "resultRows",
+              bind: ids,
+            }) as Array<[string, number | null, number | null]>;
+            for (const row of scheduleRows) {
+              scheduleMap.set(row[0], {
+                start: row[1] !== null ? Number(row[1]) : null,
+                end: row[2] !== null ? Number(row[2]) : null,
+              });
+            }
+          }
+
+          const blockedMap = new Map<string, boolean>();
+          if (ids.length > 0) {
+            const placeholders = ids.map(() => "?").join(", ");
+            const blockedRows = dbHandle.exec({
+              sql: `SELECT id,
+                (
+                  EXISTS(SELECT 1 FROM blockers b WHERE b.item_id = items.id AND b.cleared_at IS NULL)
+                  OR EXISTS(
+                    SELECT 1 FROM dependencies d
+                    LEFT JOIN items di ON di.id = d.depends_on_id
+                    WHERE d.item_id = items.id AND (di.id IS NULL OR di.status != 'done')
+                  )
+                ) AS is_blocked
+                FROM items WHERE id IN (${placeholders});`,
+              rowMode: "array",
+              returnValue: "resultRows",
+              bind: ids,
+            }) as Array<[string, number]>;
+            for (const row of blockedRows) {
+              blockedMap.set(row[0], Boolean(row[1]));
             }
           }
 
@@ -1396,6 +2264,10 @@ const handleRequest = async (message: RpcRequest): Promise<RpcResponse> => {
                 children: [] as string[],
                 totalEstimate: 0,
                 totalActual: 0,
+                rollupStartAt: null as number | null,
+                rollupEndAt: null as number | null,
+                rollupBlockedCount: 0,
+                rollupOverdueCount: 0,
               },
             ])
           );
@@ -1406,21 +2278,56 @@ const handleRequest = async (message: RpcRequest): Promise<RpcResponse> => {
             }
           }
 
-          const computeTotals = (id: string): { estimate: number; actual: number } => {
+          const computeTotals = (
+            id: string
+          ): {
+            estimate: number;
+            actual: number;
+            rollupStartAt: number | null;
+            rollupEndAt: number | null;
+            rollupBlockedCount: number;
+            rollupOverdueCount: number;
+          } => {
             const node = nodeMap.get(id);
             if (!node) {
-              return { estimate: 0, actual: 0 };
+              return {
+                estimate: 0,
+                actual: 0,
+                rollupStartAt: null,
+                rollupEndAt: null,
+                rollupBlockedCount: 0,
+                rollupOverdueCount: 0,
+              };
             }
             let estimate = node.estimate_minutes;
             let actual = timeMap.get(id) ?? 0;
+            let rollupStartAt = scheduleMap.get(id)?.start ?? null;
+            let rollupEndAt = scheduleMap.get(id)?.end ?? null;
+            let rollupBlockedCount = blockedMap.get(id) ? 1 : 0;
+            let rollupOverdueCount = dueMetricsMap.get(id)?.is_overdue ? 1 : 0;
             for (const childId of node.children) {
               const childTotals = computeTotals(childId);
               estimate += childTotals.estimate;
               actual += childTotals.actual;
+              rollupStartAt = minNullable(rollupStartAt, childTotals.rollupStartAt);
+              rollupEndAt = maxNullable(rollupEndAt, childTotals.rollupEndAt);
+              rollupBlockedCount += childTotals.rollupBlockedCount;
+              rollupOverdueCount += childTotals.rollupOverdueCount;
             }
             node.totalEstimate = estimate;
             node.totalActual = actual;
-            return { estimate, actual };
+            node.rollupStartAt = rollupStartAt;
+            node.rollupEndAt = rollupEndAt;
+            node.rollupBlockedCount = rollupBlockedCount;
+            node.rollupOverdueCount = rollupOverdueCount;
+            return {
+              estimate,
+              actual,
+              rollupStartAt,
+              rollupEndAt,
+              rollupBlockedCount,
+              rollupOverdueCount,
+            };
           };
 
           computeTotals(projectId);
@@ -1435,7 +2342,7 @@ const handleRequest = async (message: RpcRequest): Promise<RpcResponse> => {
                 row[1] === "task" ? row[8] : Math.max(0, totalEstimate - row[8]);
               const rollupActual = row[1] === "task" ? totalActual : totalActual;
               const rollupRemaining = Math.max(0, rollupEstimate - rollupActual);
-              const dueMetrics = computeDueMetrics(row[6], now);
+              const dueMetrics = dueMetricsMap.get(row[0])!;
               const health = computeHealth(
                 dueMetrics.is_overdue,
                 rollupRemaining,
@@ -1459,6 +2366,10 @@ const handleRequest = async (message: RpcRequest): Promise<RpcResponse> => {
                 rollup_estimate_minutes: rollupEstimate,
                 rollup_actual_minutes: rollupActual,
                 rollup_remaining_minutes: rollupRemaining,
+                rollup_start_at: node?.rollupStartAt ?? null,
+                rollup_end_at: node?.rollupEndAt ?? null,
+                rollup_blocked_count: node?.rollupBlockedCount ?? 0,
+                rollup_overdue_count: node?.rollupOverdueCount ?? 0,
                 days_until_due: dueMetrics.days_until_due,
                 days_overdue: dueMetrics.days_overdue,
                 is_overdue: dueMetrics.is_overdue,
@@ -1482,7 +2393,7 @@ const handleRequest = async (message: RpcRequest): Promise<RpcResponse> => {
                     WHERE d.item_id = items.id AND (di.id IS NULL OR di.status != 'done')
                   )
                 ) AS is_blocked
-                FROM items WHERE parent_id = ? ORDER BY due_at ASC;`
+                FROM items WHERE parent_id = ? ORDER BY sort_order ASC, due_at ASC, title ASC;`
               : `SELECT id, type, title, parent_id, status, priority, due_at,
                 (
                   EXISTS(SELECT 1 FROM blockers b WHERE b.item_id = items.id AND b.cleared_at IS NULL)
@@ -1492,11 +2403,67 @@ const handleRequest = async (message: RpcRequest): Promise<RpcResponse> => {
                     WHERE d.item_id = items.id AND (di.id IS NULL OR di.status != 'done')
                   )
                 ) AS is_blocked
-                FROM items ORDER BY due_at ASC;`,
+                FROM items ORDER BY sort_order ASC, due_at ASC, title ASC;`,
             rowMode: "array",
             returnValue: "resultRows",
             bind: projectId ? [projectId] : undefined,
           }) as Array<[string, string, string, string | null, string, number, number, number]>;
+
+          const scheduleRows = dbHandle.exec({
+            sql: `SELECT item_id,
+              COUNT(*) AS block_count,
+              SUM(duration_minutes) AS total_minutes,
+              MIN(start_at) AS start_at,
+              MAX(start_at + duration_minutes * 60000) AS end_at
+              FROM scheduled_blocks
+              GROUP BY item_id;`,
+            rowMode: "array",
+            returnValue: "resultRows",
+          }) as Array<[string, number, number | null, number | null, number | null]>;
+          const scheduleMap = new Map(
+            scheduleRows.map((row) => [
+              row[0],
+              {
+                count: Number(row[1]),
+                total: row[2] ? Number(row[2]) : 0,
+                start: row[3] !== null ? Number(row[3]) : null,
+                end: row[4] !== null ? Number(row[4]) : null,
+              },
+            ])
+          );
+          const itemIds = rows.map((row) => row[0]);
+          const blockersRows = itemIds.length
+            ? (dbHandle.exec({
+                sql: `SELECT blocker_id, item_id, kind, text, created_at, cleared_at
+                  FROM blockers
+                  WHERE item_id IN (${itemIds.map(() => "?").join(",")})
+                  ORDER BY created_at DESC;`,
+                rowMode: "array",
+                returnValue: "resultRows",
+                bind: itemIds,
+              }) as Array<[string, string, string, string, number, number | null]>)
+            : [];
+          const blockersMap = new Map<
+            string,
+            Array<{
+              blocker_id: string;
+              kind: string;
+              text: string;
+              created_at: number;
+              cleared_at: number | null;
+            }>
+          >();
+          for (const row of blockersRows) {
+            const entry = blockersMap.get(row[1]) ?? [];
+            entry.push({
+              blocker_id: row[0],
+              kind: row[2],
+              text: row[3],
+              created_at: row[4],
+              cleared_at: row[5],
+            });
+            blockersMap.set(row[1], entry);
+          }
 
           result = {
             ok: true,
@@ -1509,7 +2476,938 @@ const handleRequest = async (message: RpcRequest): Promise<RpcResponse> => {
               priority: row[5],
               due_at: row[6],
               is_blocked: Boolean(row[7]),
+              blockers: blockersMap.get(row[0]) ?? [],
+              has_scheduled_blocks: (scheduleMap.get(row[0])?.count ?? 0) > 0,
+              scheduled_minutes_total: scheduleMap.get(row[0])?.total ?? 0,
+              schedule_start_at: scheduleMap.get(row[0])?.start ?? null,
+              schedule_end_at: scheduleMap.get(row[0])?.end ?? null,
             })),
+          };
+          break;
+        }
+        case "listItems": {
+          const projectId =
+            typeof args.projectId === "string" ? args.projectId : null;
+          const statusArg = args.status;
+          const healthArg = args.health;
+          const assigneeId =
+            typeof args.assigneeId === "string" ? args.assigneeId : null;
+          const tagFilter =
+            typeof args.tagId === "string"
+              ? args.tagId
+              : typeof args.tag === "string"
+                ? args.tag
+                : null;
+          const statusFilter = Array.isArray(statusArg)
+            ? statusArg.filter((value) => typeof value === "string")
+            : typeof statusArg === "string"
+              ? [statusArg]
+              : null;
+          const healthFilter = Array.isArray(healthArg)
+            ? healthArg.filter((value) => typeof value === "string")
+            : typeof healthArg === "string"
+              ? [healthArg]
+              : null;
+          const rows = dbHandle.exec({
+            sql: projectId
+              ? `WITH RECURSIVE tree AS (
+                  SELECT * FROM items WHERE id = ?
+                  UNION ALL
+                  SELECT i.* FROM items i JOIN tree t ON i.parent_id = t.id
+                )
+                SELECT id, type, title, parent_id, status, priority, due_at,
+                  estimate_mode, estimate_minutes, health, health_mode, notes, updated_at, sort_order
+                FROM tree
+                ORDER BY sort_order ASC, due_at ASC, title ASC;`
+              : `SELECT id, type, title, parent_id, status, priority, due_at,
+                  estimate_mode, estimate_minutes, health, health_mode, notes, updated_at, sort_order
+                FROM items
+                ORDER BY sort_order ASC, due_at ASC, title ASC;`,
+            rowMode: "array",
+            returnValue: "resultRows",
+            bind: projectId ? [projectId] : undefined,
+          }) as Array<
+            [
+              string,
+              string,
+              string,
+              string | null,
+              string,
+              number,
+              number,
+              string,
+              number,
+              string,
+              string,
+              string | null,
+              number,
+              number
+            ]
+          >;
+          const ids = rows.map((row) => row[0]);
+          const rowMap = new Map(
+            rows.map((row) => [row[0], { updated_at: row[12], sort_order: row[13] }])
+          );
+          const scheduleMap = getScheduleSummaryMap(dbHandle, ids);
+          const blockedMap = getBlockedStatusMap(dbHandle, ids);
+          const assigneesMap = getAssigneesMap(dbHandle, ids);
+          const tagsMap = getTagsMap(dbHandle, ids);
+          const dependentsMap = getDependentsCountMap(dbHandle, ids);
+          const activeBlockerCountMap = getActiveBlockerCountMap(dbHandle, ids);
+          const unmetDepMap = getUnmetDependencyMap(dbHandle, ids);
+          const { depthMap, projectMap } = buildHierarchyMaps(
+            rows.map((row) => [row[0], row[1], row[3]]),
+            projectId
+          );
+          const timeMap = new Map<string, number>();
+          if (ids.length > 0) {
+            const placeholders = buildPlaceholders(ids.length);
+            const timeRows = dbHandle.exec({
+              sql: `SELECT item_id, SUM(duration_minutes) FROM time_entries
+                WHERE item_id IN (${placeholders})
+                GROUP BY item_id;`,
+              rowMode: "array",
+              returnValue: "resultRows",
+              bind: ids,
+            }) as Array<[string, number]>;
+            for (const row of timeRows) {
+              timeMap.set(row[0], Number(row[1]));
+            }
+          }
+          const settings = getSettings(dbHandle);
+          const capacityPerDay =
+            typeof settings.get("capacity_minutes_per_day") === "number"
+              ? (settings.get("capacity_minutes_per_day") as number)
+              : null;
+          const now = Date.now();
+          const includeCanceled =
+            typeof args.includeCanceled === "boolean" ? args.includeCanceled : false;
+          const includeDone =
+            typeof args.includeDone === "boolean" ? args.includeDone : false;
+          const searchText =
+            typeof args.searchText === "string" ? args.searchText.trim() : "";
+          const filtered = rows.filter((row) => {
+            if (statusFilter && !statusFilter.includes(row[4])) {
+              return false;
+            }
+            if (healthFilter && !healthFilter.includes(row[9])) {
+              return false;
+            }
+            if (!includeCanceled && row[4] === "canceled") {
+              return false;
+            }
+            if (!includeDone && row[4] === "done") {
+              return false;
+            }
+            const assignees = assigneesMap.get(row[0]) ?? [];
+            if (assigneeId === "unassigned" && assignees.length > 0) {
+              return false;
+            }
+            if (
+              assigneeId &&
+              assigneeId !== "unassigned" &&
+              !assignees.includes(assigneeId)
+            ) {
+              return false;
+            }
+            const tags = tagsMap.get(row[0]) ?? [];
+            if (tagFilter && !tags.includes(tagFilter)) {
+              return false;
+            }
+            if (searchText) {
+              const haystack = `${row[2]} ${row[11] ?? ""}`.toLowerCase();
+              if (!haystack.includes(searchText.toLowerCase())) {
+                return false;
+              }
+            }
+            return true;
+          });
+          const mapped = filtered.map((row) => {
+            const schedule = scheduleMap.get(row[0]) ?? {
+              count: 0,
+              total: 0,
+              start: null,
+              end: null,
+            };
+            const blocked = blockedMap.get(row[0]) ?? {
+              hasBlocker: false,
+              hasUnmetDep: false,
+              is_blocked: false,
+            };
+            const unmetDeps = unmetDepMap.get(row[0]) ?? { count: 0, ids: [] };
+            const dueMetrics = computeDueMetrics(row[6], now, row[4]);
+            const actualMinutes = timeMap.get(row[0]) ?? 0;
+            const remainingMinutes = Math.max(0, row[8] - actualMinutes);
+            const healthAuto = computeHealth(
+              dueMetrics.is_overdue,
+              remainingMinutes,
+              dueMetrics.days_until_due,
+              capacityPerDay
+            );
+            const dependents = dependentsMap.get(row[0]) ?? 0;
+            const sequenceRank = computeSequenceRank({
+              is_overdue: dueMetrics.is_overdue,
+              is_blocked: blocked.is_blocked,
+              due_at: row[6],
+              priority: row[5],
+              dependents,
+            });
+            return {
+              id: row[0],
+              type: row[1],
+              title: row[2],
+              parent_id: row[3],
+              project_id: projectMap.get(row[0]) ?? row[0],
+              depth: depthMap.get(row[0]) ?? 0,
+              status: row[4],
+              priority: row[5],
+              due_at: row[6],
+              estimate_minutes: row[8],
+              notes: row[11],
+              sort_order: row[13],
+              health: row[9],
+              health_mode: row[10],
+              schedule: {
+                has_blocks: schedule.count > 0,
+                scheduled_minutes_total: schedule.total,
+                schedule_start_at: schedule.start,
+                schedule_end_at: schedule.end,
+              },
+              blocked: {
+                is_blocked: blocked.is_blocked,
+                blocked_by_deps: blocked.hasUnmetDep,
+                blocked_by_blockers: blocked.hasBlocker,
+                active_blocker_count: activeBlockerCountMap.get(row[0]) ?? 0,
+                unmet_dependency_count: unmetDeps.count,
+                scheduled_but_blocked:
+                  schedule.count > 0 && blocked.is_blocked ? true : false,
+              },
+              assignees: (assigneesMap.get(row[0]) ?? []).map((id) => ({
+                id,
+                name: null,
+              })),
+              tags: (tagsMap.get(row[0]) ?? []).map((tag) => ({
+                id: tag,
+                name: tag,
+              })),
+              sequence_rank: sequenceRank,
+            };
+          });
+          const orderBy =
+            typeof args.orderBy === "string" ? args.orderBy : "sort_order";
+          const orderDir =
+            typeof args.orderDir === "string" ? args.orderDir : "asc";
+          const sorted = mapped.sort((a, b) => {
+            const dir = orderDir === "desc" ? -1 : 1;
+            if (orderBy === "sort_order") {
+              if (a.sort_order !== b.sort_order) {
+                return (a.sort_order - b.sort_order) * dir;
+              }
+            }
+            if (orderBy === "sequence_rank") {
+              return (a.sequence_rank - b.sequence_rank) * dir;
+            }
+            if (orderBy === "title") {
+              return a.title.localeCompare(b.title) * dir;
+            }
+            if (orderBy === "updated_at") {
+              const aUpdated = rowMap.get(a.id)?.updated_at ?? 0;
+              const bUpdated = rowMap.get(b.id)?.updated_at ?? 0;
+              return (aUpdated - bUpdated) * dir;
+            }
+            if (a.due_at !== b.due_at) {
+              return (a.due_at - b.due_at) * dir;
+            }
+            if (a.sort_order !== b.sort_order) {
+              return (a.sort_order - b.sort_order) * dir;
+            }
+            return a.title.localeCompare(b.title) * dir;
+          });
+          const limit = typeof args.limit === "number" ? args.limit : null;
+          const offset = typeof args.offset === "number" ? args.offset : 0;
+          const sliced =
+            limit !== null ? sorted.slice(offset, offset + limit) : sorted.slice(offset);
+          result = {
+            ok: true,
+            result: {
+              items: sliced,
+            },
+          };
+          break;
+        }
+        case "listGantt": {
+          const projectId =
+            typeof args.projectId === "string" ? args.projectId : null;
+          const rows = dbHandle.exec({
+            sql: projectId
+              ? `WITH RECURSIVE tree AS (
+                  SELECT * FROM items WHERE id = ?
+                  UNION ALL
+                  SELECT i.* FROM items i JOIN tree t ON i.parent_id = t.id
+                )
+                SELECT id, type, title, parent_id, status, priority, due_at,
+                  estimate_minutes, health, health_mode, notes
+                FROM tree
+                ORDER BY sort_order ASC, due_at ASC, title ASC;`
+              : `SELECT id, type, title, parent_id, status, priority, due_at,
+                  estimate_minutes, health, health_mode, notes
+                FROM items
+                ORDER BY sort_order ASC, due_at ASC, title ASC;`,
+            rowMode: "array",
+            returnValue: "resultRows",
+            bind: projectId ? [projectId] : undefined,
+          }) as Array<[string, string, string, string | null, string, number, number, number, string, string, string | null]>;
+          const ids = rows.map((row) => row[0]);
+          const estimateMap = new Map(rows.map((row) => [row[0], row[7]]));
+          const scheduleMap = getScheduleSummaryMap(dbHandle, ids);
+          const blockedMap = getBlockedStatusMap(dbHandle, ids);
+          const unmetDepMap = getUnmetDependencyMap(dbHandle, ids);
+          const activeBlockerCountMap = getActiveBlockerCountMap(dbHandle, ids);
+          const { depthMap } = buildHierarchyMaps(
+            rows.map((row) => [row[0], row[1], row[3]]),
+            projectId
+          );
+          const now = Date.now();
+          const dueMetricsMap = new Map(
+            rows.map((row) => [row[0], computeDueMetrics(row[6], now, row[4])])
+          );
+          const timeMap = new Map<string, number>();
+          if (ids.length > 0) {
+            const placeholders = buildPlaceholders(ids.length);
+            const timeRows = dbHandle.exec({
+              sql: `SELECT item_id, SUM(duration_minutes) FROM time_entries
+                WHERE item_id IN (${placeholders})
+                GROUP BY item_id;`,
+              rowMode: "array",
+              returnValue: "resultRows",
+              bind: ids,
+            }) as Array<[string, number]>;
+            for (const row of timeRows) {
+              timeMap.set(row[0], Number(row[1]));
+            }
+          }
+          const nodeMap = new Map(
+            rows.map((row) => [
+              row[0],
+              {
+                id: row[0],
+                parent_id: row[3],
+                children: [] as string[],
+                rollupStartAt: null as number | null,
+                rollupEndAt: null as number | null,
+                totalEstimate: 0,
+                totalActual: 0,
+                rollupBlockedCount: 0,
+                rollupOverdueCount: 0,
+              },
+            ])
+          );
+          for (const node of nodeMap.values()) {
+            if (node.parent_id && nodeMap.has(node.parent_id)) {
+              nodeMap.get(node.parent_id)!.children.push(node.id);
+            }
+          }
+          const computeSpan = (
+            id: string
+          ): {
+            start: number | null;
+            end: number | null;
+            estimate: number;
+            actual: number;
+            blockedCount: number;
+            overdueCount: number;
+          } => {
+            const node = nodeMap.get(id);
+            if (!node) {
+              return {
+                start: null,
+                end: null,
+                estimate: 0,
+                actual: 0,
+                blockedCount: 0,
+                overdueCount: 0,
+              };
+            }
+            let start = scheduleMap.get(id)?.start ?? null;
+            let end = scheduleMap.get(id)?.end ?? null;
+            let estimate = estimateMap.get(id) ?? 0;
+            let actual = timeMap.get(id) ?? 0;
+            let blockedCount = blockedMap.get(id)?.is_blocked ? 1 : 0;
+            let overdueCount = dueMetricsMap.get(id)?.is_overdue ? 1 : 0;
+            for (const childId of node.children) {
+              const childSpan = computeSpan(childId);
+              start = minNullable(start, childSpan.start);
+              end = maxNullable(end, childSpan.end);
+              estimate += childSpan.estimate;
+              actual += childSpan.actual;
+              blockedCount += childSpan.blockedCount;
+              overdueCount += childSpan.overdueCount;
+            }
+            node.rollupStartAt = start;
+            node.rollupEndAt = end;
+            node.totalEstimate = estimate;
+            node.totalActual = actual;
+            node.rollupBlockedCount = blockedCount;
+            node.rollupOverdueCount = overdueCount;
+            return { start, end, estimate, actual, blockedCount, overdueCount };
+          };
+          if (projectId) {
+            computeSpan(projectId);
+          } else {
+            for (const row of rows) {
+              if (!nodeMap.get(row[0])?.parent_id) {
+                computeSpan(row[0]);
+              }
+            }
+          }
+          result = {
+            ok: true,
+            result: {
+              rows: rows
+                .map((row) => {
+                  const schedule = scheduleMap.get(row[0]) ?? {
+                    start: null,
+                    end: null,
+                    count: 0,
+                    total: 0,
+                  };
+                  const node = nodeMap.get(row[0]);
+                const blocked = blockedMap.get(row[0]) ?? {
+                  hasBlocker: false,
+                  hasUnmetDep: false,
+                  is_blocked: false,
+                };
+                const unmetDeps = unmetDepMap.get(row[0]) ?? { count: 0, ids: [] };
+                const rollupEstimate =
+                  row[1] === "task"
+                    ? row[7]
+                    : Math.max(0, (node?.totalEstimate ?? row[7]) - row[7]);
+                const rollupActual =
+                  row[1] === "task" ? timeMap.get(row[0]) ?? 0 : node?.totalActual ?? 0;
+                const rollupRemaining = Math.max(0, rollupEstimate - rollupActual);
+                const rollupBlockedCount = node?.rollupBlockedCount ?? 0;
+                const rollupOverdueCount = node?.rollupOverdueCount ?? 0;
+                return {
+                  id: row[0],
+                  type: row[1],
+                  title: row[2],
+                  parent_id: row[3],
+                  depth: depthMap.get(row[0]) ?? 0,
+                  status: row[4],
+                  blocked: {
+                    is_blocked: blocked.is_blocked,
+                    blocked_by_deps: blocked.hasUnmetDep,
+                    blocked_by_blockers: blocked.hasBlocker,
+                    active_blocker_count: activeBlockerCountMap.get(row[0]) ?? 0,
+                    unmet_dependency_count: unmetDeps.count,
+                  },
+                  due_at: row[6],
+                  bar_start_at:
+                    row[1] === "task" ? schedule.start : node?.rollupStartAt ?? null,
+                  bar_end_at:
+                    row[1] === "task" ? schedule.end : node?.rollupEndAt ?? null,
+                  rollup:
+                    row[1] === "task"
+                      ? undefined
+                      : {
+                          estimate_minutes: rollupEstimate,
+                          actual_minutes: rollupActual,
+                          remaining_minutes: rollupRemaining,
+                          overdue_count: rollupOverdueCount,
+                          blocked_count: rollupBlockedCount,
+                          rollup_start_at: node?.rollupStartAt ?? null,
+                          rollup_end_at: node?.rollupEndAt ?? null,
+                        },
+                  schedule:
+                    row[1] === "task"
+                      ? {
+                          has_blocks: schedule.count > 0,
+                          scheduled_minutes_total: schedule.total,
+                          schedule_start_at: schedule.start,
+                          schedule_end_at: schedule.end,
+                        }
+                      : undefined,
+                };
+              })
+                .filter((row) => {
+                  const includeDone =
+                    typeof args.includeDone === "boolean" ? args.includeDone : false;
+                  const includeCanceled =
+                    typeof args.includeCanceled === "boolean"
+                      ? args.includeCanceled
+                      : false;
+                  if (!includeDone && row.status === "done") {
+                    return false;
+                  }
+                  if (!includeCanceled && row.status === "canceled") {
+                    return false;
+                  }
+                  const startAt =
+                    typeof args.startAt === "number" ? args.startAt : null;
+                  const endAt = typeof args.endAt === "number" ? args.endAt : null;
+                  if (startAt === null && endAt === null) {
+                    return true;
+                  }
+                  const barStart = row.bar_start_at;
+                  const barEnd = row.bar_end_at;
+                  if (barStart === null || barEnd === null) {
+                    return true;
+                  }
+                  if (startAt !== null && barEnd < startAt) {
+                    return false;
+                  }
+                  if (endAt !== null && barStart > endAt) {
+                    return false;
+                  }
+                  return true;
+                }),
+            },
+          };
+          break;
+        }
+        case "listExecution": {
+          const projectId =
+            typeof args.projectId === "string" ? args.projectId : null;
+          const assigneeId =
+            typeof args.assigneeId === "string" ? args.assigneeId : null;
+          const startAt = ensureNumber(args.startAt, "startAt");
+          const endAt = ensureNumber(args.endAt, "endAt");
+          const itemsRows = dbHandle.exec({
+            sql: projectId
+              ? `WITH RECURSIVE tree AS (
+                  SELECT * FROM items WHERE id = ?
+                  UNION ALL
+                  SELECT i.* FROM items i JOIN tree t ON i.parent_id = t.id
+                )
+                SELECT id, type, title, parent_id, status, priority, due_at,
+                  estimate_minutes, health, health_mode, notes
+                FROM tree;`
+              : `SELECT id, type, title, parent_id, status, priority, due_at,
+                  estimate_minutes, health, health_mode, notes
+                FROM items;`,
+            rowMode: "array",
+            returnValue: "resultRows",
+            bind: projectId ? [projectId] : undefined,
+          }) as Array<[string, string, string, string | null, string, number, number, number, string, string, string | null]>;
+          const itemIds = itemsRows.map((row) => row[0]);
+          const scheduleMap = getScheduleSummaryMap(dbHandle, itemIds);
+          const blockedStatusMap = getBlockedStatusMap(dbHandle, itemIds);
+          const activeBlockerCountMap = getActiveBlockerCountMap(dbHandle, itemIds);
+          const unmetDepMap = getUnmetDependencyMap(dbHandle, itemIds);
+          const assigneesMap = getAssigneesMap(dbHandle, itemIds);
+          const tagsMap = getTagsMap(dbHandle, itemIds);
+          const dependentsMap = getDependentsCountMap(dbHandle, itemIds);
+          const { depthMap, projectMap } = buildHierarchyMaps(
+            itemsRows.map((row) => [row[0], row[1], row[3]]),
+            projectId
+          );
+          const timeMap = new Map<string, number>();
+          if (itemIds.length > 0) {
+            const placeholders = buildPlaceholders(itemIds.length);
+            const timeRows = dbHandle.exec({
+              sql: `SELECT item_id, SUM(duration_minutes) FROM time_entries
+                WHERE item_id IN (${placeholders})
+                GROUP BY item_id;`,
+              rowMode: "array",
+              returnValue: "resultRows",
+              bind: itemIds,
+            }) as Array<[string, number]>;
+            for (const row of timeRows) {
+              timeMap.set(row[0], Number(row[1]));
+            }
+          }
+          const settings = getSettings(dbHandle);
+          const capacityPerDay =
+            typeof settings.get("capacity_minutes_per_day") === "number"
+              ? (settings.get("capacity_minutes_per_day") as number)
+              : null;
+          const now = Date.now();
+
+          const listTraits = (row: typeof itemsRows[number]) => {
+            const schedule = scheduleMap.get(row[0]) ?? {
+              count: 0,
+              total: 0,
+              start: null,
+              end: null,
+            };
+            const blocked = blockedStatusMap.get(row[0]) ?? {
+              hasBlocker: false,
+              hasUnmetDep: false,
+              is_blocked: false,
+            };
+            const unmetDeps = unmetDepMap.get(row[0]) ?? { count: 0, ids: [] };
+            const dueMetrics = computeDueMetrics(row[6], now, row[4]);
+            const actualMinutes = timeMap.get(row[0]) ?? 0;
+            const remainingMinutes = Math.max(0, row[7] - actualMinutes);
+            const dependents = dependentsMap.get(row[0]) ?? 0;
+            const sequenceRank = computeSequenceRank({
+              is_overdue: dueMetrics.is_overdue,
+              is_blocked: blocked.is_blocked,
+              due_at: row[6],
+              priority: row[5],
+              dependents,
+            });
+            return {
+              id: row[0],
+              type: row[1],
+              title: row[2],
+              parent_id: row[3],
+              project_id: projectMap.get(row[0]) ?? row[0],
+              depth: depthMap.get(row[0]) ?? 0,
+              status: row[4],
+              priority: row[5],
+              due_at: row[6],
+              estimate_minutes: row[7],
+              notes: row[10],
+              health: row[8],
+              health_mode: row[9],
+              schedule: {
+                has_blocks: schedule.count > 0,
+                scheduled_minutes_total: schedule.total,
+                schedule_start_at: schedule.start,
+                schedule_end_at: schedule.end,
+              },
+              blocked: {
+                is_blocked: blocked.is_blocked,
+                blocked_by_deps: blocked.hasUnmetDep,
+                blocked_by_blockers: blocked.hasBlocker,
+                active_blocker_count: activeBlockerCountMap.get(row[0]) ?? 0,
+                unmet_dependency_count: unmetDeps.count,
+                scheduled_but_blocked:
+                  schedule.count > 0 && blocked.is_blocked ? true : false,
+              },
+              assignees: (assigneesMap.get(row[0]) ?? []).map((id) => ({
+                id,
+                name: null,
+              })),
+              tags: (tagsMap.get(row[0]) ?? []).map((tag) => ({
+                id: tag,
+                name: tag,
+              })),
+              sequence_rank: sequenceRank,
+            };
+          };
+
+          const filteredItems = itemsRows.filter((row) => {
+            const assignees = assigneesMap.get(row[0]) ?? [];
+            if (assigneeId === "unassigned" && assignees.length > 0) {
+              return false;
+            }
+            if (
+              assigneeId &&
+              assigneeId !== "unassigned" &&
+              !assignees.includes(assigneeId)
+            ) {
+              return false;
+            }
+            return true;
+          });
+
+          const placeholders = buildPlaceholders(itemIds.length);
+          const blocksRows =
+            itemIds.length > 0
+              ? (dbHandle.exec({
+                  sql: `SELECT block_id, item_id, start_at, duration_minutes, locked
+                    FROM scheduled_blocks
+                    WHERE item_id IN (${placeholders})
+                      AND start_at < ? AND (start_at + duration_minutes * 60000) > ?
+                    ORDER BY start_at ASC;`,
+                  rowMode: "array",
+                  returnValue: "resultRows",
+                  bind: [...itemIds, endAt, startAt],
+                }) as Array<[string, string, number, number, number]>)
+              : [];
+          const blocks = blocksRows
+            .filter((row) => {
+              if (!assigneeId) {
+                return true;
+              }
+              const assignees = assigneesMap.get(row[1]) ?? [];
+              if (assigneeId === "unassigned") {
+                return assignees.length === 0;
+              }
+              return assignees.includes(assigneeId);
+            })
+            .map((row) => ({
+              block_id: row[0],
+              item_id: row[1],
+              start_at: row[2],
+              duration_minutes: row[3],
+              locked: Boolean(row[4]),
+            }));
+
+          const queue = filteredItems
+            .filter((row) => {
+              if (row[4] !== "ready") {
+                return false;
+              }
+              if (blockedStatusMap.get(row[0])?.is_blocked) {
+                return false;
+              }
+              return (scheduleMap.get(row[0])?.count ?? 0) === 0;
+            })
+            .map((row) => listTraits(row))
+            .sort((a, b) => a.sequence_rank - b.sequence_rank);
+
+          result = {
+            ok: true,
+            result: {
+              blocks,
+              queue,
+            },
+          };
+          break;
+        }
+        case "listBlocked": {
+          const projectId =
+            typeof args.projectId === "string" ? args.projectId : null;
+          const assigneeId =
+            typeof args.assigneeId === "string" ? args.assigneeId : null;
+          const includeScheduled =
+            typeof args.includeScheduledButBlocked === "boolean"
+              ? args.includeScheduledButBlocked
+              : true;
+          const rows = dbHandle.exec({
+            sql: projectId
+              ? `WITH RECURSIVE tree AS (
+                  SELECT * FROM items WHERE id = ?
+                  UNION ALL
+                  SELECT i.* FROM items i JOIN tree t ON i.parent_id = t.id
+                )
+                SELECT id, type, title, parent_id, status, priority, due_at,
+                  estimate_minutes, health, health_mode, notes
+                FROM tree
+                ORDER BY sort_order ASC, due_at ASC, title ASC;`
+              : `SELECT id, type, title, parent_id, status, priority, due_at,
+                  estimate_minutes, health, health_mode, notes
+                FROM items
+                ORDER BY sort_order ASC, due_at ASC, title ASC;`,
+            rowMode: "array",
+            returnValue: "resultRows",
+            bind: projectId ? [projectId] : undefined,
+          }) as Array<[string, string, string, string | null, string, number, number, number, string, string, string | null]>;
+          const ids = rows.map((row) => row[0]);
+          const blockedMap = getBlockedStatusMap(dbHandle, ids);
+          const scheduleMap = getScheduleSummaryMap(dbHandle, ids);
+          const assigneesMap = getAssigneesMap(dbHandle, ids);
+          const tagsMap = getTagsMap(dbHandle, ids);
+          const unmetDepMap = getUnmetDependencyMap(dbHandle, ids);
+          const activeBlockerIdsMap = getActiveBlockerIdsMap(dbHandle, ids);
+          const activeBlockerCountMap = getActiveBlockerCountMap(dbHandle, ids);
+          const { depthMap, projectMap } = buildHierarchyMaps(
+            rows.map((row) => [row[0], row[1], row[3]]),
+            projectId
+          );
+          const blockedByDeps = [];
+          const blockedByBlockers = [];
+          const blockedByBoth = [];
+          const scheduledButBlocked = [];
+          for (const row of rows) {
+            const blocked = blockedMap.get(row[0]);
+            if (!blocked?.is_blocked) {
+              continue;
+            }
+            const assignees = assigneesMap.get(row[0]) ?? [];
+            if (assigneeId === "unassigned" && assignees.length > 0) {
+              continue;
+            }
+            if (
+              assigneeId &&
+              assigneeId !== "unassigned" &&
+              !assignees.includes(assigneeId)
+            ) {
+              continue;
+            }
+            const schedule = scheduleMap.get(row[0]) ?? {
+              count: 0,
+              total: 0,
+              start: null,
+              end: null,
+            };
+            const unmetDeps = unmetDepMap.get(row[0]) ?? { count: 0, ids: [] };
+            const blockerIds = activeBlockerIdsMap.get(row[0]) ?? [];
+            const entry = {
+              id: row[0],
+              type: row[1],
+              title: row[2],
+              parent_id: row[3],
+              project_id: projectMap.get(row[0]) ?? row[0],
+              depth: depthMap.get(row[0]) ?? 0,
+              status: row[4],
+              priority: row[5],
+              due_at: row[6],
+              estimate_minutes: row[7],
+              notes: row[10],
+              health: row[8],
+              health_mode: row[9],
+              schedule: {
+                has_blocks: schedule.count > 0,
+                scheduled_minutes_total: schedule.total,
+                schedule_start_at: schedule.start,
+                schedule_end_at: schedule.end,
+              },
+              blocked: {
+                is_blocked: blocked.is_blocked,
+                blocked_by_deps: blocked.hasUnmetDep,
+                blocked_by_blockers: blocked.hasBlocker,
+                active_blocker_count: activeBlockerCountMap.get(row[0]) ?? 0,
+                unmet_dependency_count: unmetDeps.count,
+                scheduled_but_blocked:
+                  schedule.count > 0 && blocked.is_blocked ? true : false,
+                blocked_dependency_ids: unmetDeps.ids,
+                blocker_ids: blockerIds,
+              },
+              assignees: assignees.map((id) => ({ id, name: null })),
+              tags: (tagsMap.get(row[0]) ?? []).map((tag) => ({
+                id: tag,
+                name: tag,
+              })),
+            };
+            if (blocked.hasUnmetDep && blocked.hasBlocker) {
+              blockedByBoth.push(entry);
+            } else if (blocked.hasUnmetDep) {
+              blockedByDeps.push(entry);
+            } else if (blocked.hasBlocker) {
+              blockedByBlockers.push(entry);
+            }
+            if (includeScheduled && schedule.count > 0) {
+              scheduledButBlocked.push(entry);
+            }
+          }
+          result = {
+            ok: true,
+            result: {
+              blocked_by_deps: blockedByDeps,
+              blocked_by_blockers: blockedByBlockers,
+              blocked_by_both: blockedByBoth,
+              scheduled_but_blocked: scheduledButBlocked,
+            },
+          };
+          break;
+        }
+        case "listByUser": {
+          const projectId =
+            typeof args.projectId === "string" ? args.projectId : null;
+          const assigneeFilter =
+            typeof args.assigneeId === "string" ? args.assigneeId : null;
+          const includeUnassigned =
+            typeof args.includeUnassigned === "boolean"
+              ? args.includeUnassigned
+              : true;
+          const includeCanceled =
+            typeof args.includeCanceled === "boolean" ? args.includeCanceled : false;
+          const includeDone =
+            typeof args.includeDone === "boolean" ? args.includeDone : false;
+          const rows = dbHandle.exec({
+            sql: projectId
+              ? `WITH RECURSIVE tree AS (
+                  SELECT * FROM items WHERE id = ?
+                  UNION ALL
+                  SELECT i.* FROM items i JOIN tree t ON i.parent_id = t.id
+                )
+                SELECT id, type, title, parent_id, status, priority, due_at,
+                  estimate_minutes, health, health_mode, notes
+                FROM tree;`
+              : `SELECT id, type, title, parent_id, status, priority, due_at,
+                  estimate_minutes, health, health_mode, notes
+                FROM items;`,
+            rowMode: "array",
+            returnValue: "resultRows",
+            bind: projectId ? [projectId] : undefined,
+          }) as Array<[string, string, string, string | null, string, number, number, number, string, string, string | null]>;
+          const ids = rows.map((row) => row[0]);
+          const scheduleMap = getScheduleSummaryMap(dbHandle, ids);
+          const blockedMap = getBlockedStatusMap(dbHandle, ids);
+          const activeBlockerCountMap = getActiveBlockerCountMap(dbHandle, ids);
+          const unmetDepMap = getUnmetDependencyMap(dbHandle, ids);
+          const assigneesMap = getAssigneesMap(dbHandle, ids);
+          const tagsMap = getTagsMap(dbHandle, ids);
+          const { depthMap, projectMap } = buildHierarchyMaps(
+            rows.map((row) => [row[0], row[1], row[3]]),
+            projectId
+          );
+          const groups = new Map<string, Array<Record<string, unknown>>>();
+          const unassigned: Array<Record<string, unknown>> = [];
+          for (const row of rows) {
+            if (!includeCanceled && row[4] === "canceled") {
+              continue;
+            }
+            if (!includeDone && row[4] === "done") {
+              continue;
+            }
+            const schedule = scheduleMap.get(row[0]) ?? {
+              count: 0,
+              total: 0,
+              start: null,
+              end: null,
+            };
+            const blocked = blockedMap.get(row[0]) ?? {
+              hasBlocker: false,
+              hasUnmetDep: false,
+              is_blocked: false,
+            };
+            const unmetDeps = unmetDepMap.get(row[0]) ?? { count: 0, ids: [] };
+            const item = {
+              id: row[0],
+              type: row[1],
+              title: row[2],
+              parent_id: row[3],
+              project_id: projectMap.get(row[0]) ?? row[0],
+              depth: depthMap.get(row[0]) ?? 0,
+              status: row[4],
+              priority: row[5],
+              due_at: row[6],
+              estimate_minutes: row[7],
+              notes: row[10],
+              health: row[8],
+              health_mode: row[9],
+              schedule: {
+                has_blocks: schedule.count > 0,
+                scheduled_minutes_total: schedule.total,
+                schedule_start_at: schedule.start,
+                schedule_end_at: schedule.end,
+              },
+              blocked: {
+                is_blocked: blocked.is_blocked,
+                blocked_by_deps: blocked.hasUnmetDep,
+                blocked_by_blockers: blocked.hasBlocker,
+                active_blocker_count: activeBlockerCountMap.get(row[0]) ?? 0,
+                unmet_dependency_count: unmetDeps.count,
+                scheduled_but_blocked:
+                  schedule.count > 0 && blocked.is_blocked ? true : false,
+              },
+              assignees: (assigneesMap.get(row[0]) ?? []).map((id) => ({
+                id,
+                name: null,
+              })),
+              tags: (tagsMap.get(row[0]) ?? []).map((tag) => ({
+                id: tag,
+                name: tag,
+              })),
+            };
+            const assignees = assigneesMap.get(row[0]) ?? [];
+            if (assignees.length === 0) {
+              unassigned.push(item);
+              continue;
+            }
+            for (const assignee of assignees) {
+              const list = groups.get(assignee) ?? [];
+              list.push(item);
+              groups.set(assignee, list);
+            }
+          }
+          const resultGroups = Array.from(groups.entries())
+            .filter(([assigneeId]) => !assigneeFilter || assigneeId === assigneeFilter)
+            .map(([assigneeId, items]) => ({
+              assignee: { id: assigneeId, name: null },
+              items,
+            }));
+          if (!assigneeFilter && includeUnassigned) {
+            resultGroups.push({ assignee: null, items: unassigned });
+          }
+          result = {
+            ok: true,
+            result: { groups: resultGroups },
           };
           break;
         }
@@ -1525,7 +3423,7 @@ const handleRequest = async (message: RpcRequest): Promise<RpcResponse> => {
           result = {
             ok: true,
             result: rows.map((row) => {
-              const dueMetrics = computeDueMetrics(row[6], now);
+              const dueMetrics = computeDueMetrics(row[6], now, row[4]);
               return {
                 id: row[0],
                 type: row[1],
@@ -1554,7 +3452,7 @@ const handleRequest = async (message: RpcRequest): Promise<RpcResponse> => {
           result = {
             ok: true,
             result: rows.map((row) => {
-              const dueMetrics = computeDueMetrics(row[6], now);
+              const dueMetrics = computeDueMetrics(row[6], now, row[4]);
               return {
                 id: row[0],
                 type: row[1],
@@ -1581,10 +3479,10 @@ const handleRequest = async (message: RpcRequest): Promise<RpcResponse> => {
           const startAt = ensureNumber(args.startAt, "startAt");
           const endAt = ensureNumber(args.endAt, "endAt");
           const rows = dbHandle.exec({
-            sql: "SELECT block_id, item_id, start_at, duration_minutes, locked, source FROM scheduled_blocks WHERE start_at BETWEEN ? AND ? ORDER BY start_at ASC;",
+            sql: "SELECT block_id, item_id, start_at, duration_minutes, locked, source FROM scheduled_blocks WHERE start_at < ? AND (start_at + duration_minutes * 60000) > ? ORDER BY start_at ASC;",
             rowMode: "array",
             returnValue: "resultRows",
-            bind: [startAt, endAt],
+            bind: [endAt, startAt],
           }) as Array<[string, string, number, number, number, string]>;
 
           result = {

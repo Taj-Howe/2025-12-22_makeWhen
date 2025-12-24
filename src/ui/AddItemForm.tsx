@@ -1,0 +1,677 @@
+import { useEffect, useMemo, useState, type FC, type FormEvent } from "react";
+import { mutate, query } from "../rpc/clientSingleton";
+
+type ItemType = "project" | "milestone" | "task";
+
+type ItemRow = {
+  id: string;
+  type: ItemType;
+  title: string;
+  parent_id: string | null;
+  project_id: string;
+  depth: number;
+  status: string;
+  priority: number;
+  due_at: number;
+  estimate_minutes: number;
+  notes: string | null;
+  health: string;
+  health_mode: string;
+  tags: { id: string; name: string }[];
+  assignees: { id: string; name: string | null }[];
+};
+
+type ItemDetails = {
+  id: string;
+  type: ItemType;
+  title: string;
+  parent_id: string | null;
+  status: string;
+  priority: number;
+  due_at: number;
+  estimate_mode: string;
+  estimate_minutes: number;
+  health: string;
+  health_mode: string;
+  notes: string | null;
+  dependencies: string[];
+  blockers: {
+    blocker_id: string;
+    kind: string;
+    text: string;
+    created_at: number;
+    cleared_at: number | null;
+  }[];
+};
+
+type AddItemFormProps = {
+  selectedProjectId: string | null;
+  items: ItemRow[];
+  onRefresh: () => void;
+};
+
+const formatOptionLabel = (item: ItemRow, parentType: ItemType | null) => {
+  const labelType =
+    item.type === "task" && parentType === "task" ? "Subtask" : item.type;
+  return `${" ".repeat(item.depth * 2)}${item.title} (${labelType})`;
+};
+
+const toDateTimeLocal = (value: number) => {
+  const date = new Date(value);
+  const offset = date.getTimezoneOffset() * 60000;
+  return new Date(value - offset).toISOString().slice(0, 16);
+};
+
+const parseCommaList = (value: string) =>
+  Array.from(
+    new Set(
+      value
+        .split(",")
+        .map((entry) => entry.trim())
+        .filter(Boolean)
+    )
+  );
+
+const AddItemForm: FC<AddItemFormProps> = ({
+  selectedProjectId,
+  items,
+  onRefresh,
+}) => {
+  const [mode, setMode] = useState<"create" | "edit">("create");
+  const [selectedItemId, setSelectedItemId] = useState<string>("");
+  const [type, setType] = useState<ItemType>("task");
+  const [title, setTitle] = useState("");
+  const [parentId, setParentId] = useState<string | null>(null);
+  const [dueAt, setDueAt] = useState("");
+  const [estimateMode, setEstimateMode] = useState<"manual" | "rollup">(
+    "manual"
+  );
+  const [estimateMinutes, setEstimateMinutes] = useState("0");
+  const [status, setStatus] = useState("backlog");
+  const [priority, setPriority] = useState("0");
+  const [healthMode, setHealthMode] = useState<"auto" | "manual">("auto");
+  const [health, setHealth] = useState("unknown");
+  const [notes, setNotes] = useState("");
+  const [tagsInput, setTagsInput] = useState("");
+  const [assigneesInput, setAssigneesInput] = useState("");
+  const [depsInput, setDepsInput] = useState("");
+  const [blockerKind, setBlockerKind] = useState("general");
+  const [blockerText, setBlockerText] = useState("");
+  const [blockers, setBlockers] = useState<ItemDetails["blockers"]>([]);
+  const [currentDeps, setCurrentDeps] = useState<string[]>([]);
+  const [error, setError] = useState<string | null>(null);
+  const [loadingDetails, setLoadingDetails] = useState(false);
+
+  const parentTypeMap = useMemo(() => {
+    const map = new Map<string, ItemType>();
+    for (const item of items) {
+      map.set(item.id, item.type);
+    }
+    return map;
+  }, [items]);
+
+  const projectItems = useMemo(
+    () => items.filter((item) => item.project_id === selectedProjectId),
+    [items, selectedProjectId]
+  );
+
+  const taskParentOptions = useMemo(() => {
+    if (!selectedProjectId) {
+      return [];
+    }
+    return projectItems.filter(
+      (item) => item.type === "milestone" || item.type === "task"
+    );
+  }, [projectItems, selectedProjectId]);
+
+  const editableItems = useMemo(
+    () => projectItems.filter((item) => item.type !== "project"),
+    [projectItems]
+  );
+
+  useEffect(() => {
+    if (mode === "edit" && selectedItemId) {
+      setLoadingDetails(true);
+      query<ItemDetails | null>("getItemDetails", { itemId: selectedItemId })
+        .then((data) => {
+          if (!data) {
+            return;
+          }
+          setType(data.type);
+          setTitle(data.title);
+          setParentId(data.parent_id);
+          setDueAt(toDateTimeLocal(data.due_at));
+          setEstimateMode(
+            data.estimate_mode === "rollup" ? "rollup" : "manual"
+          );
+          setEstimateMinutes(String(data.estimate_minutes));
+          setStatus(data.status);
+          setPriority(String(data.priority));
+          setHealthMode(data.health_mode === "manual" ? "manual" : "auto");
+          setHealth(data.health);
+          setNotes(data.notes ?? "");
+          setBlockers(data.blockers);
+          setCurrentDeps(data.dependencies ?? []);
+          setDepsInput((data.dependencies ?? []).join(", "));
+          const fromList = items.find((item) => item.id === data.id);
+          if (fromList) {
+            setTagsInput(fromList.tags.map((tag) => tag.name).join(", "));
+            setAssigneesInput(
+              fromList.assignees.map((assignee) => assignee.id).join(", ")
+            );
+          }
+        })
+        .catch((err) => {
+          const message = err instanceof Error ? err.message : "Unknown error";
+          setError(message);
+        })
+        .finally(() => {
+          setLoadingDetails(false);
+        });
+      return;
+    }
+    if (mode === "edit" && !selectedItemId) {
+      resetForm();
+    }
+  }, [items, mode, selectedItemId]);
+
+  useEffect(() => {
+    if (estimateMode === "rollup") {
+      setEstimateMinutes("0");
+    }
+  }, [estimateMode]);
+
+  useEffect(() => {
+    if (type === "task" && selectedProjectId && !parentId) {
+      setParentId(selectedProjectId);
+    }
+  }, [parentId, selectedProjectId, type]);
+
+  const resetForm = () => {
+    setTitle("");
+    setDueAt("");
+    setNotes("");
+    setEstimateMinutes("0");
+    setEstimateMode("manual");
+    setPriority("0");
+    setStatus("backlog");
+    setHealthMode("auto");
+    setHealth("unknown");
+    setTagsInput("");
+    setAssigneesInput("");
+    setDepsInput("");
+    setBlockerKind("general");
+    setBlockerText("");
+    setBlockers([]);
+    setCurrentDeps([]);
+  };
+
+  const validate = () => {
+    if (!title.trim()) {
+      return "Title is required.";
+    }
+    if (!dueAt) {
+      return "Deadline is required.";
+    }
+    const dueMs = new Date(dueAt).getTime();
+    if (!Number.isFinite(dueMs)) {
+      return "Deadline must be valid.";
+    }
+    if (!estimateMode) {
+      return "Estimate mode is required.";
+    }
+    const estimate = Number(estimateMinutes);
+    if (estimateMode === "manual") {
+      if (!Number.isFinite(estimate) || estimate < 0) {
+        return "Estimate must be 0 or greater.";
+      }
+    }
+    if (type === "milestone" && !selectedProjectId) {
+      return "Select a project before adding a milestone.";
+    }
+    if (type === "task" && !selectedProjectId) {
+      return "Select a project before adding a task.";
+    }
+    if (mode === "edit" && !selectedItemId) {
+      return "Select an item to edit.";
+    }
+    return null;
+  };
+
+  const handleSubmit = async (event: FormEvent) => {
+    event.preventDefault();
+    setError(null);
+    const validationError = validate();
+    if (validationError) {
+      setError(validationError);
+      return;
+    }
+
+    const dueMs = new Date(dueAt).getTime();
+    const estimate =
+      estimateMode === "rollup" ? 0 : Math.max(0, Number(estimateMinutes));
+    const resolvedParentId =
+      type === "project"
+        ? null
+        : type === "milestone"
+          ? selectedProjectId
+          : parentId ?? selectedProjectId;
+
+    try {
+      if (mode === "create") {
+        const result = await mutate<{ id: string }>("create_item", {
+          type,
+          title: title.trim(),
+          parent_id: resolvedParentId ?? null,
+          due_at: dueMs,
+          estimate_mode: estimateMode,
+          estimate_minutes: estimate,
+          status,
+          priority: Number(priority),
+          health,
+          health_mode: healthMode,
+          notes: notes.trim() ? notes.trim() : null,
+        });
+        const itemId = result?.id;
+        if (itemId) {
+          const tags = parseCommaList(tagsInput);
+          if (tags.length > 0) {
+            await mutate("set_item_tags", { item_id: itemId, tags });
+          }
+          const assignees = parseCommaList(assigneesInput);
+          if (assignees.length > 0) {
+            await mutate("set_item_assignees", {
+              item_id: itemId,
+              assignee_ids: assignees,
+            });
+          }
+          const deps = parseCommaList(depsInput);
+          for (const depId of deps) {
+            await mutate("add_dependency", {
+              item_id: itemId,
+              depends_on_id: depId,
+            });
+          }
+        }
+        resetForm();
+      } else if (selectedItemId) {
+        await mutate("update_item_fields", {
+          id: selectedItemId,
+          fields: {
+            title: title.trim(),
+            parent_id: resolvedParentId ?? null,
+            due_at: dueMs,
+            estimate_mode: estimateMode,
+            estimate_minutes: estimate,
+            priority: Number(priority),
+            health,
+            health_mode: healthMode,
+            notes: notes.trim() ? notes.trim() : null,
+          },
+        });
+        await mutate("set_status", { id: selectedItemId, status });
+        const tags = parseCommaList(tagsInput);
+        await mutate("set_item_tags", { item_id: selectedItemId, tags });
+        const assignees = parseCommaList(assigneesInput);
+        await mutate("set_item_assignees", {
+          item_id: selectedItemId,
+          assignee_ids: assignees,
+        });
+        const desiredDeps = new Set(parseCommaList(depsInput));
+        const existingDeps = new Set(currentDeps);
+        for (const depId of desiredDeps) {
+          if (!existingDeps.has(depId)) {
+            await mutate("add_dependency", {
+              item_id: selectedItemId,
+              depends_on_id: depId,
+            });
+          }
+        }
+        for (const depId of existingDeps) {
+          if (!desiredDeps.has(depId)) {
+            await mutate("remove_dependency", {
+              item_id: selectedItemId,
+              depends_on_id: depId,
+            });
+          }
+        }
+      }
+      onRefresh();
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Unknown error";
+      setError(message);
+    }
+  };
+
+  const handleAddBlocker = async () => {
+    if (!selectedItemId || !blockerText.trim()) {
+      return;
+    }
+    try {
+      await mutate("add_blocker", {
+        item_id: selectedItemId,
+        kind: blockerKind,
+        text: blockerText,
+      });
+      const details = await query<ItemDetails | null>("getItemDetails", {
+        itemId: selectedItemId,
+      });
+      setBlockers(details?.blockers ?? []);
+      setBlockerText("");
+      onRefresh();
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Unknown error";
+      setError(message);
+    }
+  };
+
+  const handleClearBlocker = async (blockerId: string) => {
+    if (!selectedItemId) {
+      return;
+    }
+    try {
+      await mutate("clear_blocker", { blocker_id: blockerId });
+      const details = await query<ItemDetails | null>("getItemDetails", {
+        itemId: selectedItemId,
+      });
+      setBlockers(details?.blockers ?? []);
+      onRefresh();
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Unknown error";
+      setError(message);
+    }
+  };
+
+  return (
+    <form className="add-form" onSubmit={handleSubmit}>
+      <div className="form-row">
+        <label>
+          Mode
+          <select
+            value={mode}
+            onChange={(event) => {
+              const next = event.target.value as "create" | "edit";
+              setMode(next);
+              setSelectedItemId("");
+              resetForm();
+            }}
+          >
+            <option value="create">Create</option>
+            <option value="edit">Edit</option>
+          </select>
+        </label>
+        {mode === "edit" ? (
+          <label>
+            Select item
+            <select
+              value={selectedItemId}
+              onChange={(event) => setSelectedItemId(event.target.value)}
+            >
+              <option value="">Select item</option>
+              {editableItems.map((item) => (
+                <option key={item.id} value={item.id}>
+                  {item.title}
+                </option>
+              ))}
+            </select>
+          </label>
+        ) : null}
+        {mode === "edit" && loadingDetails ? (
+          <div className="list-empty">Loading item…</div>
+        ) : null}
+      </div>
+
+      <div className="form-row">
+        <label>
+          What are you adding? *
+          <select
+            value={type}
+            onChange={(event) => {
+              const next = event.target.value as ItemType;
+              setType(next);
+              if (next !== "task") {
+                setParentId(null);
+              }
+            }}
+            disabled={mode === "edit"}
+          >
+            <option value="project">Project</option>
+            <option value="milestone">Milestone</option>
+            <option value="task">Task / Subtask</option>
+          </select>
+          {mode === "edit" ? (
+            <span className="hint">Type cannot be changed</span>
+          ) : null}
+        </label>
+        <label>
+          Title *
+          <input
+            value={title}
+            onChange={(event) => setTitle(event.target.value)}
+            placeholder="New item"
+          />
+        </label>
+        <label>
+          Deadline *
+          <input
+            type="datetime-local"
+            value={dueAt}
+            onChange={(event) => setDueAt(event.target.value)}
+          />
+        </label>
+        <label>
+          Estimate mode *
+          <select
+            value={estimateMode}
+            onChange={(event) =>
+              setEstimateMode(event.target.value as "manual" | "rollup")
+            }
+          >
+            <option value="manual">Manual</option>
+            <option value="rollup">Rollup</option>
+          </select>
+        </label>
+        <label>
+          Estimate minutes {estimateMode === "manual" ? "*" : ""}
+          <input
+            type="number"
+            min={0}
+            value={estimateMode === "rollup" ? "0" : estimateMinutes}
+            onChange={(event) => setEstimateMinutes(event.target.value)}
+            disabled={estimateMode === "rollup"}
+          />
+        </label>
+        <label>
+          Estimate confidence
+          <input disabled value="Not supported yet" />
+        </label>
+        <label>
+          Notes
+          <textarea
+            rows={2}
+            value={notes}
+            onChange={(event) => setNotes(event.target.value)}
+            placeholder="Optional"
+          />
+        </label>
+      </div>
+
+      <div className="form-row">
+        <label>
+          Parent
+          {type === "milestone" ? (
+            <input
+              value={selectedProjectId ? "Selected project" : "Select a project"}
+              disabled
+            />
+          ) : (
+            <select
+              value={parentId ?? ""}
+              onChange={(event) =>
+                setParentId(event.target.value ? event.target.value : null)
+              }
+              disabled={type === "project" || !selectedProjectId}
+            >
+              <option value={selectedProjectId ?? ""}>
+                Project (ungrouped)
+              </option>
+              {taskParentOptions.map((option) => (
+                <option key={option.id} value={option.id}>
+                  {formatOptionLabel(
+                    option,
+                    parentTypeMap.get(option.parent_id ?? "") ?? null
+                  )}
+                </option>
+              ))}
+            </select>
+          )}
+        </label>
+        <label>
+          Status
+          <select value={status} onChange={(event) => setStatus(event.target.value)}>
+            <option value="backlog">backlog</option>
+            <option value="ready">ready</option>
+            <option value="in_progress">in_progress</option>
+            <option value="blocked">blocked</option>
+            <option value="review">review</option>
+            <option value="done">done</option>
+            <option value="canceled">canceled</option>
+          </select>
+        </label>
+        <label>
+          Priority
+          <select
+            value={priority}
+            onChange={(event) => setPriority(event.target.value)}
+          >
+            {Array.from({ length: 6 }, (_, index) => (
+              <option key={index} value={String(index)}>
+                {index}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label>
+          Health mode
+          <select
+            value={healthMode}
+            onChange={(event) =>
+              setHealthMode(event.target.value as "auto" | "manual")
+            }
+          >
+            <option value="auto">auto</option>
+            <option value="manual">manual</option>
+          </select>
+        </label>
+        <label>
+          Health
+          <select
+            value={health}
+            onChange={(event) => setHealth(event.target.value)}
+            disabled={healthMode !== "manual"}
+          >
+            <option value="on_track">on_track</option>
+            <option value="at_risk">at_risk</option>
+            <option value="behind">behind</option>
+            <option value="ahead">ahead</option>
+            <option value="unknown">unknown</option>
+          </select>
+        </label>
+      </div>
+
+      <div className="form-row">
+        <label>
+          Tags (comma-separated)
+          <input
+            value={tagsInput}
+            onChange={(event) => setTagsInput(event.target.value)}
+            placeholder="tag-a, tag-b"
+          />
+        </label>
+        <label>
+          Assignees (comma-separated IDs)
+          <input
+            value={assigneesInput}
+            onChange={(event) => setAssigneesInput(event.target.value)}
+            placeholder="user-1, user-2"
+          />
+        </label>
+        <label>
+          Dependencies (comma-separated IDs)
+          <input
+            value={depsInput}
+            onChange={(event) => setDepsInput(event.target.value)}
+            placeholder="item-1, item-2"
+          />
+        </label>
+      </div>
+
+      {mode === "edit" ? (
+        <div className="form-row">
+          <label>
+            Blockers
+            {blockers.length === 0 ? (
+              <div className="list-empty">No blockers</div>
+            ) : (
+              <div className="blocker-list">
+                {blockers.map((blocker) => (
+                  <div key={blocker.blocker_id} className="blocker-row">
+                    <span>
+                      {blocker.kind}: {blocker.text} {blocker.cleared_at ? "(cleared)" : ""}
+                    </span>
+                    {!blocker.cleared_at ? (
+                      <button
+                        type="button"
+                        className="button button-ghost"
+                        onClick={() => handleClearBlocker(blocker.blocker_id)}
+                      >
+                        Clear
+                      </button>
+                    ) : null}
+                  </div>
+                ))}
+              </div>
+            )}
+          </label>
+          <label>
+            Add blocker kind
+            <input
+              value={blockerKind}
+              onChange={(event) => setBlockerKind(event.target.value)}
+              placeholder="general"
+            />
+          </label>
+          <label>
+            Add blocker text
+            <input
+              value={blockerText}
+              onChange={(event) => setBlockerText(event.target.value)}
+              placeholder="Reason"
+            />
+          </label>
+          <button type="button" className="button" onClick={handleAddBlocker}>
+            Add blocker
+          </button>
+        </div>
+      ) : null}
+
+      {type === "milestone" && !selectedProjectId ? (
+        <div className="list-empty">Select a project to add a milestone.</div>
+      ) : null}
+      {error ? <div className="error">{error}</div> : null}
+      <button
+        type="submit"
+        className="button"
+        disabled={
+          (type !== "project" && !selectedProjectId) ||
+          (mode === "edit" && !selectedItemId) ||
+          loadingDetails
+        }
+      >
+        {mode === "edit" ? "Save changes" : "Create item"}
+      </button>
+    </form>
+  );
+};
+
+export default AddItemForm;

@@ -141,7 +141,7 @@ button {
   width: 100%;
   border-collapse: collapse;
   font-size: 15px;
-  min-width: 960px;
+  min-width: 1400px;
 }
 
 .list-table th,
@@ -149,6 +149,7 @@ button {
   border-bottom: 1px solid rgba(255, 255, 255, 0.3);
   padding: 8px 6px;
   text-align: left;
+  white-space: nowrap;
 }
 
 .list-table th {
@@ -176,6 +177,45 @@ button {
   gap: 4px;
   margin-left: 10px;
   vertical-align: middle;
+}
+
+.cell-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.cell-title-text {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.cell-title-controls {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.cell-actions {
+  display: inline-flex;
+  gap: 6px;
+  margin-left: 8px;
+}
+
+.cell-id {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.status-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 6px;
+  border: 1px solid rgba(255, 255, 255, 0.4);
+  border-radius: 999px;
+  font-size: 12px;
 }
 
 .drag-handle {

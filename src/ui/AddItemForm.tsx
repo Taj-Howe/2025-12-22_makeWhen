@@ -87,6 +87,8 @@ const AddItemForm: FC<AddItemFormProps> = ({
     "manual"
   );
   const [estimateMinutes, setEstimateMinutes] = useState("0");
+  const [scheduledFor, setScheduledFor] = useState("");
+  const [scheduledMinutes, setScheduledMinutes] = useState("60");
   const [status, setStatus] = useState("backlog");
   const [priority, setPriority] = useState("0");
   const [healthMode, setHealthMode] = useState<"auto" | "manual">("auto");
@@ -193,6 +195,8 @@ const AddItemForm: FC<AddItemFormProps> = ({
     setNotes("");
     setEstimateMinutes("0");
     setEstimateMode("manual");
+    setScheduledFor("");
+    setScheduledMinutes("60");
     setPriority("0");
     setStatus("backlog");
     setHealthMode("auto");
@@ -224,6 +228,12 @@ const AddItemForm: FC<AddItemFormProps> = ({
     if (estimateMode === "manual") {
       if (!Number.isFinite(estimate) || estimate < 0) {
         return "Estimate must be 0 or greater.";
+      }
+    }
+    if (scheduledFor) {
+      const scheduledValue = Number(scheduledMinutes);
+      if (!Number.isFinite(scheduledValue) || scheduledValue <= 0) {
+        return "Scheduled minutes must be greater than 0.";
       }
     }
     if (type === "milestone" && !selectedProjectId) {
@@ -274,6 +284,19 @@ const AddItemForm: FC<AddItemFormProps> = ({
         });
         const itemId = result?.id;
         if (itemId) {
+          if (scheduledFor) {
+            const startAt = new Date(scheduledFor).getTime();
+            const durationMinutes = Math.max(
+              1,
+              Math.round(Number(scheduledMinutes))
+            );
+            await mutate("create_block", {
+              item_id: itemId,
+              start_at: startAt,
+              duration_minutes: durationMinutes,
+              source: "manual",
+            });
+          }
           const tags = parseCommaList(tagsInput);
           if (tags.length > 0) {
             await mutate("set_item_tags", { item_id: itemId, tags });
@@ -309,6 +332,19 @@ const AddItemForm: FC<AddItemFormProps> = ({
             notes: notes.trim() ? notes.trim() : null,
           },
         });
+        if (scheduledFor) {
+          const startAt = new Date(scheduledFor).getTime();
+          const durationMinutes = Math.max(
+            1,
+            Math.round(Number(scheduledMinutes))
+          );
+          await mutate("create_block", {
+            item_id: selectedItemId,
+            start_at: startAt,
+            duration_minutes: durationMinutes,
+            source: "manual",
+          });
+        }
         await mutate("set_status", { id: selectedItemId, status });
         const tags = parseCommaList(tagsInput);
         await mutate("set_item_tags", { item_id: selectedItemId, tags });
@@ -492,6 +528,28 @@ const AddItemForm: FC<AddItemFormProps> = ({
             value={notes}
             onChange={(event) => setNotes(event.target.value)}
             placeholder="Optional"
+          />
+        </label>
+      </div>
+
+      <div className="form-row">
+        <label>
+          Scheduled for
+          <input
+            type="datetime-local"
+            value={scheduledFor}
+            onChange={(event) => setScheduledFor(event.target.value)}
+            placeholder="Optional"
+          />
+        </label>
+        <label>
+          Duration (minutes)
+          <input
+            type="number"
+            min={1}
+            value={scheduledMinutes}
+            onChange={(event) => setScheduledMinutes(event.target.value)}
+            disabled={!scheduledFor}
           />
         </label>
       </div>

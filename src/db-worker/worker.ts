@@ -268,6 +268,26 @@ const getTagsMap = (db: any, ids: string[]) => {
   return map;
 };
 
+const getDependenciesMap = (db: any, ids: string[]) => {
+  const map = new Map<string, string[]>();
+  if (ids.length === 0) {
+    return map;
+  }
+  const placeholders = buildPlaceholders(ids.length);
+  const rows = db.exec({
+    sql: `SELECT item_id, depends_on_id FROM dependencies WHERE item_id IN (${placeholders});`,
+    rowMode: "array",
+    returnValue: "resultRows",
+    bind: ids,
+  }) as Array<[string, string]>;
+  for (const row of rows) {
+    const list = map.get(row[0]) ?? [];
+    list.push(row[1]);
+    map.set(row[0], list);
+  }
+  return map;
+};
+
 const getDependentsCountMap = (db: any, ids: string[]) => {
   const map = new Map<string, number>();
   if (ids.length === 0) {
@@ -2552,6 +2572,7 @@ const handleRequest = async (message: RpcRequest): Promise<RpcResponse> => {
           const blockedMap = getBlockedStatusMap(dbHandle, ids);
           const assigneesMap = getAssigneesMap(dbHandle, ids);
           const tagsMap = getTagsMap(dbHandle, ids);
+          const dependenciesMap = getDependenciesMap(dbHandle, ids);
           const dependentsMap = getDependentsCountMap(dbHandle, ids);
           const activeBlockerCountMap = getActiveBlockerCountMap(dbHandle, ids);
           const unmetDepMap = getUnmetDependencyMap(dbHandle, ids);
@@ -2662,6 +2683,7 @@ const handleRequest = async (message: RpcRequest): Promise<RpcResponse> => {
               status: row[4],
               priority: row[5],
               due_at: row[6],
+              estimate_mode: row[7],
               estimate_minutes: row[8],
               notes: row[11],
               sort_order: row[13],
@@ -2690,6 +2712,7 @@ const handleRequest = async (message: RpcRequest): Promise<RpcResponse> => {
                 id: tag,
                 name: tag,
               })),
+              depends_on: dependenciesMap.get(row[0]) ?? [],
               sequence_rank: sequenceRank,
             };
           });

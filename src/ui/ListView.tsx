@@ -6,35 +6,17 @@ import {
   useState,
   type DragEvent,
   type FC,
+  type ReactNode,
 } from "react";
 import { query, mutate } from "../rpc/clientSingleton";
 
 const formatDate = (value: number) => new Date(value).toLocaleString();
 
-const formatDuration = (minutes: number) => {
-  const hours = Math.floor(minutes / 60);
-  const remaining = minutes % 60;
-  if (hours > 0 && remaining > 0) {
-    return `${hours}h ${remaining}m`;
+const shortId = (value: string | null) => {
+  if (!value) {
+    return "—";
   }
-  if (hours > 0) {
-    return `${hours}h`;
-  }
-  return `${remaining}m`;
-};
-
-const formatBlocked = (blocked: ListItem["blocked"]) => {
-  if (!blocked.is_blocked) {
-    return "No";
-  }
-  const reasons = [];
-  if (blocked.blocked_by_deps) {
-    reasons.push("deps");
-  }
-  if (blocked.blocked_by_blockers) {
-    reasons.push("blockers");
-  }
-  return `Yes (${reasons.join(" + ")})`;
+  return value.slice(0, 8);
 };
 
 const truncate = (value: string | null, max = 40) => {
@@ -56,18 +38,41 @@ type ListItem = {
   project_id: string;
   sort_order: number;
   due_at: number;
+  estimate_mode?: string;
   status: string;
   priority: number;
   estimate_minutes: number;
+  schedule: {
+    has_blocks: boolean;
+    scheduled_minutes_total: number;
+    schedule_start_at: number | null;
+    schedule_end_at: number | null;
+  };
+  depends_on: string[];
   notes: string | null;
   blocked: {
     is_blocked: boolean;
     blocked_by_deps: boolean;
     blocked_by_blockers: boolean;
+    active_blocker_count: number;
+    unmet_dependency_count: number;
   };
   assignees: { id: string; name: string | null }[];
   tags: { id: string; name: string }[];
   health: string;
+  health_mode?: string;
+};
+
+type Column = {
+  key: string;
+  label: string;
+  minWidth: number;
+  render: (
+    item: ListItem,
+    indent: number,
+    dragHandle: ReactNode | null,
+    actions?: ReactNode
+  ) => ReactNode;
 };
 
 type ListViewProps = {
@@ -91,8 +96,150 @@ const ListView: FC<ListViewProps> = ({
   const [dragOver, setDragOver] = useState<{
     itemId: string;
     groupKey: string;
-    position: "before" | "end";
+    position: "before" | "end" | "into";
   } | null>(null);
+
+  const columns = useMemo<Column[]>(
+    () => [
+      {
+        key: "id",
+        label: "ID",
+        minWidth: 120,
+        render: (item: ListItem) => (
+          <span className="cell-id">
+            {shortId(item.id)}
+            <button
+              type="button"
+              className="button button-ghost"
+              onClick={() => navigator.clipboard?.writeText(item.id)}
+              title="Copy ID"
+            >
+              Copy
+            </button>
+          </span>
+        ),
+      },
+      {
+        key: "type",
+        label: "Type",
+        minWidth: 110,
+        render: (item: ListItem) => item.type ?? "—",
+      },
+      {
+        key: "title",
+        label: "Title",
+        minWidth: 220,
+        render: (
+          item: ListItem,
+          indent: number,
+          dragHandle: ReactNode,
+          actions?: ReactNode
+        ) => (
+          <div className="cell-title" style={{ paddingLeft: `${indent}px` }}>
+            <span className="cell-title-text">
+              {dragHandle}
+              {item.title || "—"}
+            </span>
+            {actions}
+          </div>
+        ),
+      },
+      {
+        key: "parent_id",
+        label: "Parent ID",
+        minWidth: 120,
+        render: (item: ListItem) => shortId(item.parent_id),
+      },
+      {
+        key: "assignees",
+        label: "Assignees",
+        minWidth: 160,
+        render: (item: ListItem) =>
+          item.assignees.length > 0
+            ? item.assignees.map((assignee) => assignee.id).join(", ")
+            : "unassigned",
+      },
+      {
+        key: "status",
+        label: "Status",
+        minWidth: 120,
+        render: (item: ListItem) => (
+          <span className="status-badge">{item.status || "—"}</span>
+        ),
+      },
+      {
+        key: "priority",
+        label: "Priority",
+        minWidth: 90,
+        render: (item: ListItem) =>
+          Number.isFinite(item.priority) ? item.priority : 0,
+      },
+      {
+        key: "due_at",
+        label: "Due At",
+        minWidth: 160,
+        render: (item: ListItem) =>
+          item.due_at ? formatDate(item.due_at) : "—",
+      },
+      {
+        key: "estimate_mode",
+        label: "Estimate Mode",
+        minWidth: 140,
+        render: (item: ListItem) =>
+          item.estimate_mode ??
+          (item.type === "task" ? "manual" : "rollup"),
+      },
+      {
+        key: "estimate_minutes",
+        label: "Estimate (min)",
+        minWidth: 140,
+        render: (item: ListItem) =>
+          Number.isFinite(item.estimate_minutes) ? item.estimate_minutes : 0,
+      },
+      {
+        key: "depends_on",
+        label: "Depends On",
+        minWidth: 160,
+        render: (item: ListItem) =>
+          item.depends_on.length > 0
+            ? item.depends_on.map((id) => shortId(id)).join(", ")
+            : "[]",
+      },
+      {
+        key: "blockers",
+        label: "Blockers",
+        minWidth: 120,
+        render: (item: ListItem) => {
+          // TODO: listItems does not include blocker objects yet; show active count.
+          const count = item.blocked?.active_blocker_count ?? 0;
+          return count > 0 ? String(count) : "0";
+        },
+      },
+      {
+        key: "tags",
+        label: "Tags",
+        minWidth: 160,
+        render: (item: ListItem) =>
+          item.tags.length > 0
+            ? item.tags.map((tag) => tag.name).join(", ")
+            : "[]",
+      },
+      {
+        key: "notes",
+        label: "Notes",
+        minWidth: 200,
+        render: (item: ListItem) => truncate(item.notes, 60),
+      },
+      {
+        key: "health",
+        label: "Health (mode)",
+        minWidth: 160,
+        render: (item: ListItem) =>
+          `${item.health ?? "unknown"} (${item.health_mode ?? "auto"})`,
+      },
+    ],
+    []
+  );
 
   const loadItems = useCallback(async () => {
     if (!selectedProjectId) {
@@ -261,6 +408,43 @@ const ListView: FC<ListViewProps> = ({
     }
   };
 
+  const canMoveTaskToParent = useCallback(
+    (itemId: string, targetParentId: string | null) => {
+      const item = itemById.get(itemId);
+      if (!item || item.type !== "task") {
+        return false;
+      }
+      const parentType = item.parent_id
+        ? parentTypeMap.get(item.parent_id)
+        : null;
+      if (parentType === "task") {
+        return false;
+      }
+      if (item.parent_id === targetParentId) {
+        return false;
+      }
+      return true;
+    },
+    [itemById, parentTypeMap]
+  );
+
+  const handleMoveToParent = async (
+    itemId: string,
+    targetParentId: string | null
+  ) => {
+    setError(null);
+    try {
+      await mutate("update_item_fields", {
+        id: itemId,
+        fields: { parent_id: targetParentId },
+      });
+      onRefresh();
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Unknown error";
+      setError(message);
+    }
+  };
+
   const handleDragStart = (itemId: string, groupKey: string) => (
     event: DragEvent
   ) => {
@@ -282,6 +466,60 @@ const ListView: FC<ListViewProps> = ({
     }
     event.preventDefault();
     setDragOver({ itemId, groupKey, position: "before" });
+  };
+
+  const handleDragOverGroup = (
+    targetParentId: string | null,
+    groupKey: string
+  ) => (event: DragEvent) => {
+    if (!dragging) {
+      return;
+    }
+    if (!canMoveTaskToParent(dragging.itemId, targetParentId)) {
+      return;
+    }
+    event.preventDefault();
+    setDragOver({
+      itemId: targetParentId ?? "ungrouped",
+      groupKey,
+      position: "into",
+    });
+  };
+
+  const handleDropOnGroup = (targetParentId: string | null) => (
+    event: DragEvent
+  ) => {
+    if (!dragging) {
+      return;
+    }
+    if (!canMoveTaskToParent(dragging.itemId, targetParentId)) {
+      return;
+    }
+    event.preventDefault();
+    void handleMoveToParent(dragging.itemId, targetParentId);
+    setDragOver(null);
+  };
+
+  const handleMilestoneDragOver = (milestoneId: string) => (event: DragEvent) => {
+    if (!dragging) {
+      return;
+    }
+    if (dragging.groupKey === "milestones") {
+      handleDragOverRow(milestoneId, "milestones")(event);
+      return;
+    }
+    handleDragOverGroup(milestoneId, `move-target:${milestoneId}`)(event);
+  };
+
+  const handleMilestoneDrop = (milestoneId: string) => (event: DragEvent) => {
+    if (!dragging) {
+      return;
+    }
+    if (dragging.groupKey === "milestones") {
+      handleDropBefore(milestoneId, "milestones")(event);
+      return;
+    }
+    handleDropOnGroup(milestoneId)(event);
   };
 
   const handleDropBefore = (itemId: string, groupKey: string) => (
@@ -371,95 +609,111 @@ const ListView: FC<ListViewProps> = ({
         <table className="list-table">
           <thead>
             <tr>
-              <th>Title</th>
-              <th>Type</th>
-              <th>Status</th>
-              <th>Due</th>
-              <th>Priority</th>
-              <th>Estimate</th>
-              <th>Blocked</th>
-              <th>Assignees</th>
-              <th>Tags</th>
-              <th>Health</th>
-              <th>Notes</th>
-              <th></th>
+              {columns.map((column) => (
+                <th key={column.key} style={{ minWidth: column.minWidth }}>
+                  {column.label}
+                </th>
+              ))}
             </tr>
           </thead>
           <tbody>
             {!loading && milestones.length === 0 && ungroupedTasks.length === 0 ? (
               <tr>
-                <td colSpan={12} className="list-empty">
-                  No items yet
-                </td>
-              </tr>
-            ) : (
-              <>
+                  <td colSpan={columns.length} className="list-empty">
+                    No items yet
+                  </td>
+                </tr>
+              ) : (
+                <>
                 {milestones.map((milestone, milestoneIndex) => {
                   const isCollapsed = collapsedMilestones.has(milestone.id);
                   const milestoneTasks = tasksUnderMilestone.get(milestone.id) ?? [];
                   const groupKey = `milestone:${milestone.id}`;
+                  const milestoneActions = (
+                    <span className="cell-actions">
+                      {renderMoveButtons(
+                        milestone.id,
+                        milestoneIndex,
+                        milestones.length
+                      )}
+                      <button
+                        type="button"
+                        className="button button-ghost"
+                        onClick={() => handleDelete(milestone)}
+                      >
+                        Delete
+                      </button>
+                    </span>
+                  );
+                  const milestoneDragHandle = (
+                    <span className="cell-title-controls">
+                      {renderDragHandle(milestone.id, "milestones")}
+                      <button
+                        type="button"
+                        className="group-toggle"
+                        onClick={() =>
+                          setCollapsedMilestones((prev) => {
+                            const next = new Set(prev);
+                            if (next.has(milestone.id)) {
+                              next.delete(milestone.id);
+                            } else {
+                              next.add(milestone.id);
+                            }
+                            return next;
+                          })
+                        }
+                      >
+                        {isCollapsed ? "▶" : "▼"}
+                      </button>
+                    </span>
+                  );
                   return (
                     <Fragment key={milestone.id}>
                       <tr
                         className={
-                          dragOver?.itemId === milestone.id &&
-                          dragOver.groupKey === "milestones"
+                          dragOver &&
+                          ((dragOver.groupKey === "milestones" &&
+                            dragOver.itemId === milestone.id) ||
+                            dragOver.groupKey === `move-target:${milestone.id}`)
                             ? "group-row drag-over"
                             : "group-row"
                         }
-                        onDragOver={handleDragOverRow(milestone.id, "milestones")}
-                        onDrop={handleDropBefore(milestone.id, "milestones")}
+                        onDragOver={handleMilestoneDragOver(milestone.id)}
+                        onDrop={handleMilestoneDrop(milestone.id)}
                       >
-                        <td colSpan={12}>
-                          {renderDragHandle(milestone.id, "milestones")}
-                          <button
-                            type="button"
-                            className="group-toggle"
-                            onClick={() =>
-                              setCollapsedMilestones((prev) => {
-                                const next = new Set(prev);
-                                if (next.has(milestone.id)) {
-                                  next.delete(milestone.id);
-                                } else {
-                                  next.add(milestone.id);
-                                }
-                                return next;
-                              })
-                            }
-                          >
-                            {isCollapsed ? "▶" : "▼"} {milestone.title}
-                          </button>
-                          {renderMoveButtons(
-                            milestone.id,
-                            milestoneIndex,
-                            milestones.length
-                          )}
-                          <button
-                            type="button"
-                            className="button button-ghost"
-                            onClick={() => handleDelete(milestone)}
-                          >
-                            Delete
-                          </button>
-                        </td>
+                        {columns.map((column) => (
+                          <td key={`${milestone.id}-${column.key}`}>
+                            {column.key === "title"
+                              ? column.render(
+                                  milestone,
+                                  milestone.depth * 16,
+                                  milestoneDragHandle,
+                                  milestoneActions
+                                )
+                              : column.render(milestone, 0, null)}
+                          </td>
+                        ))}
                       </tr>
                       {isCollapsed
                         ? null
                         : milestoneTasks.map((item, itemIndex) => {
-                            const parentType = item.parent_id
-                              ? parentTypeMap.get(item.parent_id)
-                              : null;
-                            const typeLabel =
-                              parentType === "task" ? "Subtask" : "Task";
-                            const assignees = item.assignees.length
-                              ? item.assignees
-                                  .map((assignee) => assignee.id)
-                                  .join(", ")
-                              : "—";
-                            const tags = item.tags.length
-                              ? item.tags.map((tag) => tag.name).join(", ")
-                              : "—";
                             const children = taskChildren.get(item.id) ?? [];
+                            const actions = (
+                              <span className="cell-actions">
+                                {renderMoveButtons(
+                                  item.id,
+                                  itemIndex,
+                                  milestoneTasks.length
+                                )}
+                                <button
+                                  type="button"
+                                  className="button button-ghost"
+                                  onClick={() => handleDelete(item)}
+                                >
+                                  Delete
+                                </button>
+                              </span>
+                            );
                             return (
                               <Fragment key={item.id}>
                                 <tr
@@ -472,49 +726,37 @@ const ListView: FC<ListViewProps> = ({
                                   onDragOver={handleDragOverRow(item.id, groupKey)}
                                   onDrop={handleDropBefore(item.id, groupKey)}
                                 >
-                                  <td>
-                                    <span
-                                      style={{ paddingLeft: `${item.depth * 16}px` }}
-                                    >
-                                      {renderDragHandle(item.id, groupKey)}
-                                      {item.title}
-                                    </span>
-                                  </td>
-                                  <td>{typeLabel}</td>
-                                  <td>{item.status}</td>
-                                  <td>{formatDate(item.due_at)}</td>
-                                  <td>{item.priority}</td>
-                                  <td>{formatDuration(item.estimate_minutes)}</td>
-                                  <td>{formatBlocked(item.blocked)}</td>
-                                  <td>{assignees}</td>
-                                  <td>{tags}</td>
-                                  <td>{item.health}</td>
-                                  <td>{truncate(item.notes)}</td>
-                                  <td>
-                                    {renderMoveButtons(
-                                      item.id,
-                                      itemIndex,
-                                      milestoneTasks.length
-                                    )}
-                                    <button
-                                      type="button"
-                                      className="button button-ghost"
-                                      onClick={() => handleDelete(item)}
-                                    >
-                                      Delete
-                                    </button>
-                                  </td>
+                                  {columns.map((column) => (
+                                    <td key={`${item.id}-${column.key}`}>
+                                      {column.key === "title"
+                                        ? column.render(
+                                            item,
+                                            item.depth * 16,
+                                            renderDragHandle(item.id, groupKey),
+                                            actions
+                                          )
+                                        : column.render(item, 0, null)}
+                                    </td>
+                                  ))}
                                 </tr>
                                 {children.map((child, childIndex) => {
                                   const childGroupKey = `task:${item.id}`;
-                                  const childAssignees = child.assignees.length
-                                    ? child.assignees
-                                        .map((assignee) => assignee.id)
-                                        .join(", ")
-                                    : "—";
-                                  const childTags = child.tags.length
-                                    ? child.tags.map((tag) => tag.name).join(", ")
-                                    : "—";
+                                  const childActions = (
+                                    <span className="cell-actions">
+                                      {renderMoveButtons(
+                                        child.id,
+                                        childIndex,
+                                        children.length
+                                      )}
+                                      <button
+                                        type="button"
+                                        className="button button-ghost"
+                                        onClick={() => handleDelete(child)}
+                                      >
+                                        Delete
+                                      </button>
+                                    </span>
+                                  );
                                   return (
                                     <tr
                                       key={child.id}
@@ -530,46 +772,27 @@ const ListView: FC<ListViewProps> = ({
                                       )}
                                       onDrop={handleDropBefore(child.id, childGroupKey)}
                                     >
-                                      <td>
-                                        <span
-                                          style={{
-                                            paddingLeft: `${child.depth * 16}px`,
-                                          }}
-                                        >
-                                          {renderDragHandle(child.id, childGroupKey)}
-                                          {child.title}
-                                        </span>
-                                      </td>
-                                      <td>Subtask</td>
-                                      <td>{child.status}</td>
-                                      <td>{formatDate(child.due_at)}</td>
-                                      <td>{child.priority}</td>
-                                      <td>{formatDuration(child.estimate_minutes)}</td>
-                                      <td>{formatBlocked(child.blocked)}</td>
-                                      <td>{childAssignees}</td>
-                                      <td>{childTags}</td>
-                                      <td>{child.health}</td>
-                                      <td>{truncate(child.notes)}</td>
-                                      <td>
-                                        {renderMoveButtons(
-                                          child.id,
-                                          childIndex,
-                                          children.length
-                                        )}
-                                        <button
-                                          type="button"
-                                          className="button button-ghost"
-                                          onClick={() => handleDelete(child)}
-                                        >
-                                          Delete
-                                        </button>
-                                      </td>
+                                      {columns.map((column) => (
+                                        <td key={`${child.id}-${column.key}`}>
+                                          {column.key === "title"
+                                            ? column.render(
+                                                child,
+                                                child.depth * 16,
+                                                renderDragHandle(
+                                                  child.id,
+                                                  childGroupKey
+                                                ),
+                                                childActions
+                                              )
+                                            : column.render(child, 0, null)}
+                                        </td>
+                                      ))}
                                     </tr>
                                   );
                                 })}
                                 {children.length > 0 ? (
                                   <tr className="drop-row">
-                                    <td colSpan={12}>
+                                    <td colSpan={columns.length}>
                                       <div
                                         className={
                                           dragOver?.position === "end" &&
@@ -605,7 +828,7 @@ const ListView: FC<ListViewProps> = ({
                           })}
                       {milestoneTasks.length > 0 ? (
                         <tr className="drop-row">
-                          <td colSpan={12}>
+                          <td colSpan={columns.length}>
                             <div
                               className={
                                 dragOver?.position === "end" &&
@@ -638,7 +861,7 @@ const ListView: FC<ListViewProps> = ({
                 })}
                 {milestones.length > 0 ? (
                   <tr className="drop-row">
-                    <td colSpan={12}>
+                    <td colSpan={columns.length}>
                       <div
                         className={
                           dragOver?.position === "end" &&
@@ -666,8 +889,19 @@ const ListView: FC<ListViewProps> = ({
                     </td>
                   </tr>
                 ) : null}
-                <tr className="group-row">
-                  <td colSpan={12}>
+                <tr
+                  className={
+                    dragOver?.groupKey === "move-target:ungrouped"
+                      ? "group-row drag-over"
+                      : "group-row"
+                  }
+                  onDragOver={handleDragOverGroup(
+                    selectedProjectId,
+                    "move-target:ungrouped"
+                  )}
+                  onDrop={handleDropOnGroup(selectedProjectId)}
+                >
+                  <td colSpan={columns.length}>
                     <button
                       type="button"
                       className="group-toggle"
@@ -680,19 +914,24 @@ const ListView: FC<ListViewProps> = ({
                 {collapsedUngrouped
                   ? null
                   : ungroupedTasks.map((item, itemIndex) => {
-                      const parentType = item.parent_id
-                        ? parentTypeMap.get(item.parent_id)
-                        : null;
-                      const typeLabel =
-                        parentType === "task" ? "Subtask" : "Task";
-                      const assignees = item.assignees.length
-                        ? item.assignees.map((assignee) => assignee.id).join(", ")
-                        : "—";
-                      const tags = item.tags.length
-                        ? item.tags.map((tag) => tag.name).join(", ")
-                        : "—";
                       const children = taskChildren.get(item.id) ?? [];
                       const groupKey = "ungrouped";
+                      const actions = (
+                        <span className="cell-actions">
+                          {renderMoveButtons(
+                            item.id,
+                            itemIndex,
+                            ungroupedTasks.length
+                          )}
+                          <button
+                            type="button"
+                            className="button button-ghost"
+                            onClick={() => handleDelete(item)}
+                          >
+                            Delete
+                          </button>
+                        </span>
+                      );
                       return (
                         <Fragment key={item.id}>
                           <tr
@@ -705,47 +944,37 @@ const ListView: FC<ListViewProps> = ({
                             onDragOver={handleDragOverRow(item.id, groupKey)}
                             onDrop={handleDropBefore(item.id, groupKey)}
                           >
-                            <td>
-                              <span style={{ paddingLeft: `${item.depth * 16}px` }}>
-                                {renderDragHandle(item.id, groupKey)}
-                                {item.title}
-                              </span>
-                            </td>
-                            <td>{typeLabel}</td>
-                            <td>{item.status}</td>
-                            <td>{formatDate(item.due_at)}</td>
-                            <td>{item.priority}</td>
-                            <td>{formatDuration(item.estimate_minutes)}</td>
-                            <td>{formatBlocked(item.blocked)}</td>
-                            <td>{assignees}</td>
-                            <td>{tags}</td>
-                            <td>{item.health}</td>
-                            <td>{truncate(item.notes)}</td>
-                            <td>
-                              {renderMoveButtons(
-                                item.id,
-                                itemIndex,
-                                ungroupedTasks.length
-                              )}
-                              <button
-                                type="button"
-                                className="button button-ghost"
-                                onClick={() => handleDelete(item)}
-                              >
-                                Delete
-                              </button>
-                            </td>
+                            {columns.map((column) => (
+                              <td key={`${item.id}-${column.key}`}>
+                                {column.key === "title"
+                                  ? column.render(
+                                      item,
+                                      item.depth * 16,
+                                      renderDragHandle(item.id, groupKey),
+                                      actions
+                                    )
+                                  : column.render(item, 0, null)}
+                              </td>
+                            ))}
                           </tr>
                           {children.map((child, childIndex) => {
                             const childGroupKey = `task:${item.id}`;
-                            const childAssignees = child.assignees.length
-                              ? child.assignees
-                                  .map((assignee) => assignee.id)
-                                  .join(", ")
-                              : "—";
-                            const childTags = child.tags.length
-                              ? child.tags.map((tag) => tag.name).join(", ")
-                              : "—";
+                            const childActions = (
+                              <span className="cell-actions">
+                                {renderMoveButtons(
+                                  child.id,
+                                  childIndex,
+                                  children.length
+                                )}
+                                <button
+                                  type="button"
+                                  className="button button-ghost"
+                                  onClick={() => handleDelete(child)}
+                                >
+                                  Delete
+                                </button>
+                              </span>
+                            );
                             return (
                               <tr
                                 key={child.id}
@@ -758,44 +987,27 @@ const ListView: FC<ListViewProps> = ({
                                 onDragOver={handleDragOverRow(child.id, childGroupKey)}
                                 onDrop={handleDropBefore(child.id, childGroupKey)}
                               >
-                                <td>
-                                  <span
-                                    style={{ paddingLeft: `${child.depth * 16}px` }}
-                                  >
-                                    {renderDragHandle(child.id, childGroupKey)}
-                                    {child.title}
-                                  </span>
-                                </td>
-                                <td>Subtask</td>
-                                <td>{child.status}</td>
-                                <td>{formatDate(child.due_at)}</td>
-                                <td>{child.priority}</td>
-                                <td>{formatDuration(child.estimate_minutes)}</td>
-                                <td>{formatBlocked(child.blocked)}</td>
-                                <td>{childAssignees}</td>
-                                <td>{childTags}</td>
-                                <td>{child.health}</td>
-                                <td>{truncate(child.notes)}</td>
-                                <td>
-                                  {renderMoveButtons(
-                                    child.id,
-                                    childIndex,
-                                    children.length
-                                  )}
-                                  <button
-                                    type="button"
-                                    className="button button-ghost"
-                                    onClick={() => handleDelete(child)}
-                                  >
-                                    Delete
-                                  </button>
-                                </td>
+                                {columns.map((column) => (
+                                  <td key={`${child.id}-${column.key}`}>
+                                    {column.key === "title"
+                                      ? column.render(
+                                          child,
+                                          child.depth * 16,
+                                          renderDragHandle(
+                                            child.id,
+                                            childGroupKey
+                                          ),
+                                          childActions
+                                        )
+                                      : column.render(child, 0, null)}
+                                  </td>
+                                ))}
                               </tr>
                             );
                           })}
                           {children.length > 0 ? (
                             <tr className="drop-row">
-                              <td colSpan={12}>
+                              <td colSpan={columns.length}>
                                 <div
                                   className={
                                     dragOver?.position === "end" &&
@@ -828,11 +1040,10 @@ const ListView: FC<ListViewProps> = ({
                           ) : null}
                         </Fragment>
                       );
-                    })
-                }
+                    })}
                 {collapsedUngrouped || ungroupedTasks.length === 0 ? null : (
                   <tr className="drop-row">
-                    <td colSpan={12}>
+                    <td colSpan={columns.length}>
                       <div
                         className={
                           dragOver?.position === "end" &&

@@ -1,0 +1,37 @@
+:root {
+  --radius: 10px;
+}
+
+[data-mode="dark"] {
+  --bg: var(--neutral-1);
+  --panel: var(--neutral-2);
+  --panel2: var(--neutral-3);
+  --text: var(--neutral-12);
+  --mutedText: var(--neutral-11);
+  --border: var(--neutral-6);
+  --borderHover: var(--neutral-7);
+  --accent: var(--accent-9);
+  --accentText: var(--accent-11);
+  --accentBorder: var(--accent-7);
+  --danger: var(--danger-9);
+  --warning: var(--warning-9);
+  --success: var(--success-9);
+  --shadowColor: var(--neutral-12);
+}
+
+[data-mode="light"] {
+  --bg: var(--neutral-1);
+  --panel: var(--neutral-2);
+  --panel2: var(--neutral-3);
+  --text: var(--neutral-12);
+  --mutedText: var(--neutral-11);
+  --border: var(--neutral-6);
+  --borderHover: var(--neutral-7);
+  --accent: var(--accent-9);
+  --accentText: var(--accent-11);
+  --accentBorder: var(--accent-7);
+  --danger: var(--danger-9);
+  --warning: var(--warning-9);
+  --success: var(--success-9);
+  --shadowColor: var(--neutral-12);
+}

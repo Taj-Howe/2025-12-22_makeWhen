@@ -1,11 +1,14 @@
 import { useCallback, useEffect, useMemo, useState, type FC } from "react";
 import { Navigate, Route, Routes, useNavigate, useParams } from "react-router-dom";
 import "./app.css";
+import "./theme/radix-colors.css";
+import "./theme/semantic-tokens.css";
 import SidebarProjects from "./SidebarProjects";
 import { mutate, query } from "../rpc/clientSingleton";
 import { ProjectScopeProvider, useProjectScope } from "./ProjectScopeProvider";
 import ProjectListView from "./views/ProjectListView";
 import ProjectPlaceholderView from "./views/ProjectPlaceholderView";
+import ThemeSettings from "./ThemeSettings";
 import type { QueryFilters, Scope } from "../rpc/types";
 
 type ItemTraits = {
@@ -149,14 +152,17 @@ const ProjectRoute: FC<ProjectRouteProps> = ({ view, children }) => {
             <h1 className="title">
               {selectedProject ? selectedProject.title : "Select a project"}
             </h1>
-            <button
-              type="button"
-              className="button"
-              onClick={handleDeleteProject}
-              disabled={!projectId}
-            >
-              Delete Project
-            </button>
+            <div className="title-actions">
+              <ThemeSettings />
+              <button
+                type="button"
+                className="button"
+                onClick={handleDeleteProject}
+                disabled={!projectId}
+              >
+                Delete Project
+              </button>
+            </div>
           </div>
           {deleteError ? <div className="error">{deleteError}</div> : null}
           {error ? <div className="error">{error}</div> : null}

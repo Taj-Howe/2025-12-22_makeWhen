@@ -152,6 +152,7 @@ export async function runRpcSmoke() {
     assert(typeof blockId === "string", "create_block should return block_id");
 
     const blocks = await query("listCalendarBlocks", {
+      scope: { kind: "project", id: projectId },
       startAt: windowStart,
       endAt: windowEnd,
     });
@@ -166,7 +167,8 @@ export async function runRpcSmoke() {
 
     // --- Check 4: listItems includes sequence_rank (and sorting by it behaves)
     const listItems = await query("listItems", {
-      projectId,
+      scope: { kind: "project", id: projectId },
+      filters: {},
       includeDone: true,
       includeCanceled: true,
       orderBy: "sequence_rank",
@@ -181,7 +183,7 @@ export async function runRpcSmoke() {
     // --- Check 5: execution queue ordering favors overdue/unblocked items
     // (Queue semantics unchanged: only 'ready', unblocked, and with *no blocks at all*.)
     const exec = await query("listExecution", {
-      projectId,
+      scope: { kind: "project", id: projectId },
       startAt: windowStart,
       endAt: windowEnd,
     });

@@ -1,9 +1,10 @@
 import sqlite3InitModule from "@sqlite.org/sqlite-wasm";
-import type { RpcRequest, RpcResponse } from "../rpc/types";
+import type { RpcRequest, RpcResponse, Scope, QueryFilters } from "../rpc/types";
 import initSql from "./migrations/0001_init.sql?raw";
 import blockersKindTextSql from "./migrations/0002_blockers_kind_text.sql?raw";
 import runningTimersSql from "./migrations/0003_running_timers.sql?raw";
 import sortOrderSql from "./migrations/0004_sort_order.sql?raw";
+import projectIdSql from "./migrations/0005_project_id.sql?raw";
 
 const ctx: DedicatedWorkerGlobalScope = self as DedicatedWorkerGlobalScope;
 
@@ -63,6 +64,83 @@ const dbState: DbState = {
 let initPromise: Promise<void> | null = null;
 let dbHandle: any = null;
 
+const resolveScope = (args: Record<string, unknown>): Scope | null => {
+  const scope = args.scope;
+  if (scope && typeof scope === "object") {
+    const scoped = scope as { kind?: unknown; id?: unknown };
+    if (typeof scoped.kind === "string" && typeof scoped.id === "string") {
+      return scoped as Scope;
+    }
+  }
+  if (typeof args.projectId === "string") {
+    return { kind: "project", id: args.projectId };
+  }
+  return null;
+};
+
+const resolveFilters = (args: Record<string, unknown>): QueryFilters => {
+  const filters = args.filters;
+  if (!filters || typeof filters !== "object") {
+    return {};
+  }
+  return filters as QueryFilters;
+};
+
+const ensureProjectScope = (scope: Scope | null) => {
+  if (!scope) {
+    return null;
+  }
+  if (scope.kind !== "project") {
+    throw new Error(`Scope kind not implemented: ${scope.kind}`);
+  }
+  return scope.id;
+};
+
+const backfillProjectIds = (db: any) => {
+  db.exec("UPDATE items SET project_id = id WHERE type = 'project';");
+  db.exec({
+    sql: `WITH RECURSIVE chain(id, parent_id, project_id) AS (
+      SELECT id, parent_id,
+        CASE WHEN type = 'project' THEN id ELSE NULL END
+      FROM items
+      UNION ALL
+      SELECT c.id, p.parent_id,
+        COALESCE(c.project_id, CASE WHEN p.type = 'project' THEN p.id ELSE p.project_id END)
+      FROM chain c
+      JOIN items p ON p.id = c.parent_id
+      WHERE c.project_id IS NULL AND c.parent_id IS NOT NULL
+    )
+    UPDATE items
+    SET project_id = (
+      SELECT chain.project_id
+      FROM chain
+      WHERE chain.id = items.id AND chain.project_id IS NOT NULL
+      LIMIT 1
+    )
+    WHERE project_id IS NULL;`,
+  });
+};
+
+const resolveProjectIdFromParent = (db: any, parentId: string) => {
+  const rows = db.exec({
+    sql: "SELECT id, type, project_id FROM items WHERE id = ? LIMIT 1;",
+    rowMode: "array",
+    returnValue: "resultRows",
+    bind: [parentId],
+  }) as Array<[string, string, string | null]>;
+  if (rows.length === 0) {
+    throw new Error("parent item not found");
+  }
+  const [id, type, projectId] = rows[0];
+  if (type === "project") {
+    return id;
+  }
+  if (projectId) {
+    return projectId;
+  }
+  throw new Error("parent project_id not found");
+};
+
 const migrations = [
   {
     version: 1,
@@ -79,6 +157,10 @@ const migrations = [
   {
     version: 4,
     sql: sortOrderSql,
+  },
+  {
+    version: 5,
+    sql: projectIdSql,
   },
 ];
 
@@ -472,7 +554,7 @@ const getSettings = (db: any) => {
 
 const exportData = (db: any) => {
   const itemsRows = db.exec({
-    sql: "SELECT id, type, title, parent_id, status, priority, due_at, estimate_mode, estimate_minutes, health, health_mode, notes, created_at, updated_at FROM items;",
+    sql: "SELECT id, type, title, parent_id, project_id, status, priority, due_at, estimate_mode, estimate_minutes, health, health_mode, notes, created_at, updated_at, sort_order FROM items;",
     rowMode: "array",
     returnValue: "resultRows",
   }) as Array<
@@ -481,6 +563,7 @@ const exportData = (db: any) => {
       string,
       string,
       string | null,
+      string | null,
       string,
       number,
       number,
@@ -489,6 +572,7 @@ const exportData = (db: any) => {
       string,
       string,
       string | null,
+      number,
       number,
       number
     ]
@@ -548,16 +632,18 @@ const exportData = (db: any) => {
       type: row[1],
       title: row[2],
       parent_id: row[3],
-      status: row[4],
-      priority: row[5],
-      due_at: row[6],
-      estimate_mode: row[7],
-      estimate_minutes: row[8],
-      health: row[9],
-      health_mode: row[10],
-      notes: row[11],
-      created_at: row[12],
-      updated_at: row[13],
+      project_id: row[4],
+      status: row[5],
+      priority: row[6],
+      due_at: row[7],
+      estimate_mode: row[8],
+      estimate_minutes: row[9],
+      health: row[10],
+      health_mode: row[11],
+      notes: row[12],
+      created_at: row[13],
+      updated_at: row[14],
+      sort_order: row[15],
     })),
     dependencies: dependencyRows.map((row) => ({
       item_id: row[0],
@@ -787,6 +873,23 @@ const handleMutate = (envelope: MutateEnvelope): MutateResult => {
             typeof args.parent_id === "string" ? args.parent_id : null;
           const id = crypto.randomUUID();
           const now = Date.now();
+          let projectId: string;
+          if (type === "project") {
+            if (parentId) {
+              result = { ok: false, error: "project parent_id must be null" };
+              break;
+            }
+            projectId = id;
+          } else {
+            if (!parentId) {
+              result = {
+                ok: false,
+                error: "parent_id required for non-project items",
+              };
+              break;
+            }
+            projectId = resolveProjectIdFromParent(dbHandle, parentId);
+          }
           const sortOrderRows = dbHandle.exec({
             sql: "SELECT parent_id, MAX(sort_order) FROM items WHERE parent_id IS ?;",
             rowMode: "array",
@@ -815,13 +918,14 @@ const handleMutate = (envelope: MutateEnvelope): MutateResult => {
           const notes = typeof args.notes === "string" ? args.notes : null;
 
           dbHandle.exec(
-            "INSERT INTO items (id, type, title, parent_id, status, priority, due_at, estimate_mode, estimate_minutes, health, health_mode, notes, created_at, updated_at, sort_order) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);",
+            "INSERT INTO items (id, type, title, parent_id, project_id, status, priority, due_at, estimate_mode, estimate_minutes, health, health_mode, notes, created_at, updated_at, sort_order) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);",
             {
               bind: [
                 id,
                 type,
                 title,
                 parentId,
+                projectId,
                 status,
                 priority,
                 dueAt,
@@ -851,6 +955,9 @@ const handleMutate = (envelope: MutateEnvelope): MutateResult => {
             result = { ok: false, error: "fields must be an object" };
             break;
           }
+          if (Object.prototype.hasOwnProperty.call(fields, "project_id")) {
+            delete fields.project_id;
+          }
           const allowed = new Set([
             "title",
             "parent_id",
@@ -862,6 +969,7 @@ const handleMutate = (envelope: MutateEnvelope): MutateResult => {
             "health_mode",
             "notes",
             "sort_order",
+            "project_id",
           ]);
           const numericFields = new Set([
             "due_at",
@@ -871,6 +979,49 @@ const handleMutate = (envelope: MutateEnvelope): MutateResult => {
           ]);
           const updates: string[] = [];
           const bind: unknown[] = [];
+          const parentIdProvided = Object.prototype.hasOwnProperty.call(
+            fields,
+            "parent_id"
+          );
+          if (parentIdProvided) {
+            const parentValue = fields.parent_id;
+            const nextParentId =
+              typeof parentValue === "string"
+                ? parentValue
+                : parentValue === null
+                  ? null
+                  : undefined;
+            if (nextParentId === undefined) {
+              result = { ok: false, error: "parent_id must be string or null" };
+              break;
+            }
+            const row = dbHandle.exec({
+              sql: "SELECT type FROM items WHERE id = ? LIMIT 1;",
+              rowMode: "array",
+              returnValue: "resultRows",
+              bind: [id],
+            }) as Array<[string]>;
+            if (row.length === 0) {
+              result = { ok: false, error: "item not found" };
+              break;
+            }
+            const itemType = row[0][0];
+            if (itemType === "project") {
+              if (nextParentId !== null) {
+                result = { ok: false, error: "project parent_id must be null" };
+                break;
+              }
+            } else {
+              if (!nextParentId) {
+                result = { ok: false, error: "parent_id required" };
+                break;
+              }
+              fields.project_id = resolveProjectIdFromParent(
+                dbHandle,
+                nextParentId
+              );
+            }
+          }
 
           for (const [key, value] of Object.entries(fields)) {
             if (!allowed.has(key)) {
@@ -898,6 +1049,17 @@ const handleMutate = (envelope: MutateEnvelope): MutateResult => {
               bind,
             }
           );
+          if (parentIdProvided && typeof fields.project_id === "string") {
+            dbHandle.exec({
+              sql: `WITH RECURSIVE subtree AS (
+                SELECT id FROM items WHERE id = ?
+                UNION ALL
+                SELECT i.id FROM items i JOIN subtree s ON i.parent_id = s.id
+              )
+              UPDATE items SET project_id = ? WHERE id IN (SELECT id FROM subtree);`,
+              bind: [id, fields.project_id],
+            });
+          }
 
           result = {
             ok: true,
@@ -1361,6 +1523,10 @@ const handleMutate = (envelope: MutateEnvelope): MutateResult => {
                 item.parent_id ?? null,
                 `items[${index}].parent_id`
               ),
+              project_id: ensureOptionalString(
+                item.project_id ?? null,
+                `items[${index}].project_id`
+              ),
               status: ensureString(item.status, `items[${index}].status`),
               priority: ensureNumber(item.priority, `items[${index}].priority`),
               due_at: ensureNumber(item.due_at, `items[${index}].due_at`),
@@ -1380,6 +1546,8 @@ const handleMutate = (envelope: MutateEnvelope): MutateResult => {
               notes: ensureOptionalString(item.notes ?? null, `items[${index}].notes`),
               created_at: ensureNumber(item.created_at, `items[${index}].created_at`),
               updated_at: ensureNumber(item.updated_at, `items[${index}].updated_at`),
+              sort_order:
+                typeof item.sort_order === "number" ? item.sort_order : 0,
             };
           });
 
@@ -1593,13 +1761,16 @@ const handleMutate = (envelope: MutateEnvelope): MutateResult => {
 
           for (const item of items) {
             dbHandle.exec(
-              "INSERT INTO items (id, type, title, parent_id, status, priority, due_at, estimate_mode, estimate_minutes, health, health_mode, notes, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);",
+              "INSERT INTO items (id, type, title, parent_id, project_id, status, priority, due_at, estimate_mode, estimate_minutes, health, health_mode, notes, created_at, updated_at, sort_order) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);",
               {
                 bind: [
                   item.id,
                   item.type,
                   item.title,
                   item.parent_id,
+                  typeof (item as Record<string, unknown>).project_id === "string"
+                    ? (item as Record<string, unknown>).project_id
+                    : null,
                   item.status,
                   item.priority,
                   item.due_at,
@@ -1610,10 +1781,15 @@ const handleMutate = (envelope: MutateEnvelope): MutateResult => {
                   item.notes,
                   item.created_at,
                   item.updated_at,
+                  typeof (item as Record<string, unknown>).sort_order === "number"
+                    ? (item as Record<string, unknown>).sort_order
+                    : 0,
                 ],
               }
             );
           }
+
+          backfillProjectIds(dbHandle);
 
           for (const dep of dependencies) {
             dbHandle.exec(
@@ -2413,7 +2589,7 @@ const handleRequest = async (message: RpcRequest): Promise<RpcResponse> => {
                     WHERE d.item_id = items.id AND (di.id IS NULL OR di.status != 'done')
                   )
                 ) AS is_blocked
-                FROM items WHERE parent_id = ? ORDER BY sort_order ASC, due_at ASC, title ASC;`
+                FROM items WHERE project_id = ? ORDER BY sort_order ASC, due_at ASC, title ASC;`
               : `SELECT id, type, title, parent_id, status, priority, due_at,
                 (
                   EXISTS(SELECT 1 FROM blockers b WHERE b.item_id = items.id AND b.cleared_at IS NULL)
@@ -2506,18 +2682,25 @@ const handleRequest = async (message: RpcRequest): Promise<RpcResponse> => {
           break;
         }
         case "listItems": {
-          const projectId =
-            typeof args.projectId === "string" ? args.projectId : null;
-          const statusArg = args.status;
-          const healthArg = args.health;
+          const scope = resolveScope(args);
+          const projectId = ensureProjectScope(scope);
+          const filters = resolveFilters(args);
+          const statusArg = filters.status ?? args.status;
+          const healthArg = filters.health ?? args.health;
           const assigneeId =
-            typeof args.assigneeId === "string" ? args.assigneeId : null;
-          const tagFilter =
-            typeof args.tagId === "string"
-              ? args.tagId
-              : typeof args.tag === "string"
-                ? args.tag
+            typeof filters.assignee === "string"
+              ? filters.assignee
+              : typeof args.assigneeId === "string"
+                ? args.assigneeId
                 : null;
+          const tagFilter =
+            typeof filters.tag === "string"
+              ? filters.tag
+              : typeof args.tagId === "string"
+                ? args.tagId
+                : typeof args.tag === "string"
+                  ? args.tag
+                  : null;
           const statusFilter = Array.isArray(statusArg)
             ? statusArg.filter((value) => typeof value === "string")
             : typeof statusArg === "string"
@@ -2530,14 +2713,10 @@ const handleRequest = async (message: RpcRequest): Promise<RpcResponse> => {
               : null;
           const rows = dbHandle.exec({
             sql: projectId
-              ? `WITH RECURSIVE tree AS (
-                  SELECT * FROM items WHERE id = ?
-                  UNION ALL
-                  SELECT i.* FROM items i JOIN tree t ON i.parent_id = t.id
-                )
-                SELECT id, type, title, parent_id, status, priority, due_at,
+              ? `SELECT id, type, title, parent_id, status, priority, due_at,
                   estimate_mode, estimate_minutes, health, health_mode, notes, updated_at, sort_order
-                FROM tree
+                FROM items
+                WHERE project_id = ?
                 ORDER BY sort_order ASC, due_at ASC, title ASC;`
               : `SELECT id, type, title, parent_id, status, priority, due_at,
                   estimate_mode, estimate_minutes, health, health_mode, notes, updated_at, sort_order
@@ -2607,6 +2786,7 @@ const handleRequest = async (message: RpcRequest): Promise<RpcResponse> => {
             typeof args.includeDone === "boolean" ? args.includeDone : false;
           const searchText =
             typeof args.searchText === "string" ? args.searchText.trim() : "";
+          const dueRange = filters.dueRange ?? {};
           const filtered = rows.filter((row) => {
             if (statusFilter && !statusFilter.includes(row[4])) {
               return false;
@@ -2640,6 +2820,15 @@ const handleRequest = async (message: RpcRequest): Promise<RpcResponse> => {
               if (!haystack.includes(searchText.toLowerCase())) {
                 return false;
               }
+            }
+            if (
+              typeof dueRange.start === "number" &&
+              row[6] < dueRange.start
+            ) {
+              return false;
+            }
+            if (typeof dueRange.end === "number" && row[6] > dueRange.end) {
+              return false;
             }
             return true;
           });
@@ -2763,14 +2952,10 @@ const handleRequest = async (message: RpcRequest): Promise<RpcResponse> => {
             typeof args.projectId === "string" ? args.projectId : null;
           const rows = dbHandle.exec({
             sql: projectId
-              ? `WITH RECURSIVE tree AS (
-                  SELECT * FROM items WHERE id = ?
-                  UNION ALL
-                  SELECT i.* FROM items i JOIN tree t ON i.parent_id = t.id
-                )
-                SELECT id, type, title, parent_id, status, priority, due_at,
+              ? `SELECT id, type, title, parent_id, status, priority, due_at,
                   estimate_minutes, health, health_mode, notes
-                FROM tree
+                FROM items
+                WHERE project_id = ?
                 ORDER BY sort_order ASC, due_at ASC, title ASC;`
               : `SELECT id, type, title, parent_id, status, priority, due_at,
                   estimate_minutes, health, health_mode, notes
@@ -2989,22 +3174,23 @@ const handleRequest = async (message: RpcRequest): Promise<RpcResponse> => {
           break;
         }
         case "listExecution": {
-          const projectId =
-            typeof args.projectId === "string" ? args.projectId : null;
+          const scope = resolveScope(args);
+          const projectId = ensureProjectScope(scope);
+          const filters = resolveFilters(args);
           const assigneeId =
-            typeof args.assigneeId === "string" ? args.assigneeId : null;
+            typeof filters.assignee === "string"
+              ? filters.assignee
+              : typeof args.assigneeId === "string"
+                ? args.assigneeId
+                : null;
           const startAt = ensureNumber(args.startAt, "startAt");
           const endAt = ensureNumber(args.endAt, "endAt");
           const itemsRows = dbHandle.exec({
             sql: projectId
-              ? `WITH RECURSIVE tree AS (
-                  SELECT * FROM items WHERE id = ?
-                  UNION ALL
-                  SELECT i.* FROM items i JOIN tree t ON i.parent_id = t.id
-                )
-                SELECT id, type, title, parent_id, status, priority, due_at,
+              ? `SELECT id, type, title, parent_id, status, priority, due_at,
                   estimate_minutes, health, health_mode, notes
-                FROM tree;`
+                FROM items
+                WHERE project_id = ?;`
               : `SELECT id, type, title, parent_id, status, priority, due_at,
                   estimate_minutes, health, health_mode, notes
                 FROM items;`,
@@ -3499,14 +3685,32 @@ const handleRequest = async (message: RpcRequest): Promise<RpcResponse> => {
           break;
         }
         case "listCalendarBlocks": {
+          const scope = resolveScope(args);
+          const projectId = ensureProjectScope(scope);
           const startAt = ensureNumber(args.startAt, "startAt");
           const endAt = ensureNumber(args.endAt, "endAt");
-          const rows = dbHandle.exec({
-            sql: "SELECT block_id, item_id, start_at, duration_minutes, locked, source FROM scheduled_blocks WHERE start_at < ? AND (start_at + duration_minutes * 60000) > ? ORDER BY start_at ASC;",
-            rowMode: "array",
-            returnValue: "resultRows",
-            bind: [endAt, startAt],
-          }) as Array<[string, string, number, number, number, string]>;
+          let rows: Array<[string, string, number, number, number, string]> = [];
+          if (projectId) {
+            rows = dbHandle.exec({
+              sql: `SELECT b.block_id, b.item_id, b.start_at, b.duration_minutes, b.locked, b.source
+              FROM scheduled_blocks b
+              JOIN items i ON i.id = b.item_id
+              WHERE i.project_id = ?
+                AND b.start_at < ?
+                AND (b.start_at + b.duration_minutes * 60000) > ?
+              ORDER BY b.start_at ASC;`,
+              rowMode: "array",
+              returnValue: "resultRows",
+              bind: [projectId, endAt, startAt],
+            }) as Array<[string, string, number, number, number, string]>;
+          } else {
+            rows = dbHandle.exec({
+              sql: "SELECT block_id, item_id, start_at, duration_minutes, locked, source FROM scheduled_blocks WHERE start_at < ? AND (start_at + duration_minutes * 60000) > ? ORDER BY start_at ASC;",
+              rowMode: "array",
+              returnValue: "resultRows",
+              bind: [endAt, startAt],
+            }) as Array<[string, string, number, number, number, string]>;
+          }
 
           result = {
             ok: true,

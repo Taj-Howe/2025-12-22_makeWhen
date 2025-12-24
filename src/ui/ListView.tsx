@@ -9,6 +9,7 @@ import {
   type ReactNode,
 } from "react";
 import { query, mutate } from "../rpc/clientSingleton";
+import type { QueryFilters, Scope } from "../rpc/types";
 
 const formatDate = (value: number) => new Date(value).toLocaleString();
 
@@ -76,13 +77,15 @@ type Column = {
 };
 
 type ListViewProps = {
-  selectedProjectId: string | null;
+  scope: Scope;
+  filters: QueryFilters;
   refreshToken: number;
   onRefresh: () => void;
 };
 
 const ListView: FC<ListViewProps> = ({
-  selectedProjectId,
+  scope,
+  filters,
   refreshToken,
   onRefresh,
 }) => {
@@ -242,15 +245,11 @@ const ListView: FC<ListViewProps> = ({
   );
 
   const loadItems = useCallback(async () => {
-    if (!selectedProjectId) {
-      setItems([]);
-      setError(null);
-      return;
-    }
     setLoading(true);
     setError(null);
     const data = await query<{ items: ListItem[] }>("listItems", {
-      projectId: selectedProjectId,
+      scope,
+      filters,
       includeDone: true,
       includeCanceled: true,
       orderBy: "due_at",
@@ -258,14 +257,9 @@ const ListView: FC<ListViewProps> = ({
     });
     setItems(data.items);
     setLoading(false);
-  }, [selectedProjectId]);
+  }, [filters, scope]);
 
   useEffect(() => {
-    if (!selectedProjectId) {
-      setItems([]);
-      setError(null);
-      return;
-    }
     let isMounted = true;
     setLoading(true);
     setError(null);
@@ -285,7 +279,7 @@ const ListView: FC<ListViewProps> = ({
     return () => {
       isMounted = false;
     };
-  }, [loadItems, refreshToken, selectedProjectId]);
+  }, [loadItems, refreshToken]);
 
   const parentTypeMap = useMemo(() => {
     const map = new Map<string, ListItem["type"]>();
@@ -312,11 +306,10 @@ const ListView: FC<ListViewProps> = ({
     () =>
       items
         .filter(
-          (item) =>
-            item.type === "milestone" && item.parent_id === selectedProjectId
+          (item) => item.type === "milestone" && item.parent_id === scope.id
         )
         .sort((a, b) => a.sort_order - b.sort_order),
-    [items, selectedProjectId]
+    [items, scope.id]
   );
 
   const taskChildren = useMemo(() => {
@@ -338,7 +331,7 @@ const ListView: FC<ListViewProps> = ({
   const tasksUnderMilestone = useMemo(() => {
     const map = new Map<string, ListItem[]>();
     for (const task of tasks) {
-      if (task.parent_id && task.parent_id !== selectedProjectId) {
+      if (task.parent_id && task.parent_id !== scope.id) {
         const parentType = parentTypeMap.get(task.parent_id);
         if (parentType === "milestone") {
           const list = map.get(task.parent_id) ?? [];
@@ -351,14 +344,14 @@ const ListView: FC<ListViewProps> = ({
       map.set(key, list.sort((a, b) => a.sort_order - b.sort_order));
     }
     return map;
-  }, [parentTypeMap, selectedProjectId, tasks]);
+  }, [parentTypeMap, scope.id, tasks]);
 
   const ungroupedTasks = useMemo(
     () =>
       tasks
-        .filter((task) => task.parent_id === selectedProjectId)
+        .filter((task) => task.parent_id === scope.id)
         .sort((a, b) => a.sort_order - b.sort_order),
-    [selectedProjectId, tasks]
+    [scope.id, tasks]
   );
 
   const [collapsedMilestones, setCollapsedMilestones] = useState<Set<string>>(
@@ -596,10 +589,6 @@ const ListView: FC<ListViewProps> = ({
       </button>
     </div>
   );
-
-  if (!selectedProjectId) {
-    return <div className="list-view">Select a project</div>;
-  }
 
   return (
     <div className="list-view">
@@ -896,10 +885,10 @@ const ListView: FC<ListViewProps> = ({
                       : "group-row"
                   }
                   onDragOver={handleDragOverGroup(
-                    selectedProjectId,
+                    scope.id,
                     "move-target:ungrouped"
                   )}
-                  onDrop={handleDropOnGroup(selectedProjectId)}
+                  onDrop={handleDropOnGroup(scope.id)}
                 >
                   <td colSpan={columns.length}>
                     <button

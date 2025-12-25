@@ -21,6 +21,8 @@ type ItemTraits = {
   status: string;
   priority: number;
   due_at: number;
+  scheduled_for: number | null;
+  scheduled_duration_minutes: number | null;
   estimate_minutes: number;
   notes: string | null;
   health: string;

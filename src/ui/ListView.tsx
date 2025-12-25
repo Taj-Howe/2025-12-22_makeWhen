@@ -39,6 +39,8 @@ type ListItem = {
   project_id: string;
   sort_order: number;
   due_at: number;
+  scheduled_for: number | null;
+  scheduled_duration_minutes: number | null;
   estimate_mode?: string;
   status: string;
   priority: number;
@@ -79,6 +81,7 @@ type Column = {
 type ListViewProps = {
   scope: Scope;
   filters: QueryFilters;
+  sortMode: "sequence_rank" | "manual" | "due_at" | "priority";
   refreshToken: number;
   onRefresh: () => void;
 };
@@ -86,6 +89,7 @@ type ListViewProps = {
 const ListView: FC<ListViewProps> = ({
   scope,
   filters,
+  sortMode,
   refreshToken,
   onRefresh,
 }) => {
@@ -160,7 +164,7 @@ const ListView: FC<ListViewProps> = ({
         render: (item: ListItem) =>
           item.assignees.length > 0
             ? item.assignees.map((assignee) => assignee.id).join(", ")
-            : "unassigned",
+            : "—",
       },
       {
         key: "status",
@@ -185,6 +189,22 @@ const ListView: FC<ListViewProps> = ({
           item.due_at ? formatDate(item.due_at) : "—",
       },
       {
+        key: "scheduled_for",
+        label: "Scheduled For",
+        minWidth: 170,
+        render: (item: ListItem) =>
+          item.scheduled_for ? formatDate(item.scheduled_for) : "—",
+      },
+      {
+        key: "scheduled_duration_minutes",
+        label: "Sched Duration (min)",
+        minWidth: 180,
+        render: (item: ListItem) =>
+          Number.isFinite(item.scheduled_duration_minutes)
+            ? item.scheduled_duration_minutes
+            : "—",
+      },
+      {
         key: "estimate_mode",
         label: "Estimate Mode",
         minWidth: 140,
@@ -205,18 +225,8 @@ const ListView: FC<ListViewProps> = ({
         minWidth: 160,
         render: (item: ListItem) =>
           item.depends_on.length > 0
-            ? item.depends_on.map((id) => shortId(id)).join(", ")
-            : "[]",
-      },
-      {
-        key: "blockers",
-        label: "Blockers",
-        minWidth: 120,
-        render: (item: ListItem) => {
-          // TODO: listItems does not include blocker objects yet; show active count.
-          const count = item.blocked?.active_blocker_count ?? 0;
-          return count > 0 ? String(count) : "0";
-        },
+            ? item.depends_on.join(", ")
+            : "—",
       },
       {
         key: "tags",
@@ -225,7 +235,7 @@ const ListView: FC<ListViewProps> = ({
         render: (item: ListItem) =>
           item.tags.length > 0
             ? item.tags.map((tag) => tag.name).join(", ")
-            : "[]",
+            : "—",
       },
       {
         key: "notes",
@@ -235,10 +245,15 @@ const ListView: FC<ListViewProps> = ({
       },
       {
         key: "health",
-        label: "Health (mode)",
-        minWidth: 160,
-        render: (item: ListItem) =>
-          `${item.health ?? "unknown"} (${item.health_mode ?? "auto"})`,
+        label: "Health",
+        minWidth: 130,
+        render: (item: ListItem) => item.health ?? "unknown",
+      },
+      {
+        key: "health_mode",
+        label: "Health Mode",
+        minWidth: 130,
+        render: (item: ListItem) => item.health_mode ?? "auto",
       },
     ],
     []
@@ -247,17 +262,19 @@ const ListView: FC<ListViewProps> = ({
   const loadItems = useCallback(async () => {
     setLoading(true);
     setError(null);
+    const orderBy = sortMode === "manual" ? "sort_order" : sortMode;
+    const orderDir = sortMode === "priority" ? "desc" : "asc";
     const data = await query<{ items: ListItem[] }>("listItems", {
       scope,
       filters,
       includeDone: true,
       includeCanceled: true,
-      orderBy: "due_at",
-      orderDir: "asc",
+      orderBy,
+      orderDir,
     });
     setItems(data.items);
     setLoading(false);
-  }, [filters, scope]);
+  }, [filters, scope, sortMode]);
 
   useEffect(() => {
     let isMounted = true;
@@ -346,13 +363,11 @@ const ListView: FC<ListViewProps> = ({
     return map;
   }, [parentTypeMap, scope.id, tasks]);
 
-  const ungroupedTasks = useMemo(
-    () =>
-      tasks
-        .filter((task) => task.parent_id === scope.id)
-        .sort((a, b) => a.sort_order - b.sort_order),
-    [scope.id, tasks]
-  );
+  const ungroupedTasks = useMemo(() => {
+    return tasks
+      .filter((task) => task.parent_id === null || task.parent_id === scope.id)
+      .sort((a, b) => a.sort_order - b.sort_order);
+  }, [scope.id, tasks]);
 
   const [collapsedMilestones, setCollapsedMilestones] = useState<Set<string>>(
     () => new Set()
@@ -427,9 +442,19 @@ const ListView: FC<ListViewProps> = ({
   ) => {
     setError(null);
     try {
+      const siblings = items.filter(
+        (item) =>
+          item.type === "task" &&
+          item.id !== itemId &&
+          item.parent_id === targetParentId
+      );
+      const maxSortOrder = siblings.reduce(
+        (max, item) => Math.max(max, item.sort_order),
+        0
+      );
       await mutate("update_item_fields", {
         id: itemId,
-        fields: { parent_id: targetParentId },
+        fields: { parent_id: targetParentId, sort_order: maxSortOrder + 1 },
       });
       onRefresh();
     } catch (err) {
@@ -542,17 +567,20 @@ const ListView: FC<ListViewProps> = ({
     setDragOver(null);
   };
 
-  const renderDragHandle = (itemId: string, groupKey: string) => (
-    <span
-      className="drag-handle"
-      draggable
-      onDragStart={handleDragStart(itemId, groupKey)}
-      onDragEnd={handleDragEnd}
-      title="Drag to reorder"
-    >
-      ⋮⋮
-    </span>
-  );
+  const canReorder = sortMode === "manual";
+
+  const renderDragHandle = (itemId: string, groupKey: string) =>
+    canReorder ? (
+      <span
+        className="drag-handle"
+        draggable
+        onDragStart={handleDragStart(itemId, groupKey)}
+        onDragEnd={handleDragEnd}
+        title="Drag to reorder"
+      >
+        ⋮⋮
+      </span>
+    ) : null;
 
   const handleReorder = async (itemId: string, direction: "up" | "down") => {
     setError(null);
@@ -565,30 +593,27 @@ const ListView: FC<ListViewProps> = ({
     }
   };
 
-  const renderMoveButtons = (
-    itemId: string,
-    index: number,
-    total: number
-  ) => (
-    <div className="row-actions">
-      <button
-        type="button"
-        className="button button-ghost"
-        onClick={() => handleReorder(itemId, "up")}
-        disabled={index === 0}
-      >
-        ↑
-      </button>
-      <button
-        type="button"
-        className="button button-ghost"
-        onClick={() => handleReorder(itemId, "down")}
-        disabled={index === total - 1}
-      >
-        ↓
-      </button>
-    </div>
-  );
+  const renderMoveButtons = (itemId: string, index: number, total: number) =>
+    canReorder ? (
+      <div className="row-actions">
+        <button
+          type="button"
+          className="button button-ghost"
+          onClick={() => handleReorder(itemId, "up")}
+          disabled={index === 0}
+        >
+          ↑
+        </button>
+        <button
+          type="button"
+          className="button button-ghost"
+          onClick={() => handleReorder(itemId, "down")}
+          disabled={index === total - 1}
+        >
+          ↓
+        </button>
+      </div>
+    ) : null;
 
   return (
     <div className="list-view">
@@ -885,10 +910,10 @@ const ListView: FC<ListViewProps> = ({
                       : "group-row"
                   }
                   onDragOver={handleDragOverGroup(
-                    scope.id,
+                    null,
                     "move-target:ungrouped"
                   )}
-                  onDrop={handleDropOnGroup(scope.id)}
+                  onDrop={handleDropOnGroup(null)}
                 >
                   <td colSpan={columns.length}>
                     <button

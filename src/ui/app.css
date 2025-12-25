@@ -81,11 +81,93 @@ body {
   margin-bottom: 16px;
 }
 
+.sort-row {
+  margin-bottom: 12px;
+}
+
+.sort-row label {
+  display: inline-grid;
+  gap: 6px;
+  font-size: 14px;
+}
+
 .add-form {
   border: 1px solid var(--border);
   border-radius: 10px;
   padding: 12px;
   margin-bottom: 16px;
+}
+
+.command-bar {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 12px;
+  margin-bottom: 16px;
+  background: var(--panel);
+  display: grid;
+  gap: 10px;
+}
+
+.command-header {
+  display: grid;
+  gap: 10px;
+  align-items: center;
+}
+
+.command-label {
+  display: grid;
+  gap: 6px;
+  font-size: 14px;
+}
+
+.command-input {
+  width: 100%;
+}
+
+.command-meta {
+  display: grid;
+  gap: 6px;
+  font-size: 13px;
+}
+
+.command-help {
+  display: grid;
+  gap: 6px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 8px;
+  background: var(--panel2);
+  font-size: 13px;
+}
+
+.command-help-example {
+  margin-top: 4px;
+  padding: 6px 8px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: var(--bg);
+  font-size: 12px;
+}
+
+.command-preview {
+  display: grid;
+  gap: 4px;
+  padding: 8px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--panel2);
+}
+
+.command-error {
+  color: var(--danger);
+}
+
+.command-success {
+  color: var(--success);
+}
+
+.command-hint {
+  opacity: 0.7;
 }
 
 .form-row {

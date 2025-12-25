@@ -5,6 +5,7 @@ import blockersKindTextSql from "./migrations/0002_blockers_kind_text.sql?raw";
 import runningTimersSql from "./migrations/0003_running_timers.sql?raw";
 import sortOrderSql from "./migrations/0004_sort_order.sql?raw";
 import projectIdSql from "./migrations/0005_project_id.sql?raw";
+import scheduledForSql from "./migrations/0006_scheduled_for.sql?raw";
 
 const ctx: DedicatedWorkerGlobalScope = self as DedicatedWorkerGlobalScope;
 
@@ -161,6 +162,10 @@ const migrations = [
   {
     version: 5,
     sql: projectIdSql,
+  },
+  {
+    version: 6,
+    sql: scheduledForSql,
   },
 ];
 
@@ -554,7 +559,7 @@ const getSettings = (db: any) => {
 
 const exportData = (db: any) => {
   const itemsRows = db.exec({
-    sql: "SELECT id, type, title, parent_id, project_id, status, priority, due_at, estimate_mode, estimate_minutes, health, health_mode, notes, created_at, updated_at, sort_order FROM items;",
+    sql: "SELECT id, type, title, parent_id, project_id, status, priority, due_at, scheduled_for, scheduled_duration_minutes, estimate_mode, estimate_minutes, health, health_mode, notes, created_at, updated_at, sort_order FROM items;",
     rowMode: "array",
     returnValue: "resultRows",
   }) as Array<
@@ -567,6 +572,8 @@ const exportData = (db: any) => {
       string,
       number,
       number,
+      number | null,
+      number | null,
       string,
       number,
       string,
@@ -636,14 +643,16 @@ const exportData = (db: any) => {
       status: row[5],
       priority: row[6],
       due_at: row[7],
-      estimate_mode: row[8],
-      estimate_minutes: row[9],
-      health: row[10],
-      health_mode: row[11],
-      notes: row[12],
-      created_at: row[13],
-      updated_at: row[14],
-      sort_order: row[15],
+      scheduled_for: row[8],
+      scheduled_duration_minutes: row[9],
+      estimate_mode: row[10],
+      estimate_minutes: row[11],
+      health: row[12],
+      health_mode: row[13],
+      notes: row[14],
+      created_at: row[15],
+      updated_at: row[16],
+      sort_order: row[17],
     })),
     dependencies: dependencyRows.map((row) => ({
       item_id: row[0],
@@ -916,9 +925,20 @@ const handleMutate = (envelope: MutateEnvelope): MutateResult => {
           const healthMode =
             typeof args.health_mode === "string" ? args.health_mode : "auto";
           const notes = typeof args.notes === "string" ? args.notes : null;
+          const scheduledFor =
+            typeof args.scheduled_for === "number"
+              ? ensureInteger(args.scheduled_for, "scheduled_for")
+              : null;
+          const scheduledDuration =
+            typeof args.scheduled_duration_minutes === "number"
+              ? ensurePositiveInteger(
+                  args.scheduled_duration_minutes,
+                  "scheduled_duration_minutes"
+                )
+              : null;
 
           dbHandle.exec(
-            "INSERT INTO items (id, type, title, parent_id, project_id, status, priority, due_at, estimate_mode, estimate_minutes, health, health_mode, notes, created_at, updated_at, sort_order) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);",
+            "INSERT INTO items (id, type, title, parent_id, project_id, status, priority, due_at, scheduled_for, scheduled_duration_minutes, estimate_mode, estimate_minutes, health, health_mode, notes, created_at, updated_at, sort_order) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);",
             {
               bind: [
                 id,
@@ -929,6 +949,8 @@ const handleMutate = (envelope: MutateEnvelope): MutateResult => {
                 status,
                 priority,
                 dueAt,
+                scheduledFor,
+                scheduledDuration,
                 estimateMode,
                 estimateMinutes,
                 health,
@@ -962,6 +984,8 @@ const handleMutate = (envelope: MutateEnvelope): MutateResult => {
             "title",
             "parent_id",
             "due_at",
+            "scheduled_for",
+            "scheduled_duration_minutes",
             "estimate_minutes",
             "estimate_mode",
             "priority",
@@ -973,6 +997,8 @@ const handleMutate = (envelope: MutateEnvelope): MutateResult => {
           ]);
           const numericFields = new Set([
             "due_at",
+            "scheduled_for",
+            "scheduled_duration_minutes",
             "estimate_minutes",
             "priority",
             "sort_order",
@@ -996,11 +1022,11 @@ const handleMutate = (envelope: MutateEnvelope): MutateResult => {
               break;
             }
             const row = dbHandle.exec({
-              sql: "SELECT type FROM items WHERE id = ? LIMIT 1;",
+              sql: "SELECT type, project_id FROM items WHERE id = ? LIMIT 1;",
               rowMode: "array",
               returnValue: "resultRows",
               bind: [id],
-            }) as Array<[string]>;
+            }) as Array<[string, string | null]>;
             if (row.length === 0) {
               result = { ok: false, error: "item not found" };
               break;
@@ -1012,14 +1038,16 @@ const handleMutate = (envelope: MutateEnvelope): MutateResult => {
                 break;
               }
             } else {
-              if (!nextParentId) {
+              if (!nextParentId && itemType !== "task") {
                 result = { ok: false, error: "parent_id required" };
                 break;
               }
-              fields.project_id = resolveProjectIdFromParent(
-                dbHandle,
-                nextParentId
-              );
+              if (nextParentId) {
+                fields.project_id = resolveProjectIdFromParent(
+                  dbHandle,
+                  nextParentId
+                );
+              }
             }
           }
 
@@ -1029,6 +1057,9 @@ const handleMutate = (envelope: MutateEnvelope): MutateResult => {
             }
             if (numericFields.has(key)) {
               ensureNumber(value, key);
+            }
+            if (key === "scheduled_duration_minutes" && value !== null) {
+              ensurePositiveInteger(value, key);
             }
             updates.push(`${key} = ?`);
             bind.push(value ?? null);
@@ -1530,6 +1561,27 @@ const handleMutate = (envelope: MutateEnvelope): MutateResult => {
               status: ensureString(item.status, `items[${index}].status`),
               priority: ensureNumber(item.priority, `items[${index}].priority`),
               due_at: ensureNumber(item.due_at, `items[${index}].due_at`),
+              scheduled_for:
+                item.scheduled_for === null || item.scheduled_for === undefined
+                  ? null
+                  : ensureInteger(
+                      ensureNumber(
+                        item.scheduled_for,
+                        `items[${index}].scheduled_for`
+                      ),
+                      `items[${index}].scheduled_for`
+                    ),
+              scheduled_duration_minutes:
+                item.scheduled_duration_minutes === null ||
+                item.scheduled_duration_minutes === undefined
+                  ? null
+                  : ensurePositiveInteger(
+                      ensureNumber(
+                        item.scheduled_duration_minutes,
+                        `items[${index}].scheduled_duration_minutes`
+                      ),
+                      `items[${index}].scheduled_duration_minutes`
+                    ),
               estimate_mode: ensureString(
                 item.estimate_mode,
                 `items[${index}].estimate_mode`
@@ -1761,7 +1813,7 @@ const handleMutate = (envelope: MutateEnvelope): MutateResult => {
 
           for (const item of items) {
             dbHandle.exec(
-              "INSERT INTO items (id, type, title, parent_id, project_id, status, priority, due_at, estimate_mode, estimate_minutes, health, health_mode, notes, created_at, updated_at, sort_order) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);",
+              "INSERT INTO items (id, type, title, parent_id, project_id, status, priority, due_at, scheduled_for, scheduled_duration_minutes, estimate_mode, estimate_minutes, health, health_mode, notes, created_at, updated_at, sort_order) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);",
               {
                 bind: [
                   item.id,
@@ -1774,6 +1826,8 @@ const handleMutate = (envelope: MutateEnvelope): MutateResult => {
                   item.status,
                   item.priority,
                   item.due_at,
+                  item.scheduled_for,
+                  item.scheduled_duration_minutes,
                   item.estimate_mode,
                   item.estimate_minutes,
                   item.health,
@@ -2201,11 +2255,11 @@ const handleRequest = async (message: RpcRequest): Promise<RpcResponse> => {
         case "getItemDetails": {
           const itemId = ensureString(args.itemId, "itemId");
           const rows = dbHandle.exec({
-            sql: "SELECT id, type, title, parent_id, status, priority, due_at, estimate_mode, estimate_minutes, health, health_mode, notes FROM items WHERE id = ? LIMIT 1;",
+            sql: "SELECT id, type, title, parent_id, status, priority, due_at, scheduled_for, scheduled_duration_minutes, estimate_mode, estimate_minutes, health, health_mode, notes FROM items WHERE id = ? LIMIT 1;",
             rowMode: "array",
             returnValue: "resultRows",
             bind: [itemId],
-          }) as Array<[string, string, string, string | null, string, number, number, string, number, string, string, string | null]>;
+          }) as Array<[string, string, string, string | null, string, number, number, number | null, number | null, string, number, string, string, string | null]>;
 
           if (rows.length === 0) {
             result = { ok: true, result: null };
@@ -2265,7 +2319,7 @@ const handleRequest = async (message: RpcRequest): Promise<RpcResponse> => {
                   note: runningTimerRows[0][2],
                 }
               : null;
-          const remainingMinutes = Math.max(0, rows[0][8] - actualMinutes);
+          const remainingMinutes = Math.max(0, rows[0][10] - actualMinutes);
           const scheduleRows = dbHandle.exec({
             sql: "SELECT COUNT(*), SUM(duration_minutes), MIN(start_at), MAX(start_at + duration_minutes * 60000) FROM scheduled_blocks WHERE item_id = ?;",
             rowMode: "array",
@@ -2296,11 +2350,13 @@ const handleRequest = async (message: RpcRequest): Promise<RpcResponse> => {
               status: rows[0][4],
               priority: rows[0][5],
               due_at: rows[0][6],
-              estimate_mode: rows[0][7],
-              estimate_minutes: rows[0][8],
-              health: rows[0][9],
-              health_mode: rows[0][10],
-              notes: rows[0][11],
+              scheduled_for: rows[0][7],
+              scheduled_duration_minutes: rows[0][8],
+              estimate_mode: rows[0][9],
+              estimate_minutes: rows[0][10],
+              health: rows[0][11],
+              health_mode: rows[0][12],
+              notes: rows[0][13],
               dependencies: depsRows.map((row) => row[0]),
               blockers: blockersRows.map((row) => ({
                 blocker_id: row[0],
@@ -2713,12 +2769,14 @@ const handleRequest = async (message: RpcRequest): Promise<RpcResponse> => {
               : null;
           const rows = dbHandle.exec({
             sql: projectId
-              ? `SELECT id, type, title, parent_id, status, priority, due_at,
+              ? `SELECT id, type, title, parent_id, project_id, status, priority, due_at,
+                  scheduled_for, scheduled_duration_minutes,
                   estimate_mode, estimate_minutes, health, health_mode, notes, updated_at, sort_order
                 FROM items
                 WHERE project_id = ?
                 ORDER BY sort_order ASC, due_at ASC, title ASC;`
-              : `SELECT id, type, title, parent_id, status, priority, due_at,
+              : `SELECT id, type, title, parent_id, project_id, status, priority, due_at,
+                  scheduled_for, scheduled_duration_minutes,
                   estimate_mode, estimate_minutes, health, health_mode, notes, updated_at, sort_order
                 FROM items
                 ORDER BY sort_order ASC, due_at ASC, title ASC;`,
@@ -2731,9 +2789,12 @@ const handleRequest = async (message: RpcRequest): Promise<RpcResponse> => {
               string,
               string,
               string | null,
+              string | null,
               string,
               number,
               number,
+              number | null,
+              number | null,
               string,
               number,
               string,
@@ -2745,7 +2806,7 @@ const handleRequest = async (message: RpcRequest): Promise<RpcResponse> => {
           >;
           const ids = rows.map((row) => row[0]);
           const rowMap = new Map(
-            rows.map((row) => [row[0], { updated_at: row[12], sort_order: row[13] }])
+            rows.map((row) => [row[0], { updated_at: row[15], sort_order: row[16] }])
           );
           const scheduleMap = getScheduleSummaryMap(dbHandle, ids);
           const blockedMap = getBlockedStatusMap(dbHandle, ids);
@@ -2788,16 +2849,16 @@ const handleRequest = async (message: RpcRequest): Promise<RpcResponse> => {
             typeof args.searchText === "string" ? args.searchText.trim() : "";
           const dueRange = filters.dueRange ?? {};
           const filtered = rows.filter((row) => {
-            if (statusFilter && !statusFilter.includes(row[4])) {
+            if (statusFilter && !statusFilter.includes(row[5])) {
               return false;
             }
-            if (healthFilter && !healthFilter.includes(row[9])) {
+            if (healthFilter && !healthFilter.includes(row[12])) {
               return false;
             }
-            if (!includeCanceled && row[4] === "canceled") {
+            if (!includeCanceled && row[5] === "canceled") {
               return false;
             }
-            if (!includeDone && row[4] === "done") {
+            if (!includeDone && row[5] === "done") {
               return false;
             }
             const assignees = assigneesMap.get(row[0]) ?? [];
@@ -2816,18 +2877,18 @@ const handleRequest = async (message: RpcRequest): Promise<RpcResponse> => {
               return false;
             }
             if (searchText) {
-              const haystack = `${row[2]} ${row[11] ?? ""}`.toLowerCase();
+              const haystack = `${row[2]} ${row[14] ?? ""}`.toLowerCase();
               if (!haystack.includes(searchText.toLowerCase())) {
                 return false;
               }
             }
             if (
               typeof dueRange.start === "number" &&
-              row[6] < dueRange.start
+              row[7] < dueRange.start
             ) {
               return false;
             }
-            if (typeof dueRange.end === "number" && row[6] > dueRange.end) {
+            if (typeof dueRange.end === "number" && row[7] > dueRange.end) {
               return false;
             }
             return true;
@@ -2845,9 +2906,9 @@ const handleRequest = async (message: RpcRequest): Promise<RpcResponse> => {
               is_blocked: false,
             };
             const unmetDeps = unmetDepMap.get(row[0]) ?? { count: 0, ids: [] };
-            const dueMetrics = computeDueMetrics(row[6], now, row[4]);
+            const dueMetrics = computeDueMetrics(row[7], now, row[5]);
             const actualMinutes = timeMap.get(row[0]) ?? 0;
-            const remainingMinutes = Math.max(0, row[8] - actualMinutes);
+            const remainingMinutes = Math.max(0, row[11] - actualMinutes);
             const healthAuto = computeHealth(
               dueMetrics.is_overdue,
               remainingMinutes,
@@ -2858,8 +2919,8 @@ const handleRequest = async (message: RpcRequest): Promise<RpcResponse> => {
             const sequenceRank = computeSequenceRank({
               is_overdue: dueMetrics.is_overdue,
               is_blocked: blocked.is_blocked,
-              due_at: row[6],
-              priority: row[5],
+              due_at: row[7],
+              priority: row[6],
               dependents,
             });
             return {
@@ -2867,17 +2928,19 @@ const handleRequest = async (message: RpcRequest): Promise<RpcResponse> => {
               type: row[1],
               title: row[2],
               parent_id: row[3],
-              project_id: projectMap.get(row[0]) ?? row[0],
+              project_id: row[4] ?? projectMap.get(row[0]) ?? row[0],
               depth: depthMap.get(row[0]) ?? 0,
-              status: row[4],
-              priority: row[5],
-              due_at: row[6],
-              estimate_mode: row[7],
-              estimate_minutes: row[8],
-              notes: row[11],
-              sort_order: row[13],
-              health: row[9],
-              health_mode: row[10],
+              status: row[5],
+              priority: row[6],
+              due_at: row[7],
+              scheduled_for: row[8],
+              scheduled_duration_minutes: row[9],
+              estimate_mode: row[10],
+              estimate_minutes: row[11],
+              notes: row[14],
+              sort_order: row[16],
+              health: row[12],
+              health_mode: row[13],
               schedule: {
                 has_blocks: schedule.count > 0,
                 scheduled_minutes_total: schedule.total,
@@ -2918,6 +2981,11 @@ const handleRequest = async (message: RpcRequest): Promise<RpcResponse> => {
             }
             if (orderBy === "sequence_rank") {
               return (a.sequence_rank - b.sequence_rank) * dir;
+            }
+            if (orderBy === "priority") {
+              if (a.priority !== b.priority) {
+                return (a.priority - b.priority) * dir;
+              }
             }
             if (orderBy === "title") {
               return a.title.localeCompare(b.title) * dir;

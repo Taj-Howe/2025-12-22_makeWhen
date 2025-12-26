@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState, type FC, type FormEvent } from "react";
 import { mutate, query } from "../rpc/clientSingleton";
+import { UNGROUPED_PROJECT_ID } from "./constants";
 
 type ItemType = "project" | "milestone" | "task";
 
@@ -12,7 +13,7 @@ type ItemRow = {
   depth: number;
   status: string;
   priority: number;
-  due_at: number;
+  due_at: number | null;
   estimate_minutes: number;
   notes: string | null;
   health: string;
@@ -28,7 +29,7 @@ type ItemDetails = {
   parent_id: string | null;
   status: string;
   priority: number;
-  due_at: number;
+  due_at: number | null;
   estimate_mode: string;
   estimate_minutes: number;
   health: string;
@@ -48,6 +49,8 @@ type AddItemFormProps = {
   selectedProjectId: string | null;
   items: ItemRow[];
   onRefresh: () => void;
+  initialType?: ItemType;
+  onCreated?: () => void;
 };
 
 const formatOptionLabel = (item: ItemRow, parentType: ItemType | null) => {
@@ -56,7 +59,10 @@ const formatOptionLabel = (item: ItemRow, parentType: ItemType | null) => {
   return `${" ".repeat(item.depth * 2)}${item.title} (${labelType})`;
 };
 
-const toDateTimeLocal = (value: number) => {
+const toDateTimeLocal = (value: number | null) => {
+  if (!value) {
+    return "";
+  }
   const date = new Date(value);
   const offset = date.getTimezoneOffset() * 60000;
   return new Date(value - offset).toISOString().slice(0, 16);
@@ -76,10 +82,12 @@ const AddItemForm: FC<AddItemFormProps> = ({
   selectedProjectId,
   items,
   onRefresh,
+  initialType,
+  onCreated,
 }) => {
   const [mode, setMode] = useState<"create" | "edit">("create");
   const [selectedItemId, setSelectedItemId] = useState<string>("");
-  const [type, setType] = useState<ItemType>("task");
+  const [type, setType] = useState<ItemType>(initialType ?? "task");
   const [title, setTitle] = useState("");
   const [parentId, setParentId] = useState<string | null>(null);
   const [dueAt, setDueAt] = useState("");
@@ -112,10 +120,12 @@ const AddItemForm: FC<AddItemFormProps> = ({
     return map;
   }, [items]);
 
-  const projectItems = useMemo(
-    () => items.filter((item) => item.project_id === selectedProjectId),
-    [items, selectedProjectId]
-  );
+  const projectItems = useMemo(() => {
+    if (selectedProjectId === UNGROUPED_PROJECT_ID) {
+      return items;
+    }
+    return items.filter((item) => item.project_id === selectedProjectId);
+  }, [items, selectedProjectId]);
 
   const taskParentOptions = useMemo(() => {
     if (!selectedProjectId) {
@@ -184,7 +194,18 @@ const AddItemForm: FC<AddItemFormProps> = ({
   }, [estimateMode]);
 
   useEffect(() => {
-    if (type === "task" && selectedProjectId && !parentId) {
+    if (mode === "create" && initialType) {
+      setType(initialType);
+    }
+  }, [initialType, mode]);
+
+  useEffect(() => {
+    if (
+      type === "task" &&
+      selectedProjectId &&
+      selectedProjectId !== UNGROUPED_PROJECT_ID &&
+      !parentId
+    ) {
       setParentId(selectedProjectId);
     }
   }, [parentId, selectedProjectId, type]);
@@ -214,12 +235,11 @@ const AddItemForm: FC<AddItemFormProps> = ({
     if (!title.trim()) {
       return "Title is required.";
     }
-    if (!dueAt) {
-      return "Deadline is required.";
-    }
-    const dueMs = new Date(dueAt).getTime();
-    if (!Number.isFinite(dueMs)) {
-      return "Deadline must be valid.";
+    if (dueAt) {
+      const dueMs = new Date(dueAt).getTime();
+      if (!Number.isFinite(dueMs)) {
+        return "Deadline must be valid.";
+      }
     }
     if (!estimateMode) {
       return "Estimate mode is required.";
@@ -239,8 +259,11 @@ const AddItemForm: FC<AddItemFormProps> = ({
     if (type === "milestone" && !selectedProjectId) {
       return "Select a project before adding a milestone.";
     }
+    if (type === "milestone" && selectedProjectId === UNGROUPED_PROJECT_ID) {
+      return "Milestones must belong to a project.";
+    }
     if (type === "task" && !selectedProjectId) {
-      return "Select a project before adding a task.";
+      return "Select a project or Ungrouped before adding a task.";
     }
     if (mode === "edit" && !selectedItemId) {
       return "Select an item to edit.";
@@ -257,7 +280,7 @@ const AddItemForm: FC<AddItemFormProps> = ({
       return;
     }
 
-    const dueMs = new Date(dueAt).getTime();
+    const dueMs = dueAt ? new Date(dueAt).getTime() : null;
     const estimate =
       estimateMode === "rollup" ? 0 : Math.max(0, Number(estimateMinutes));
     const resolvedParentId =
@@ -265,7 +288,10 @@ const AddItemForm: FC<AddItemFormProps> = ({
         ? null
         : type === "milestone"
           ? selectedProjectId
-          : parentId ?? selectedProjectId;
+          : parentId ??
+            (selectedProjectId === UNGROUPED_PROJECT_ID
+              ? null
+              : selectedProjectId);
 
     try {
       if (mode === "create") {
@@ -317,6 +343,7 @@ const AddItemForm: FC<AddItemFormProps> = ({
           }
         }
         resetForm();
+        onCreated?.();
       } else if (selectedItemId) {
         await mutate("update_item_fields", {
           id: selectedItemId,
@@ -485,10 +512,11 @@ const AddItemForm: FC<AddItemFormProps> = ({
             value={title}
             onChange={(event) => setTitle(event.target.value)}
             placeholder="New item"
+            autoFocus
           />
         </label>
         <label>
-          Deadline *
+          Deadline
           <input
             type="datetime-local"
             value={dueAt}
@@ -559,7 +587,13 @@ const AddItemForm: FC<AddItemFormProps> = ({
           Parent
           {type === "milestone" ? (
             <input
-              value={selectedProjectId ? "Selected project" : "Select a project"}
+              value={
+                selectedProjectId === UNGROUPED_PROJECT_ID
+                  ? "Ungrouped (no project)"
+                  : selectedProjectId
+                    ? "Selected project"
+                    : "Select a project"
+              }
               disabled
             />
           ) : (
@@ -570,9 +604,13 @@ const AddItemForm: FC<AddItemFormProps> = ({
               }
               disabled={type === "project" || !selectedProjectId}
             >
-              <option value={selectedProjectId ?? ""}>
-                Project (ungrouped)
-              </option>
+              {selectedProjectId === UNGROUPED_PROJECT_ID ? (
+                <option value="">Ungrouped (no parent)</option>
+              ) : (
+                <option value={selectedProjectId ?? ""}>
+                  Project (root)
+                </option>
+              )}
               {taskParentOptions.map((option) => (
                 <option key={option.id} value={option.id}>
                   {formatOptionLabel(

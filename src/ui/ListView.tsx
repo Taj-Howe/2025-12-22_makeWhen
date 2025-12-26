@@ -9,8 +9,10 @@ import {
   type ReactNode,
 } from "react";
 import { query, mutate } from "../rpc/clientSingleton";
+import { UNGROUPED_PROJECT_ID } from "./constants";
 
-const formatDate = (value: number) => new Date(value).toLocaleString();
+const formatDate = (value: number | null) =>
+  value ? new Date(value).toLocaleString() : "—";
 
 const shortId = (value: string | null) => {
   if (!value) {
@@ -37,7 +39,7 @@ type ListItem = {
   depth: number;
   project_id: string;
   sort_order: number;
-  due_at: number;
+  due_at: number | null;
   estimate_mode?: string;
   status: string;
   priority: number;
@@ -178,8 +180,7 @@ const ListView: FC<ListViewProps> = ({
         key: "due_at",
         label: "Due At",
         minWidth: 160,
-        render: (item: ListItem) =>
-          item.due_at ? formatDate(item.due_at) : "—",
+        render: (item: ListItem) => formatDate(item.due_at),
       },
       {
         key: "estimate_mode",
@@ -353,13 +354,19 @@ const ListView: FC<ListViewProps> = ({
     return map;
   }, [parentTypeMap, selectedProjectId, tasks]);
 
-  const ungroupedTasks = useMemo(
-    () =>
-      tasks
-        .filter((task) => task.parent_id === selectedProjectId)
-        .sort((a, b) => a.sort_order - b.sort_order),
-    [selectedProjectId, tasks]
-  );
+  const ungroupedTasks = useMemo(() => {
+    if (selectedProjectId === UNGROUPED_PROJECT_ID) {
+      return tasks
+        .filter((task) => task.parent_id === null)
+        .sort((a, b) => a.sort_order - b.sort_order);
+    }
+    return tasks
+      .filter((task) => task.parent_id === selectedProjectId)
+      .sort((a, b) => a.sort_order - b.sort_order);
+  }, [selectedProjectId, tasks]);
+
+  const ungroupedParentId =
+    selectedProjectId === UNGROUPED_PROJECT_ID ? null : selectedProjectId;
 
   const [collapsedMilestones, setCollapsedMilestones] = useState<Set<string>>(
     () => new Set()
@@ -896,10 +903,10 @@ const ListView: FC<ListViewProps> = ({
                       : "group-row"
                   }
                   onDragOver={handleDragOverGroup(
-                    selectedProjectId,
+                    ungroupedParentId,
                     "move-target:ungrouped"
                   )}
-                  onDrop={handleDropOnGroup(selectedProjectId)}
+                  onDrop={handleDropOnGroup(ungroupedParentId)}
                 >
                   <td colSpan={columns.length}>
                     <button

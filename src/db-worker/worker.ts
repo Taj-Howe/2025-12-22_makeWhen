@@ -4,11 +4,13 @@ import initSql from "./migrations/0001_init.sql?raw";
 import blockersKindTextSql from "./migrations/0002_blockers_kind_text.sql?raw";
 import runningTimersSql from "./migrations/0003_running_timers.sql?raw";
 import sortOrderSql from "./migrations/0004_sort_order.sql?raw";
+import dueNullableSql from "./migrations/0005_due_at_nullable.sql?raw";
 
 const ctx: DedicatedWorkerGlobalScope = self as DedicatedWorkerGlobalScope;
 
 const DB_FILENAME = "makewhen.sqlite3";
 const VFS_NAME = "opfs-sahpool";
+const UNGROUPED_PROJECT_ID = "__ungrouped__";
 
 type DbInfoPayload =
   | {
@@ -79,6 +81,10 @@ const migrations = [
   {
     version: 4,
     sql: sortOrderSql,
+  },
+  {
+    version: 5,
+    sql: dueNullableSql,
   },
 ];
 
@@ -435,13 +441,15 @@ const buildHierarchyMaps = (
 const computeSequenceRank = (data: {
   is_overdue: boolean;
   is_blocked: boolean;
-  due_at: number;
+  due_at: number | null;
   priority: number;
   dependents: number;
 }) => {
   const overdueScore = data.is_overdue ? 0 : 1;
   const blockedScore = data.is_blocked ? 1 : 0;
-  const dueKey = Math.floor(data.due_at / 60000);
+  const dueKey = Number.isFinite(data.due_at)
+    ? Math.floor((data.due_at as number) / 60000)
+    : Number.MAX_SAFE_INTEGER;
   const priorityScore = 5 - data.priority;
   return (
     overdueScore * 1e15 +
@@ -483,7 +491,7 @@ const exportData = (db: any) => {
       string | null,
       string,
       number,
-      number,
+      number | null,
       string,
       number,
       string,
@@ -605,7 +613,18 @@ const exportData = (db: any) => {
   };
 };
 
-const computeDueMetrics = (dueAt: number, now: number, status: string) => {
+const computeDueMetrics = (
+  dueAt: number | null,
+  now: number,
+  status: string
+) => {
+  if (dueAt === null) {
+    return {
+      is_overdue: false,
+      days_until_due: 0,
+      days_overdue: 0,
+    };
+  }
   const dayMs = 24 * 60 * 60 * 1000;
   const diffMs = dueAt - now;
   const isOverdue = diffMs < 0 && status !== "done" && status !== "canceled";
@@ -778,7 +797,10 @@ const handleMutate = (envelope: MutateEnvelope): MutateResult => {
             break;
           }
           const title = ensureString(args.title, "title");
-          const dueAt = ensureInteger(args.due_at, "due_at");
+          const dueAt =
+            args.due_at === null || args.due_at === undefined
+              ? null
+              : ensureInteger(args.due_at, "due_at");
           const estimateMinutes = ensureNonNegativeInteger(
             args.estimate_minutes,
             "estimate_minutes"
@@ -877,7 +899,11 @@ const handleMutate = (envelope: MutateEnvelope): MutateResult => {
               continue;
             }
             if (numericFields.has(key)) {
-              ensureNumber(value, key);
+              if (key === "due_at" && value === null) {
+                // allow nullable due dates
+              } else {
+                ensureNumber(value, key);
+              }
             }
             updates.push(`${key} = ?`);
             bind.push(value ?? null);
@@ -1093,7 +1119,7 @@ const handleMutate = (envelope: MutateEnvelope): MutateResult => {
           const sortOrder = Number(rows[0][1]);
           const siblingRows = dbHandle.exec({
             sql:
-              "SELECT id, sort_order FROM items WHERE parent_id IS ? ORDER BY sort_order ASC, due_at ASC, title ASC;",
+              "SELECT id, sort_order FROM items WHERE parent_id IS ? ORDER BY sort_order ASC, CASE WHEN due_at IS NULL THEN 1 ELSE 0 END, due_at ASC, title ASC;",
             rowMode: "array",
             returnValue: "resultRows",
             bind: [parentId],
@@ -1157,7 +1183,7 @@ const handleMutate = (envelope: MutateEnvelope): MutateResult => {
           }
           const siblingRows = dbHandle.exec({
             sql:
-              "SELECT id FROM items WHERE parent_id IS ? ORDER BY sort_order ASC, due_at ASC, title ASC;",
+              "SELECT id FROM items WHERE parent_id IS ? ORDER BY sort_order ASC, CASE WHEN due_at IS NULL THEN 1 ELSE 0 END, due_at ASC, title ASC;",
             rowMode: "array",
             returnValue: "resultRows",
             bind: [currentParent],
@@ -1363,7 +1389,10 @@ const handleMutate = (envelope: MutateEnvelope): MutateResult => {
               ),
               status: ensureString(item.status, `items[${index}].status`),
               priority: ensureNumber(item.priority, `items[${index}].priority`),
-              due_at: ensureNumber(item.due_at, `items[${index}].due_at`),
+              due_at: ensureOptionalNumber(
+                item.due_at ?? null,
+                `items[${index}].due_at`
+              ),
               estimate_mode: ensureString(
                 item.estimate_mode,
                 `items[${index}].estimate_mode`
@@ -2029,7 +2058,22 @@ const handleRequest = async (message: RpcRequest): Promise<RpcResponse> => {
             rowMode: "array",
             returnValue: "resultRows",
             bind: [itemId],
-          }) as Array<[string, string, string, string | null, string, number, number, string, number, string, string, string | null]>;
+          }) as Array<
+            [
+              string,
+              string,
+              string,
+              string | null,
+              string,
+              number,
+              number | null,
+              string,
+              number,
+              string,
+              string,
+              string | null
+            ]
+          >;
 
           if (rows.length === 0) {
             result = { ok: true, result: null };
@@ -2186,7 +2230,7 @@ const handleRequest = async (message: RpcRequest): Promise<RpcResponse> => {
             )
             SELECT id, type, title, parent_id, status, priority, due_at, estimate_mode, estimate_minutes, health, health_mode, notes
             FROM tree
-            ORDER BY sort_order ASC, due_at ASC, title ASC;`,
+            ORDER BY sort_order ASC, CASE WHEN due_at IS NULL THEN 1 ELSE 0 END, due_at ASC, title ASC;`,
             rowMode: "array",
             returnValue: "resultRows",
             bind: [projectId],
@@ -2413,7 +2457,7 @@ const handleRequest = async (message: RpcRequest): Promise<RpcResponse> => {
                     WHERE d.item_id = items.id AND (di.id IS NULL OR di.status != 'done')
                   )
                 ) AS is_blocked
-                FROM items WHERE parent_id = ? ORDER BY sort_order ASC, due_at ASC, title ASC;`
+                FROM items WHERE parent_id = ? ORDER BY sort_order ASC, CASE WHEN due_at IS NULL THEN 1 ELSE 0 END, due_at ASC, title ASC;`
               : `SELECT id, type, title, parent_id, status, priority, due_at,
                 (
                   EXISTS(SELECT 1 FROM blockers b WHERE b.item_id = items.id AND b.cleared_at IS NULL)
@@ -2423,11 +2467,22 @@ const handleRequest = async (message: RpcRequest): Promise<RpcResponse> => {
                     WHERE d.item_id = items.id AND (di.id IS NULL OR di.status != 'done')
                   )
                 ) AS is_blocked
-                FROM items ORDER BY sort_order ASC, due_at ASC, title ASC;`,
+                FROM items ORDER BY sort_order ASC, CASE WHEN due_at IS NULL THEN 1 ELSE 0 END, due_at ASC, title ASC;`,
             rowMode: "array",
             returnValue: "resultRows",
             bind: projectId ? [projectId] : undefined,
-          }) as Array<[string, string, string, string | null, string, number, number, number]>;
+          }) as Array<
+            [
+              string,
+              string,
+              string,
+              string | null,
+              string,
+              number,
+              number | null,
+              number
+            ]
+          >;
 
           const scheduleRows = dbHandle.exec({
             sql: `SELECT item_id,
@@ -2506,8 +2561,10 @@ const handleRequest = async (message: RpcRequest): Promise<RpcResponse> => {
           break;
         }
         case "listItems": {
-          const projectId =
+          const projectIdArg =
             typeof args.projectId === "string" ? args.projectId : null;
+          const isUngrouped = projectIdArg === UNGROUPED_PROJECT_ID;
+          const projectId = isUngrouped ? null : projectIdArg;
           const statusArg = args.status;
           const healthArg = args.health;
           const assigneeId =
@@ -2529,20 +2586,39 @@ const handleRequest = async (message: RpcRequest): Promise<RpcResponse> => {
               ? [healthArg]
               : null;
           const rows = dbHandle.exec({
-            sql: projectId
+            sql: isUngrouped
               ? `WITH RECURSIVE tree AS (
-                  SELECT * FROM items WHERE id = ?
+                  SELECT * FROM items WHERE parent_id IS NULL AND type = 'task'
                   UNION ALL
                   SELECT i.* FROM items i JOIN tree t ON i.parent_id = t.id
                 )
                 SELECT id, type, title, parent_id, status, priority, due_at,
                   estimate_mode, estimate_minutes, health, health_mode, notes, updated_at, sort_order
                 FROM tree
-                ORDER BY sort_order ASC, due_at ASC, title ASC;`
-              : `SELECT id, type, title, parent_id, status, priority, due_at,
-                  estimate_mode, estimate_minutes, health, health_mode, notes, updated_at, sort_order
-                FROM items
-                ORDER BY sort_order ASC, due_at ASC, title ASC;`,
+                ORDER BY sort_order ASC,
+                  CASE WHEN due_at IS NULL THEN 1 ELSE 0 END,
+                  due_at ASC,
+                  title ASC;`
+              : projectId
+                ? `WITH RECURSIVE tree AS (
+                    SELECT * FROM items WHERE id = ?
+                    UNION ALL
+                    SELECT i.* FROM items i JOIN tree t ON i.parent_id = t.id
+                  )
+                  SELECT id, type, title, parent_id, status, priority, due_at,
+                    estimate_mode, estimate_minutes, health, health_mode, notes, updated_at, sort_order
+                  FROM tree
+                  ORDER BY sort_order ASC,
+                    CASE WHEN due_at IS NULL THEN 1 ELSE 0 END,
+                    due_at ASC,
+                    title ASC;`
+                : `SELECT id, type, title, parent_id, status, priority, due_at,
+                    estimate_mode, estimate_minutes, health, health_mode, notes, updated_at, sort_order
+                  FROM items
+                  ORDER BY sort_order ASC,
+                    CASE WHEN due_at IS NULL THEN 1 ELSE 0 END,
+                    due_at ASC,
+                    title ASC;`,
             rowMode: "array",
             returnValue: "resultRows",
             bind: projectId ? [projectId] : undefined,
@@ -2554,7 +2630,7 @@ const handleRequest = async (message: RpcRequest): Promise<RpcResponse> => {
               string | null,
               string,
               number,
-              number,
+              number | null,
               string,
               number,
               string,
@@ -2678,7 +2754,9 @@ const handleRequest = async (message: RpcRequest): Promise<RpcResponse> => {
               type: row[1],
               title: row[2],
               parent_id: row[3],
-              project_id: projectMap.get(row[0]) ?? row[0],
+              project_id: isUngrouped
+                ? UNGROUPED_PROJECT_ID
+                : projectMap.get(row[0]) ?? row[0],
               depth: depthMap.get(row[0]) ?? 0,
               status: row[4],
               priority: row[5],
@@ -2739,7 +2817,9 @@ const handleRequest = async (message: RpcRequest): Promise<RpcResponse> => {
               return (aUpdated - bUpdated) * dir;
             }
             if (a.due_at !== b.due_at) {
-              return (a.due_at - b.due_at) * dir;
+              const aDue = a.due_at ?? Number.MAX_SAFE_INTEGER;
+              const bDue = b.due_at ?? Number.MAX_SAFE_INTEGER;
+              return (aDue - bDue) * dir;
             }
             if (a.sort_order !== b.sort_order) {
               return (a.sort_order - b.sort_order) * dir;
@@ -2771,11 +2851,11 @@ const handleRequest = async (message: RpcRequest): Promise<RpcResponse> => {
                 SELECT id, type, title, parent_id, status, priority, due_at,
                   estimate_minutes, health, health_mode, notes
                 FROM tree
-                ORDER BY sort_order ASC, due_at ASC, title ASC;`
+                ORDER BY sort_order ASC, CASE WHEN due_at IS NULL THEN 1 ELSE 0 END, due_at ASC, title ASC;`
               : `SELECT id, type, title, parent_id, status, priority, due_at,
                   estimate_minutes, health, health_mode, notes
                 FROM items
-                ORDER BY sort_order ASC, due_at ASC, title ASC;`,
+                ORDER BY sort_order ASC, CASE WHEN due_at IS NULL THEN 1 ELSE 0 END, due_at ASC, title ASC;`,
             rowMode: "array",
             returnValue: "resultRows",
             bind: projectId ? [projectId] : undefined,
@@ -3200,11 +3280,11 @@ const handleRequest = async (message: RpcRequest): Promise<RpcResponse> => {
                 SELECT id, type, title, parent_id, status, priority, due_at,
                   estimate_minutes, health, health_mode, notes
                 FROM tree
-                ORDER BY sort_order ASC, due_at ASC, title ASC;`
+                ORDER BY sort_order ASC, CASE WHEN due_at IS NULL THEN 1 ELSE 0 END, due_at ASC, title ASC;`
               : `SELECT id, type, title, parent_id, status, priority, due_at,
                   estimate_minutes, health, health_mode, notes
                 FROM items
-                ORDER BY sort_order ASC, due_at ASC, title ASC;`,
+                ORDER BY sort_order ASC, CASE WHEN due_at IS NULL THEN 1 ELSE 0 END, due_at ASC, title ASC;`,
             rowMode: "array",
             returnValue: "resultRows",
             bind: projectId ? [projectId] : undefined,
@@ -3437,7 +3517,7 @@ const handleRequest = async (message: RpcRequest): Promise<RpcResponse> => {
         case "listOverdue": {
           const now = Date.now();
           const rows = dbHandle.exec({
-            sql: "SELECT id, type, title, parent_id, status, priority, due_at FROM items WHERE due_at < ? AND status NOT IN ('done', 'canceled') ORDER BY due_at ASC;",
+            sql: "SELECT id, type, title, parent_id, status, priority, due_at FROM items WHERE due_at IS NOT NULL AND due_at < ? AND status NOT IN ('done', 'canceled') ORDER BY due_at ASC;",
             rowMode: "array",
             returnValue: "resultRows",
             bind: [now],
@@ -3466,7 +3546,7 @@ const handleRequest = async (message: RpcRequest): Promise<RpcResponse> => {
           const now = Date.now();
           const end = now + days * 24 * 60 * 60 * 1000;
           const rows = dbHandle.exec({
-            sql: "SELECT id, type, title, parent_id, status, priority, due_at FROM items WHERE due_at >= ? AND due_at <= ? ORDER BY due_at ASC;",
+            sql: "SELECT id, type, title, parent_id, status, priority, due_at FROM items WHERE due_at IS NOT NULL AND due_at >= ? AND due_at <= ? ORDER BY due_at ASC;",
             rowMode: "array",
             returnValue: "resultRows",
             bind: [now, end],

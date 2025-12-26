@@ -1,0 +1,115 @@
+/* Minimal Radix-like color scales (light + dark) for neutral + accent. */
+
+:root {
+  --mauve-1: #121113;
+  --mauve-2: #1a191b;
+  --mauve-3: #232225;
+  --mauve-4: #2b2a2e;
+  --mauve-5: #323136;
+  --mauve-6: #3c3a40;
+  --mauve-7: #4a4850;
+  --mauve-8: #625f69;
+  --mauve-9: #6f6d78;
+  --mauve-10: #7c7a85;
+  --mauve-11: #b5b2bc;
+  --mauve-12: #f0eef5;
+
+  --mauveDark-1: #121113;
+  --mauveDark-2: #1a191b;
+  --mauveDark-3: #232225;
+  --mauveDark-4: #2b2a2e;
+  --mauveDark-5: #323136;
+  --mauveDark-6: #3c3a40;
+  --mauveDark-7: #4a4850;
+  --mauveDark-8: #625f69;
+  --mauveDark-9: #6f6d78;
+  --mauveDark-10: #7c7a85;
+  --mauveDark-11: #b5b2bc;
+  --mauveDark-12: #f0eef5;
+
+  --violet-1: #14121f;
+  --violet-2: #1b1525;
+  --violet-3: #2a1f3a;
+  --violet-4: #33244a;
+  --violet-5: #3b2a57;
+  --violet-6: #443363;
+  --violet-7: #56468a;
+  --violet-8: #6e56cf;
+  --violet-9: #7c66dc;
+  --violet-10: #9a86f5;
+  --violet-11: #c4b1ff;
+  --violet-12: #f0ecff;
+
+  --violetDark-1: #14121f;
+  --violetDark-2: #1b1525;
+  --violetDark-3: #2a1f3a;
+  --violetDark-4: #33244a;
+  --violetDark-5: #3b2a57;
+  --violetDark-6: #443363;
+  --violetDark-7: #56468a;
+  --violetDark-8: #6e56cf;
+  --violetDark-9: #7c66dc;
+  --violetDark-10: #9a86f5;
+  --violetDark-11: #c4b1ff;
+  --violetDark-12: #f0ecff;
+}
+
+[data-accent="violet"] {
+  --accent-1: var(--violet-1);
+  --accent-2: var(--violet-2);
+  --accent-3: var(--violet-3);
+  --accent-4: var(--violet-4);
+  --accent-5: var(--violet-5);
+  --accent-6: var(--violet-6);
+  --accent-7: var(--violet-7);
+  --accent-8: var(--violet-8);
+  --accent-9: var(--violet-9);
+  --accent-10: var(--violet-10);
+  --accent-11: var(--violet-11);
+  --accent-12: var(--violet-12);
+}
+
+[data-neutral="mauve"] {
+  --neutral-1: var(--mauve-1);
+  --neutral-2: var(--mauve-2);
+  --neutral-3: var(--mauve-3);
+  --neutral-4: var(--mauve-4);
+  --neutral-5: var(--mauve-5);
+  --neutral-6: var(--mauve-6);
+  --neutral-7: var(--mauve-7);
+  --neutral-8: var(--mauve-8);
+  --neutral-9: var(--mauve-9);
+  --neutral-10: var(--mauve-10);
+  --neutral-11: var(--mauve-11);
+  --neutral-12: var(--mauve-12);
+}
+
+[data-mode="dark"][data-accent="violet"] {
+  --accent-1: var(--violetDark-1);
+  --accent-2: var(--violetDark-2);
+  --accent-3: var(--violetDark-3);
+  --accent-4: var(--violetDark-4);
+  --accent-5: var(--violetDark-5);
+  --accent-6: var(--violetDark-6);
+  --accent-7: var(--violetDark-7);
+  --accent-8: var(--violetDark-8);
+  --accent-9: var(--violetDark-9);
+  --accent-10: var(--violetDark-10);
+  --accent-11: var(--violetDark-11);
+  --accent-12: var(--violetDark-12);
+}
+
+[data-mode="dark"][data-neutral="mauve"] {
+  --neutral-1: var(--mauveDark-1);
+  --neutral-2: var(--mauveDark-2);
+  --neutral-3: var(--mauveDark-3);
+  --neutral-4: var(--mauveDark-4);
+  --neutral-5: var(--mauveDark-5);
+  --neutral-6: var(--mauveDark-6);
+  --neutral-7: var(--mauveDark-7);
+  --neutral-8: var(--mauveDark-8);
+  --neutral-9: var(--mauveDark-9);
+  --neutral-10: var(--mauveDark-10);
+  --neutral-11: var(--mauveDark-11);
+  --neutral-12: var(--mauveDark-12);
+}

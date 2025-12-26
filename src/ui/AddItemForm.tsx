@@ -48,6 +48,8 @@ type AddItemFormProps = {
   selectedProjectId: string | null;
   items: ItemRow[];
   onRefresh: () => void;
+  initialType?: ItemType;
+  onCreated?: () => void;
 };
 
 const formatOptionLabel = (item: ItemRow, parentType: ItemType | null) => {
@@ -76,6 +78,8 @@ const AddItemForm: FC<AddItemFormProps> = ({
   selectedProjectId,
   items,
   onRefresh,
+  initialType,
+  onCreated,
 }) => {
   const [mode, setMode] = useState<"create" | "edit">("create");
   const [selectedItemId, setSelectedItemId] = useState<string>("");
@@ -188,6 +192,15 @@ const AddItemForm: FC<AddItemFormProps> = ({
       setParentId(selectedProjectId);
     }
   }, [parentId, selectedProjectId, type]);
+
+  useEffect(() => {
+    if (initialType) {
+      setType(initialType);
+      if (initialType !== "task") {
+        setParentId(null);
+      }
+    }
+  }, [initialType]);
 
   const resetForm = () => {
     setTitle("");
@@ -373,6 +386,7 @@ const AddItemForm: FC<AddItemFormProps> = ({
         }
       }
       onRefresh();
+      onCreated?.();
     } catch (err) {
       const message = err instanceof Error ? err.message : "Unknown error";
       setError(message);

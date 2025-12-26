@@ -8,6 +8,7 @@ import {
   type FC,
   type ReactNode,
 } from "react";
+import * as ContextMenu from "@radix-ui/react-context-menu";
 import { query, mutate } from "../rpc/clientSingleton";
 import { UNGROUPED_PROJECT_ID } from "./constants";
 
@@ -100,6 +101,20 @@ const ListView: FC<ListViewProps> = ({
     groupKey: string;
     position: "before" | "end" | "into";
   } | null>(null);
+  const [inlineAdd, setInlineAdd] = useState<{
+    groupKey: string;
+    parentId: string;
+  } | null>(null);
+  const [inlineTitle, setInlineTitle] = useState("");
+  const [editing, setEditing] = useState<{
+    itemId: string;
+    field: string;
+  } | null>(null);
+  const [editValue, setEditValue] = useState("");
+  const [milestoneDrop, setMilestoneDrop] = useState<{
+    milestoneId: string;
+    position: "top" | "bottom";
+  } | null>(null);
 
   const columns = useMemo<Column[]>(
     () => [
@@ -181,6 +196,15 @@ const ListView: FC<ListViewProps> = ({
         label: "Due At",
         minWidth: 160,
         render: (item: ListItem) => formatDate(item.due_at),
+      },
+      {
+        key: "scheduled_for",
+        label: "Scheduled For",
+        minWidth: 170,
+        render: (item: ListItem) =>
+          item.schedule?.schedule_start_at
+            ? formatDate(item.schedule.schedule_start_at)
+            : "—",
       },
       {
         key: "estimate_mode",
@@ -394,6 +418,529 @@ const ListView: FC<ListViewProps> = ({
     }
   };
 
+  const handleRename = async (item: ListItem) => {
+    const nextTitle = prompt("Rename item", item.title);
+    if (!nextTitle || !nextTitle.trim()) {
+      return;
+    }
+    setError(null);
+    try {
+      await mutate("update_item_fields", {
+        id: item.id,
+        fields: { title: nextTitle.trim() },
+      });
+      onRefresh();
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Unknown error";
+      setError(message);
+    }
+  };
+
+  const handleAddTaskUnder = async (parentId: string) => {
+    setError(null);
+    try {
+      await mutate("create_item", {
+        type: "task",
+        title: "New task",
+        parent_id: parentId,
+        due_at: null,
+        estimate_minutes: 0,
+      });
+      onRefresh();
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Unknown error";
+      setError(message);
+    }
+  };
+
+  const handleDuplicateTask = async (item: ListItem) => {
+    setError(null);
+    try {
+      await mutate("create_item", {
+        type: "task",
+        title: `${item.title} (copy)`,
+        parent_id: item.parent_id,
+        due_at: item.due_at ?? null,
+        estimate_mode: item.estimate_mode ?? "manual",
+        estimate_minutes: item.estimate_minutes ?? 0,
+        status: item.status,
+        priority: item.priority ?? 0,
+        notes: item.notes ?? null,
+      });
+      onRefresh();
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Unknown error";
+      setError(message);
+    }
+  };
+
+  const handleInlineCommit = async () => {
+    if (!inlineAdd) {
+      return;
+    }
+    const title = inlineTitle.trim();
+    if (!title) {
+      setInlineAdd(null);
+      setInlineTitle("");
+      return;
+    }
+    setError(null);
+    try {
+      await mutate("create_item", {
+        type: "task",
+        title,
+        parent_id: inlineAdd.parentId,
+        due_at: null,
+        estimate_minutes: 0,
+      });
+      onRefresh();
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Unknown error";
+      setError(message);
+    } finally {
+      setInlineAdd(null);
+      setInlineTitle("");
+    }
+  };
+
+  const handleInlineCancel = () => {
+    setInlineAdd(null);
+    setInlineTitle("");
+  };
+
+  const startInlineAdd = (groupKey: string, parentId: string) => {
+    setInlineAdd({ groupKey, parentId });
+    setInlineTitle("");
+  };
+
+  const toDateTimeLocal = (value: number | null) => {
+    if (!value) {
+      return "";
+    }
+    const date = new Date(value);
+    const offset = date.getTimezoneOffset() * 60000;
+    return new Date(value - offset).toISOString().slice(0, 16);
+  };
+
+  const startEdit = (itemId: string, field: string, value: string) => {
+    setEditing({ itemId, field });
+    setEditValue(value);
+  };
+
+  const cancelEdit = () => {
+    setEditing(null);
+    setEditValue("");
+  };
+
+  const commitEdit = async () => {
+    if (!editing) {
+      return;
+    }
+    const item = itemById.get(editing.itemId);
+    if (!item) {
+      cancelEdit();
+      return;
+    }
+    const value = editValue.trim();
+    setError(null);
+    try {
+      switch (editing.field) {
+        case "title":
+          if (value) {
+            await mutate("update_item_fields", {
+              id: item.id,
+              fields: { title: value },
+            });
+          }
+          break;
+        case "status":
+          await mutate("set_status", { id: item.id, status: value });
+          break;
+        case "priority": {
+          const priority = Number(value);
+          if (Number.isFinite(priority)) {
+            await mutate("update_item_fields", {
+              id: item.id,
+              fields: { priority },
+            });
+          }
+          break;
+        }
+        case "due_at": {
+          if (!value) {
+            await mutate("update_item_fields", {
+              id: item.id,
+              fields: { due_at: null },
+            });
+            break;
+          }
+          const dueAt = new Date(value).getTime();
+          if (Number.isFinite(dueAt)) {
+            await mutate("update_item_fields", {
+              id: item.id,
+              fields: { due_at: dueAt },
+            });
+          }
+          break;
+        }
+        case "scheduled_for": {
+          if (!value) {
+            break;
+          }
+          const startAt = new Date(value).getTime();
+          if (Number.isFinite(startAt)) {
+            await mutate("create_block", {
+              item_id: item.id,
+              start_at: startAt,
+              duration_minutes: 60,
+              source: "manual",
+            });
+          }
+          break;
+        }
+        case "tags": {
+          const tags = value
+            ? value
+                .split(",")
+                .map((entry) => entry.trim())
+                .filter(Boolean)
+            : [];
+          await mutate("set_item_tags", { item_id: item.id, tags });
+          break;
+        }
+        case "depends_on": {
+          const desired = new Set(
+            value
+              .split(",")
+              .map((entry) => entry.trim())
+              .filter(Boolean)
+          );
+          const existing = new Set(item.depends_on ?? []);
+          for (const depId of desired) {
+            if (!existing.has(depId)) {
+              await mutate("add_dependency", {
+                item_id: item.id,
+                depends_on_id: depId,
+              });
+            }
+          }
+          for (const depId of existing) {
+            if (!desired.has(depId)) {
+              await mutate("remove_dependency", {
+                item_id: item.id,
+                depends_on_id: depId,
+              });
+            }
+          }
+          break;
+        }
+        case "notes":
+          await mutate("update_item_fields", {
+            id: item.id,
+            fields: { notes: value ? value : null },
+          });
+          break;
+        case "health":
+          await mutate("update_item_fields", {
+            id: item.id,
+            fields: { health: value, health_mode: "manual" },
+          });
+          break;
+        default:
+          break;
+      }
+      onRefresh();
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Unknown error";
+      setError(message);
+    } finally {
+      cancelEdit();
+    }
+  };
+
+  const renderEditableCell = (
+    item: ListItem,
+    field: string,
+    display: ReactNode,
+    editor: ReactNode,
+    initialValue: string
+  ) => {
+    const isEditing = editing?.itemId === item.id && editing.field === field;
+    if (isEditing) {
+      return <div className="cell-editing">{editor}</div>;
+    }
+    return (
+      <button
+        type="button"
+        className="cell-button"
+        onClick={(event) => {
+          event.stopPropagation();
+          startEdit(item.id, field, initialValue);
+        }}
+      >
+        {display}
+      </button>
+    );
+  };
+
+  const renderCell = (
+    item: ListItem,
+    column: Column,
+    indent: number,
+    dragHandle: ReactNode | null,
+    actions?: ReactNode
+  ) => {
+    if (column.key === "title") {
+      const isEditing = editing?.itemId === item.id && editing.field === "title";
+      if (isEditing) {
+        return (
+          <div className="cell-editing">
+            <input
+              value={editValue}
+              onChange={(event) => setEditValue(event.target.value)}
+              onBlur={() => void commitEdit()}
+              onKeyDown={(event) => {
+                if (event.key === "Enter") {
+                  event.preventDefault();
+                  void commitEdit();
+                }
+                if (event.key === "Escape") {
+                  event.preventDefault();
+                  cancelEdit();
+                }
+              }}
+              autoFocus
+            />
+          </div>
+        );
+      }
+      return (
+        <div
+          className="cell-title-editable"
+          onClick={(event) => {
+            const target = event.target as HTMLElement;
+            if (target.closest("button")) {
+              return;
+            }
+            startEdit(item.id, "title", item.title ?? "");
+          }}
+        >
+          {column.render(item, indent, dragHandle, actions)}
+        </div>
+      );
+    }
+    if (column.key === "status") {
+      return renderEditableCell(
+        item,
+        "status",
+        column.render(item, 0, null),
+        <select
+          value={editValue}
+          onChange={(event) => setEditValue(event.target.value)}
+          onBlur={() => void commitEdit()}
+          onKeyDown={(event) => {
+            if (event.key === "Enter") {
+              event.preventDefault();
+              void commitEdit();
+            }
+            if (event.key === "Escape") {
+              event.preventDefault();
+              cancelEdit();
+            }
+          }}
+          autoFocus
+        >
+          <option value="backlog">backlog</option>
+          <option value="ready">ready</option>
+          <option value="in_progress">in_progress</option>
+          <option value="blocked">blocked</option>
+          <option value="review">review</option>
+          <option value="done">done</option>
+          <option value="canceled">canceled</option>
+        </select>,
+        item.status ?? ""
+      );
+    }
+    if (column.key === "priority") {
+      return renderEditableCell(
+        item,
+        "priority",
+        column.render(item, 0, null),
+        <input
+          type="number"
+          value={editValue}
+          onChange={(event) => setEditValue(event.target.value)}
+          onBlur={() => void commitEdit()}
+          onKeyDown={(event) => {
+            if (event.key === "Enter") {
+              event.preventDefault();
+              void commitEdit();
+            }
+            if (event.key === "Escape") {
+              event.preventDefault();
+              cancelEdit();
+            }
+          }}
+          autoFocus
+        />,
+        String(item.priority ?? 0)
+      );
+    }
+    if (column.key === "due_at") {
+      return renderEditableCell(
+        item,
+        "due_at",
+        column.render(item, 0, null),
+        <input
+          type="datetime-local"
+          value={editValue}
+          onChange={(event) => setEditValue(event.target.value)}
+          onBlur={() => void commitEdit()}
+          onKeyDown={(event) => {
+            if (event.key === "Enter") {
+              event.preventDefault();
+              void commitEdit();
+            }
+            if (event.key === "Escape") {
+              event.preventDefault();
+              cancelEdit();
+            }
+          }}
+          autoFocus
+        />,
+        toDateTimeLocal(item.due_at ?? null)
+      );
+    }
+    if (column.key === "scheduled_for") {
+      return renderEditableCell(
+        item,
+        "scheduled_for",
+        column.render(item, 0, null),
+        <input
+          type="datetime-local"
+          value={editValue}
+          onChange={(event) => setEditValue(event.target.value)}
+          onBlur={() => void commitEdit()}
+          onKeyDown={(event) => {
+            if (event.key === "Enter") {
+              event.preventDefault();
+              void commitEdit();
+            }
+            if (event.key === "Escape") {
+              event.preventDefault();
+              cancelEdit();
+            }
+          }}
+          autoFocus
+        />,
+        toDateTimeLocal(item.schedule?.schedule_start_at ?? null)
+      );
+    }
+    if (column.key === "tags") {
+      return renderEditableCell(
+        item,
+        "tags",
+        column.render(item, 0, null),
+        <input
+          value={editValue}
+          onChange={(event) => setEditValue(event.target.value)}
+          onBlur={() => void commitEdit()}
+          onKeyDown={(event) => {
+            if (event.key === "Enter") {
+              event.preventDefault();
+              void commitEdit();
+            }
+            if (event.key === "Escape") {
+              event.preventDefault();
+              cancelEdit();
+            }
+          }}
+          autoFocus
+        />,
+        (item.tags ?? []).map((tag) => tag.name).join(", ")
+      );
+    }
+    if (column.key === "depends_on") {
+      return renderEditableCell(
+        item,
+        "depends_on",
+        column.render(item, 0, null),
+        <input
+          value={editValue}
+          onChange={(event) => setEditValue(event.target.value)}
+          onBlur={() => void commitEdit()}
+          onKeyDown={(event) => {
+            if (event.key === "Enter") {
+              event.preventDefault();
+              void commitEdit();
+            }
+            if (event.key === "Escape") {
+              event.preventDefault();
+              cancelEdit();
+            }
+          }}
+          autoFocus
+        />,
+        (item.depends_on ?? []).join(", ")
+      );
+    }
+    if (column.key === "notes") {
+      return renderEditableCell(
+        item,
+        "notes",
+        column.render(item, 0, null),
+        <input
+          value={editValue}
+          onChange={(event) => setEditValue(event.target.value)}
+          onBlur={() => void commitEdit()}
+          onKeyDown={(event) => {
+            if (event.key === "Enter") {
+              event.preventDefault();
+              void commitEdit();
+            }
+            if (event.key === "Escape") {
+              event.preventDefault();
+              cancelEdit();
+            }
+          }}
+          autoFocus
+        />,
+        item.notes ?? ""
+      );
+    }
+    if (column.key === "health") {
+      return renderEditableCell(
+        item,
+        "health",
+        column.render(item, 0, null),
+        <select
+          value={editValue}
+          onChange={(event) => setEditValue(event.target.value)}
+          onBlur={() => void commitEdit()}
+          onKeyDown={(event) => {
+            if (event.key === "Enter") {
+              event.preventDefault();
+              void commitEdit();
+            }
+            if (event.key === "Escape") {
+              event.preventDefault();
+              cancelEdit();
+            }
+          }}
+          autoFocus
+        >
+          <option value="on_track">on_track</option>
+          <option value="at_risk">at_risk</option>
+          <option value="behind">behind</option>
+          <option value="ahead">ahead</option>
+          <option value="unknown">unknown</option>
+        </select>,
+        item.health ?? "unknown"
+      );
+    }
+    return column.render(item, 0, null);
+  };
+
   const handleMove = async (
     itemId: string,
     parentId: string | null,
@@ -452,6 +999,31 @@ const ListView: FC<ListViewProps> = ({
     }
   };
 
+  const handleMoveToParentAtPosition = async (
+    itemId: string,
+    targetParentId: string,
+    position: "top" | "bottom"
+  ) => {
+    const siblings = tasksUnderMilestone.get(targetParentId) ?? [];
+    const sortOrders = siblings.map((task) => task.sort_order);
+    const minSort = sortOrders.length > 0 ? Math.min(...sortOrders) : 0;
+    const maxSort = sortOrders.length > 0 ? Math.max(...sortOrders) : 0;
+    const nextSort =
+      position === "top" ? minSort - 1 : maxSort + 1;
+
+    setError(null);
+    try {
+      await mutate("update_item_fields", {
+        id: itemId,
+        fields: { parent_id: targetParentId, sort_order: nextSort },
+      });
+      onRefresh();
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Unknown error";
+      setError(message);
+    }
+  };
+
   const handleDragStart = (itemId: string, groupKey: string) => (
     event: DragEvent
   ) => {
@@ -463,6 +1035,7 @@ const ListView: FC<ListViewProps> = ({
   const handleDragEnd = () => {
     setDragging(null);
     setDragOver(null);
+    setMilestoneDrop(null);
   };
 
   const handleDragOverRow = (itemId: string, groupKey: string) => (
@@ -515,7 +1088,18 @@ const ListView: FC<ListViewProps> = ({
       handleDragOverRow(milestoneId, "milestones")(event);
       return;
     }
-    handleDragOverGroup(milestoneId, `move-target:${milestoneId}`)(event);
+    const draggingItem = itemById.get(dragging.itemId);
+    if (!draggingItem || draggingItem.type !== "task") {
+      return;
+    }
+    if (!canMoveTaskToParent(dragging.itemId, milestoneId)) {
+      return;
+    }
+    event.preventDefault();
+    const rect = (event.currentTarget as HTMLElement).getBoundingClientRect();
+    const midpoint = rect.top + rect.height / 2;
+    const position = event.clientY < midpoint ? "top" : "bottom";
+    setMilestoneDrop({ milestoneId, position });
   };
 
   const handleMilestoneDrop = (milestoneId: string) => (event: DragEvent) => {
@@ -524,9 +1108,21 @@ const ListView: FC<ListViewProps> = ({
     }
     if (dragging.groupKey === "milestones") {
       handleDropBefore(milestoneId, "milestones")(event);
+      setMilestoneDrop(null);
+      return;
+    }
+    if (milestoneDrop?.milestoneId === milestoneId) {
+      event.preventDefault();
+      void handleMoveToParentAtPosition(
+        dragging.itemId,
+        milestoneId,
+        milestoneDrop.position
+      );
+      setMilestoneDrop(null);
       return;
     }
     handleDropOnGroup(milestoneId)(event);
+    setMilestoneDrop(null);
   };
 
   const handleDropBefore = (itemId: string, groupKey: string) => (
@@ -605,15 +1201,17 @@ const ListView: FC<ListViewProps> = ({
   );
 
   if (!selectedProjectId) {
-    return <div className="list-view">Select a project</div>;
+    return (
+      <div className="list-view list-view-container">Select a project</div>
+    );
   }
 
   return (
-    <div className="list-view">
+    <div className="list-view list-view-container">
       {loading ? <div className="list-empty">Loading…</div> : null}
       {error ? <div className="error">{error}</div> : null}
       <div className="list-scroll">
-        <table className="list-table">
+        <table className="list-table list-table-wide">
           <thead>
             <tr>
               {columns.map((column) => (
@@ -676,31 +1274,61 @@ const ListView: FC<ListViewProps> = ({
                   );
                   return (
                     <Fragment key={milestone.id}>
-                      <tr
-                        className={
-                          dragOver &&
-                          ((dragOver.groupKey === "milestones" &&
-                            dragOver.itemId === milestone.id) ||
-                            dragOver.groupKey === `move-target:${milestone.id}`)
-                            ? "group-row drag-over"
-                            : "group-row"
-                        }
-                        onDragOver={handleMilestoneDragOver(milestone.id)}
-                        onDrop={handleMilestoneDrop(milestone.id)}
-                      >
-                        {columns.map((column) => (
-                          <td key={`${milestone.id}-${column.key}`}>
-                            {column.key === "title"
-                              ? column.render(
+                      <ContextMenu.Root>
+                        <ContextMenu.Trigger asChild>
+                          <tr
+                            className={
+                              dragOver &&
+                              ((dragOver.groupKey === "milestones" &&
+                                dragOver.itemId === milestone.id) ||
+                                dragOver.groupKey === `move-target:${milestone.id}`)
+                                ? "group-row drag-over"
+                                : milestoneDrop?.milestoneId === milestone.id
+                                  ? milestoneDrop.position === "top"
+                                    ? "group-row milestone-drop-top"
+                                    : "group-row milestone-drop-bottom"
+                                  : "group-row"
+                            }
+                            onDragOver={handleMilestoneDragOver(milestone.id)}
+                            onDrop={handleMilestoneDrop(milestone.id)}
+                          >
+                            {columns.map((column) => (
+                              <td key={`${milestone.id}-${column.key}`}>
+                                {renderCell(
                                   milestone,
+                                  column,
                                   milestone.depth * 16,
                                   milestoneDragHandle,
                                   milestoneActions
-                                )
-                              : column.render(milestone, 0, null)}
-                          </td>
-                        ))}
-                      </tr>
+                                )}
+                              </td>
+                            ))}
+                          </tr>
+                        </ContextMenu.Trigger>
+                        <ContextMenu.Portal>
+                          <ContextMenu.Content className="context-menu-content">
+                            <ContextMenu.Item
+                              className="context-menu-item"
+                              onSelect={() => handleAddTaskUnder(milestone.id)}
+                            >
+                              Add task under milestone
+                            </ContextMenu.Item>
+                            <ContextMenu.Item
+                              className="context-menu-item"
+                              onSelect={() => handleRename(milestone)}
+                            >
+                              Rename milestone
+                            </ContextMenu.Item>
+                            <ContextMenu.Separator className="context-menu-separator" />
+                            <ContextMenu.Item
+                              className="context-menu-item"
+                              onSelect={() => handleDelete(milestone)}
+                            >
+                              Delete milestone
+                            </ContextMenu.Item>
+                          </ContextMenu.Content>
+                        </ContextMenu.Portal>
+                      </ContextMenu.Root>
                       {isCollapsed
                         ? null
                         : milestoneTasks.map((item, itemIndex) => {
@@ -723,29 +1351,54 @@ const ListView: FC<ListViewProps> = ({
                             );
                             return (
                               <Fragment key={item.id}>
-                                <tr
-                                  className={
-                                    dragOver?.itemId === item.id &&
-                                    dragOver.groupKey === groupKey
-                                      ? "drag-over"
-                                      : undefined
-                                  }
-                                  onDragOver={handleDragOverRow(item.id, groupKey)}
-                                  onDrop={handleDropBefore(item.id, groupKey)}
-                                >
-                                  {columns.map((column) => (
-                                    <td key={`${item.id}-${column.key}`}>
-                                      {column.key === "title"
-                                        ? column.render(
+                                <ContextMenu.Root>
+                                  <ContextMenu.Trigger asChild>
+                                    <tr
+                                      className={
+                                        dragOver?.itemId === item.id &&
+                                        dragOver.groupKey === groupKey
+                                          ? "drag-over"
+                                          : undefined
+                                      }
+                                      onDragOver={handleDragOverRow(item.id, groupKey)}
+                                      onDrop={handleDropBefore(item.id, groupKey)}
+                                    >
+                                      {columns.map((column) => (
+                                        <td key={`${item.id}-${column.key}`}>
+                                          {renderCell(
                                             item,
+                                            column,
                                             item.depth * 16,
                                             renderDragHandle(item.id, groupKey),
                                             actions
-                                          )
-                                        : column.render(item, 0, null)}
-                                    </td>
-                                  ))}
-                                </tr>
+                                          )}
+                                        </td>
+                                      ))}
+                                    </tr>
+                                  </ContextMenu.Trigger>
+                                  <ContextMenu.Portal>
+                                    <ContextMenu.Content className="context-menu-content">
+                                      <ContextMenu.Item
+                                        className="context-menu-item"
+                                        onSelect={() => handleDelete(item)}
+                                      >
+                                        Delete task
+                                      </ContextMenu.Item>
+                                      <ContextMenu.Item
+                                        className="context-menu-item"
+                                        onSelect={() => handleDuplicateTask(item)}
+                                      >
+                                        Duplicate task
+                                      </ContextMenu.Item>
+                                      <ContextMenu.Item
+                                        className="context-menu-item"
+                                        disabled
+                                      >
+                                        Move to…
+                                      </ContextMenu.Item>
+                                    </ContextMenu.Content>
+                                  </ContextMenu.Portal>
+                                </ContextMenu.Root>
                                 {children.map((child, childIndex) => {
                                   const childGroupKey = `task:${item.id}`;
                                   const childActions = (
@@ -765,36 +1418,62 @@ const ListView: FC<ListViewProps> = ({
                                     </span>
                                   );
                                   return (
-                                    <tr
-                                      key={child.id}
-                                      className={
-                                        dragOver?.itemId === child.id &&
-                                        dragOver.groupKey === childGroupKey
-                                          ? "drag-over"
-                                          : undefined
-                                      }
-                                      onDragOver={handleDragOverRow(
-                                        child.id,
-                                        childGroupKey
-                                      )}
-                                      onDrop={handleDropBefore(child.id, childGroupKey)}
-                                    >
-                                      {columns.map((column) => (
-                                        <td key={`${child.id}-${column.key}`}>
-                                          {column.key === "title"
-                                            ? column.render(
-                                                child,
-                                                child.depth * 16,
-                                                renderDragHandle(
-                                                  child.id,
-                                                  childGroupKey
-                                                ),
-                                                childActions
-                                              )
-                                            : column.render(child, 0, null)}
-                                        </td>
-                                      ))}
-                                    </tr>
+                                    <ContextMenu.Root key={child.id}>
+                                      <ContextMenu.Trigger asChild>
+                                        <tr
+                                          className={
+                                            dragOver?.itemId === child.id &&
+                                            dragOver.groupKey === childGroupKey
+                                              ? "drag-over"
+                                              : undefined
+                                          }
+                                          onDragOver={handleDragOverRow(
+                                            child.id,
+                                            childGroupKey
+                                          )}
+                                          onDrop={handleDropBefore(
+                                            child.id,
+                                            childGroupKey
+                                          )}
+                                        >
+                                    {columns.map((column) => (
+                                      <td key={`${child.id}-${column.key}`}>
+                                        {renderCell(
+                                          child,
+                                          column,
+                                          child.depth * 16,
+                                          renderDragHandle(child.id, childGroupKey),
+                                          childActions
+                                        )}
+                                      </td>
+                                    ))}
+                                        </tr>
+                                      </ContextMenu.Trigger>
+                                      <ContextMenu.Portal>
+                                        <ContextMenu.Content className="context-menu-content">
+                                          <ContextMenu.Item
+                                            className="context-menu-item"
+                                            onSelect={() => handleDelete(child)}
+                                          >
+                                            Delete task
+                                          </ContextMenu.Item>
+                                          <ContextMenu.Item
+                                            className="context-menu-item"
+                                            onSelect={() =>
+                                              handleDuplicateTask(child)
+                                            }
+                                          >
+                                            Duplicate task
+                                          </ContextMenu.Item>
+                                          <ContextMenu.Item
+                                            className="context-menu-item"
+                                            disabled
+                                          >
+                                            Move to…
+                                          </ContextMenu.Item>
+                                        </ContextMenu.Content>
+                                      </ContextMenu.Portal>
+                                    </ContextMenu.Root>
                                   );
                                 })}
                                 {children.length > 0 ? (
@@ -863,6 +1542,37 @@ const ListView: FC<ListViewProps> = ({
                           </td>
                         </tr>
                       ) : null}
+                      <tr className="add-row">
+                        <td colSpan={columns.length}>
+                          {inlineAdd?.groupKey === groupKey ? (
+                            <input
+                              className="add-row-input"
+                              value={inlineTitle}
+                              onChange={(event) => setInlineTitle(event.target.value)}
+                              onKeyDown={(event) => {
+                                if (event.key === "Enter") {
+                                  event.preventDefault();
+                                  void handleInlineCommit();
+                                }
+                                if (event.key === "Escape") {
+                                  event.preventDefault();
+                                  handleInlineCancel();
+                                }
+                              }}
+                              placeholder="New task title"
+                              autoFocus
+                            />
+                          ) : (
+                            <button
+                              type="button"
+                              className="add-row-button"
+                              onClick={() => startInlineAdd(groupKey, milestone.id)}
+                            >
+                              Add task…
+                            </button>
+                          )}
+                        </td>
+                      </tr>
                     </Fragment>
                   );
                 })}
@@ -941,29 +1651,54 @@ const ListView: FC<ListViewProps> = ({
                       );
                       return (
                         <Fragment key={item.id}>
-                          <tr
-                            className={
-                              dragOver?.itemId === item.id &&
-                              dragOver.groupKey === groupKey
-                                ? "drag-over"
-                                : undefined
-                            }
-                            onDragOver={handleDragOverRow(item.id, groupKey)}
-                            onDrop={handleDropBefore(item.id, groupKey)}
-                          >
-                            {columns.map((column) => (
-                              <td key={`${item.id}-${column.key}`}>
-                                {column.key === "title"
-                                  ? column.render(
-                                      item,
-                                      item.depth * 16,
-                                      renderDragHandle(item.id, groupKey),
-                                      actions
-                                    )
-                                  : column.render(item, 0, null)}
-                              </td>
-                            ))}
-                          </tr>
+                            <ContextMenu.Root>
+                              <ContextMenu.Trigger asChild>
+                                <tr
+                                  className={
+                                    dragOver?.itemId === item.id &&
+                                    dragOver.groupKey === groupKey
+                                      ? "drag-over"
+                                      : undefined
+                                  }
+                                  onDragOver={handleDragOverRow(item.id, groupKey)}
+                                  onDrop={handleDropBefore(item.id, groupKey)}
+                                >
+                                    {columns.map((column) => (
+                                      <td key={`${item.id}-${column.key}`}>
+                                        {renderCell(
+                                          item,
+                                          column,
+                                          item.depth * 16,
+                                          renderDragHandle(item.id, groupKey),
+                                          actions
+                                        )}
+                                      </td>
+                                    ))}
+                                </tr>
+                              </ContextMenu.Trigger>
+                              <ContextMenu.Portal>
+                                <ContextMenu.Content className="context-menu-content">
+                                  <ContextMenu.Item
+                                    className="context-menu-item"
+                                    onSelect={() => handleDelete(item)}
+                                  >
+                                    Delete task
+                                  </ContextMenu.Item>
+                                  <ContextMenu.Item
+                                    className="context-menu-item"
+                                    onSelect={() => handleDuplicateTask(item)}
+                                  >
+                                    Duplicate task
+                                  </ContextMenu.Item>
+                                  <ContextMenu.Item
+                                    className="context-menu-item"
+                                    disabled
+                                  >
+                                    Move to…
+                                  </ContextMenu.Item>
+                                </ContextMenu.Content>
+                              </ContextMenu.Portal>
+                            </ContextMenu.Root>
                           {children.map((child, childIndex) => {
                             const childGroupKey = `task:${item.id}`;
                             const childActions = (
@@ -983,33 +1718,60 @@ const ListView: FC<ListViewProps> = ({
                               </span>
                             );
                             return (
-                              <tr
-                                key={child.id}
-                                className={
-                                  dragOver?.itemId === child.id &&
-                                  dragOver.groupKey === childGroupKey
-                                    ? "drag-over"
-                                    : undefined
-                                }
-                                onDragOver={handleDragOverRow(child.id, childGroupKey)}
-                                onDrop={handleDropBefore(child.id, childGroupKey)}
-                              >
-                                {columns.map((column) => (
-                                  <td key={`${child.id}-${column.key}`}>
-                                    {column.key === "title"
-                                      ? column.render(
+                              <ContextMenu.Root key={child.id}>
+                                <ContextMenu.Trigger asChild>
+                                  <tr
+                                    className={
+                                      dragOver?.itemId === child.id &&
+                                      dragOver.groupKey === childGroupKey
+                                        ? "drag-over"
+                                        : undefined
+                                    }
+                                    onDragOver={handleDragOverRow(
+                                      child.id,
+                                      childGroupKey
+                                    )}
+                                    onDrop={handleDropBefore(
+                                      child.id,
+                                      childGroupKey
+                                    )}
+                                  >
+                                    {columns.map((column) => (
+                                      <td key={`${child.id}-${column.key}`}>
+                                        {renderCell(
                                           child,
+                                          column,
                                           child.depth * 16,
-                                          renderDragHandle(
-                                            child.id,
-                                            childGroupKey
-                                          ),
+                                          renderDragHandle(child.id, childGroupKey),
                                           childActions
-                                        )
-                                      : column.render(child, 0, null)}
-                                  </td>
-                                ))}
-                              </tr>
+                                        )}
+                                      </td>
+                                    ))}
+                                  </tr>
+                                </ContextMenu.Trigger>
+                                <ContextMenu.Portal>
+                                  <ContextMenu.Content className="context-menu-content">
+                                    <ContextMenu.Item
+                                      className="context-menu-item"
+                                      onSelect={() => handleDelete(child)}
+                                    >
+                                      Delete task
+                                    </ContextMenu.Item>
+                                    <ContextMenu.Item
+                                      className="context-menu-item"
+                                      onSelect={() => handleDuplicateTask(child)}
+                                    >
+                                      Duplicate task
+                                    </ContextMenu.Item>
+                                    <ContextMenu.Item
+                                      className="context-menu-item"
+                                      disabled
+                                    >
+                                      Move to…
+                                    </ContextMenu.Item>
+                                  </ContextMenu.Content>
+                                </ContextMenu.Portal>
+                              </ContextMenu.Root>
                             );
                           })}
                           {children.length > 0 ? (
@@ -1048,6 +1810,37 @@ const ListView: FC<ListViewProps> = ({
                         </Fragment>
                       );
                     })}
+                <tr className="add-row">
+                  <td colSpan={columns.length}>
+                    {inlineAdd?.groupKey === "ungrouped" ? (
+                      <input
+                        className="add-row-input"
+                        value={inlineTitle}
+                        onChange={(event) => setInlineTitle(event.target.value)}
+                        onKeyDown={(event) => {
+                          if (event.key === "Enter") {
+                            event.preventDefault();
+                            void handleInlineCommit();
+                          }
+                          if (event.key === "Escape") {
+                            event.preventDefault();
+                            handleInlineCancel();
+                          }
+                        }}
+                        placeholder="New task title"
+                        autoFocus
+                      />
+                    ) : (
+                      <button
+                        type="button"
+                        className="add-row-button"
+                        onClick={() => startInlineAdd("ungrouped", ungroupedParentId)}
+                      >
+                        Add task…
+                      </button>
+                    )}
+                  </td>
+                </tr>
                 {collapsedUngrouped || ungroupedTasks.length === 0 ? null : (
                   <tr className="drop-row">
                     <td colSpan={columns.length}>

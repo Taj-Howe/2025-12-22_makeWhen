@@ -1,6 +1,6 @@
 import type { FC } from "react";
 import { useEffect, useMemo, useRef, useState } from "react";
-import { createPortal } from "react-dom";
+import * as Dialog from "@radix-ui/react-dialog";
 import { parseCommand } from "../cli/parseCommand";
 import { mutate } from "../rpc/clientSingleton";
 import { UNGROUPED_PROJECT_ID } from "./constants";
@@ -22,9 +22,7 @@ const CommandPalette: FC<CommandPaletteProps> = ({
 }) => {
   const [inputValue, setInputValue] = useState("");
   const [submitError, setSubmitError] = useState<string | null>(null);
-  const contentRef = useRef<HTMLDivElement | null>(null);
   const inputRef = useRef<HTMLInputElement | null>(null);
-  const lastFocusedRef = useRef<HTMLElement | null>(null);
 
   useEffect(() => {
     if (open) {
@@ -37,44 +35,6 @@ const CommandPalette: FC<CommandPaletteProps> = ({
     setInputValue("");
     return;
   }, [open]);
-
-  useEffect(() => {
-    if (!open) {
-      return;
-    }
-    lastFocusedRef.current = document.activeElement as HTMLElement | null;
-    const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") {
-        event.preventDefault();
-        onOpenChange(false);
-        return;
-      }
-      if (event.key !== "Tab") {
-        return;
-      }
-      const nodes = getFocusableElements(contentRef.current);
-      if (nodes.length === 0) {
-        event.preventDefault();
-        inputRef.current?.focus();
-        return;
-      }
-      const first = nodes[0];
-      const last = nodes[nodes.length - 1];
-      const active = document.activeElement as HTMLElement | null;
-      if (event.shiftKey && active === first) {
-        event.preventDefault();
-        last.focus();
-      } else if (!event.shiftKey && active === last) {
-        event.preventDefault();
-        first.focus();
-      }
-    };
-    document.addEventListener("keydown", handleKeyDown);
-    return () => {
-      document.removeEventListener("keydown", handleKeyDown);
-      lastFocusedRef.current?.focus();
-    };
-  }, [open, onOpenChange]);
 
   const parseResult = useMemo(() => {
     if (!inputValue.trim()) {
@@ -175,20 +135,15 @@ const CommandPalette: FC<CommandPaletteProps> = ({
     }
   };
 
-  if (!open) {
-    return null;
-  }
-
-  return createPortal(
-    <div className="palette-root" role="presentation">
-      <div className="palette-overlay" onClick={() => onOpenChange(false)} />
-      <div
-        className="palette-content"
-        role="dialog"
-        aria-modal="true"
-        aria-label="Command palette"
-        ref={contentRef}
-      >
+  return (
+    <Dialog.Root open={open} onOpenChange={onOpenChange}>
+      <Dialog.Portal>
+        <div className="palette-root" role="presentation">
+          <Dialog.Overlay className="palette-overlay" />
+          <Dialog.Content
+            className="palette-content"
+            aria-label="Command palette"
+          >
         <div className="palette-header">
           <input
             ref={inputRef}
@@ -203,9 +158,6 @@ const CommandPalette: FC<CommandPaletteProps> = ({
               if (event.key === "Enter") {
                 event.preventDefault();
                 handleSubmit();
-              } else if (event.key === "Escape") {
-                event.preventDefault();
-                onOpenChange(false);
               }
             }}
             placeholder='task "Fix bug" due:2025-01-01 pri:3 tags:ui,bug'
@@ -252,9 +204,10 @@ const CommandPalette: FC<CommandPaletteProps> = ({
             <GeneralHelp />
           )}
         </div>
-      </div>
-    </div>,
-    document.body
+          </Dialog.Content>
+        </div>
+      </Dialog.Portal>
+    </Dialog.Root>
   );
 };
 
@@ -359,18 +312,6 @@ const CommandHelp = ({ command }: { command: string }) => {
         ))}
       </ul>
     </div>
-  );
-};
-
-const FOCUSABLE_SELECTOR =
-  'a[href],button:not([disabled]),textarea:not([disabled]),input:not([disabled]),select:not([disabled]),[tabindex]:not([tabindex="-1"])';
-
-const getFocusableElements = (root: HTMLElement | null) => {
-  if (!root) {
-    return [];
-  }
-  return Array.from(root.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR)).filter(
-    (node) => !node.hasAttribute("disabled") && node.tabIndex !== -1
   );
 };
 

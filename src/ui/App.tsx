@@ -150,6 +150,7 @@ const App = () => {
           selectedProjectId={selectedProjectId}
           onSelect={setSelectedProjectId}
           refreshToken={refreshToken}
+          onAddProject={() => openSheet("project")}
         />
         <main className="main">
           <div className="title-row">
@@ -157,13 +158,6 @@ const App = () => {
               {selectedProject ? selectedProject.title : "Select a project"}
             </h1>
             <div className="title-actions">
-              <button
-                type="button"
-                className="button"
-                onClick={() => openSheet("project")}
-              >
-                New Project
-              </button>
               <button
                 type="button"
                 className="button"

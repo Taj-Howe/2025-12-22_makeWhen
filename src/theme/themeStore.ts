@@ -1,0 +1,34 @@
+export type ThemeName = "light" | "dark" | "amber";
+
+const STORAGE_KEY = "makewhen.theme";
+const DEFAULT_THEME: ThemeName = "light";
+
+export const loadTheme = (): ThemeName => {
+  if (typeof window === "undefined") {
+    return DEFAULT_THEME;
+  }
+  const stored = window.localStorage.getItem(STORAGE_KEY);
+  if (stored === "light" || stored === "dark" || stored === "amber") {
+    return stored;
+  }
+  return DEFAULT_THEME;
+};
+
+export const applyTheme = (theme: ThemeName) => {
+  document.documentElement.dataset.theme = theme;
+};
+
+export const saveTheme = (theme: ThemeName) => {
+  window.localStorage.setItem(STORAGE_KEY, theme);
+};
+
+export const setTheme = (theme: ThemeName) => {
+  applyTheme(theme);
+  saveTheme(theme);
+};
+
+export const initTheme = () => {
+  const theme = loadTheme();
+  applyTheme(theme);
+  return theme;
+};

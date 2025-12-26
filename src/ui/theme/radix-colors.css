@@ -1,0 +1,81 @@
+/* Minimal Radix-like palettes for neutral + accent options. */
+
+:root {
+  --mauve-1: #fdfcfd;
+  --mauve-2: #f8f7f9;
+  --mauve-3: #f1eef3;
+  --mauve-4: #e9e6ee;
+  --mauve-5: #e1dde8;
+  --mauve-6: #d7d1e0;
+  --mauve-7: #c9c2d4;
+  --mauve-8: #b3aac2;
+  --mauve-9: #8f8aa3;
+  --mauve-10: #7f7a92;
+  --mauve-11: #5f5b70;
+  --mauve-12: #1f1d2b;
+
+  --mauveDark-1: #121113;
+  --mauveDark-2: #1a191b;
+  --mauveDark-3: #232225;
+  --mauveDark-4: #2b2a2e;
+  --mauveDark-5: #323136;
+  --mauveDark-6: #3c3a40;
+  --mauveDark-7: #4a4850;
+  --mauveDark-8: #625f69;
+  --mauveDark-9: #6f6d78;
+  --mauveDark-10: #7c7a85;
+  --mauveDark-11: #b5b2bc;
+  --mauveDark-12: #f0eef5;
+
+  --violet-1: #fdfcff;
+  --violet-2: #f7f2ff;
+  --violet-3: #ede5ff;
+  --violet-4: #dfd3ff;
+  --violet-5: #cdb8ff;
+  --violet-6: #ba9cff;
+  --violet-7: #a27cf0;
+  --violet-8: #8a5bd9;
+  --violet-9: #7c66dc;
+  --violet-10: #6f59d3;
+  --violet-11: #5641a8;
+  --violet-12: #2b1d50;
+
+  --violetDark-1: #14121f;
+  --violetDark-2: #1b1525;
+  --violetDark-3: #2a1f3a;
+  --violetDark-4: #33244a;
+  --violetDark-5: #3b2a57;
+  --violetDark-6: #443363;
+  --violetDark-7: #56468a;
+  --violetDark-8: #6e56cf;
+  --violetDark-9: #7c66dc;
+  --violetDark-10: #9a86f5;
+  --violetDark-11: #c4b1ff;
+  --violetDark-12: #f0ecff;
+
+  --amber-1: #fffaf0;
+  --amber-2: #fff4db;
+  --amber-3: #ffecbf;
+  --amber-4: #ffe19c;
+  --amber-5: #ffd57a;
+  --amber-6: #f5c062;
+  --amber-7: #e3a94b;
+  --amber-8: #cf8f34;
+  --amber-9: #b8741c;
+  --amber-10: #a16212;
+  --amber-11: #7a4707;
+  --amber-12: #3b2200;
+
+  --amberDark-1: #20160b;
+  --amberDark-2: #2a1c0c;
+  --amberDark-3: #3b240c;
+  --amberDark-4: #4a2c0a;
+  --amberDark-5: #5a3608;
+  --amberDark-6: #6c4107;
+  --amberDark-7: #8a5206;
+  --amberDark-8: #b06a05;
+  --amberDark-9: #d98100;
+  --amberDark-10: #f59e0b;
+  --amberDark-11: #ffcc6b;
+  --amberDark-12: #fff3d8;
+}

@@ -1,6 +1,9 @@
 import { useCallback, useEffect, useState, type FC } from "react";
+import * as ContextMenu from "@radix-ui/react-context-menu";
+import { PlusIcon } from "@radix-ui/react-icons";
 import { query } from "../rpc/clientSingleton";
 import { UNGROUPED_PROJECT_ID, UNGROUPED_PROJECT_LABEL } from "./constants";
+import ThemeSettings from "./ThemeSettings";
 
 type Project = {
   id: string;
@@ -12,12 +15,14 @@ type SidebarProjectsProps = {
   selectedProjectId: string | null;
   onSelect: (projectId: string | null) => void;
   refreshToken: number;
+  onAddProject: () => void;
 };
 
 const SidebarProjects: FC<SidebarProjectsProps> = ({
   selectedProjectId,
   onSelect,
   refreshToken,
+  onAddProject,
 }) => {
   const [projects, setProjects] = useState<Project[]>([]);
   const [error, setError] = useState<string | null>(null);
@@ -66,7 +71,35 @@ const SidebarProjects: FC<SidebarProjectsProps> = ({
 
   return (
     <aside className="sidebar">
-      <div className="sidebar-title">Projects</div>
+      <ContextMenu.Root>
+        <ContextMenu.Trigger asChild>
+          <div className="sidebar-header">
+            <div className="sidebar-title">Projects</div>
+            <button
+              type="button"
+              className="icon-button"
+              onClick={(event) => {
+                event.stopPropagation();
+                onAddProject();
+              }}
+              aria-label="Add project"
+              title="Add project"
+            >
+              <PlusIcon />
+            </button>
+          </div>
+        </ContextMenu.Trigger>
+        <ContextMenu.Portal>
+          <ContextMenu.Content className="context-menu-content">
+            <ContextMenu.Item
+              className="context-menu-item"
+              onSelect={onAddProject}
+            >
+              New project…
+            </ContextMenu.Item>
+          </ContextMenu.Content>
+        </ContextMenu.Portal>
+      </ContextMenu.Root>
       <div className="sidebar-list">
         {error ? <div className="error">{error}</div> : null}
         <button
@@ -99,6 +132,9 @@ const SidebarProjects: FC<SidebarProjectsProps> = ({
             </button>
           ))
         )}
+      </div>
+      <div className="sidebar-footer">
+        <ThemeSettings />
       </div>
     </aside>
   );

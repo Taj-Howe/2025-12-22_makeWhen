@@ -1,6 +1,9 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import "./app.css";
+import "./theme/radix-colors.css";
+import "./theme/semantic-tokens.css";
 import SidebarProjects from "./SidebarProjects";
+import { UNGROUPED_PROJECT_ID, UNGROUPED_PROJECT_LABEL } from "./constants";
 import ListView from "./ListView";
 import AddItemForm from "./AddItemForm";
 import RightSheet from "./RightSheet";
@@ -16,7 +19,7 @@ type ItemTraits = {
   depth: number;
   status: string;
   priority: number;
-  due_at: number;
+  due_at: number | null;
   estimate_minutes: number;
   notes: string | null;
   health: string;
@@ -98,13 +101,21 @@ const App = () => {
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, [sheetOpen]);
 
-  const selectedProject = useMemo(
-    () => projectItems.find((item) => item.id === selectedProjectId) ?? null,
-    [projectItems, selectedProjectId]
-  );
+  const selectedProject = useMemo(() => {
+    if (selectedProjectId === UNGROUPED_PROJECT_ID) {
+      return { id: UNGROUPED_PROJECT_ID, title: UNGROUPED_PROJECT_LABEL };
+    }
+    return (
+      projectItems.find((item) => item.id === selectedProjectId) ?? null
+    );
+  }, [projectItems, selectedProjectId]);
 
   const handleDeleteProject = useCallback(async () => {
-    if (!selectedProjectId || !selectedProject) {
+    if (
+      !selectedProjectId ||
+      selectedProjectId === UNGROUPED_PROJECT_ID ||
+      !selectedProject
+    ) {
       return;
     }
     if (
@@ -117,7 +128,7 @@ const App = () => {
     setDeleteError(null);
     try {
       await mutate("delete_item", { item_id: selectedProjectId });
-      setSelectedProjectId(null);
+      setSelectedProjectId(UNGROUPED_PROJECT_ID);
       triggerRefresh();
     } catch (err) {
       const message = err instanceof Error ? err.message : "Unknown error";
@@ -173,7 +184,10 @@ const App = () => {
                 type="button"
                 className="button"
                 onClick={handleDeleteProject}
-                disabled={!selectedProjectId}
+                disabled={
+                  !selectedProjectId ||
+                  selectedProjectId === UNGROUPED_PROJECT_ID
+                }
               >
                 Delete Project
               </button>
@@ -197,7 +211,9 @@ const App = () => {
               items={projectItems}
               onRefresh={triggerRefresh}
               initialType={sheetType}
-              onCreated={() => setSheetOpen(false)}
+              onCreated={() => {
+                setSheetOpen(false);
+              }}
             />
           </RightSheet>
           <CommandPalette

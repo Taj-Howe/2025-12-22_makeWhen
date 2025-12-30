@@ -3,46 +3,15 @@ import "./app.css";
 import SidebarProjects from "./SidebarProjects";
 import { UNGROUPED_PROJECT_ID, UNGROUPED_PROJECT_LABEL } from "./constants";
 import ListView from "./ListView";
+import CalendarView from "./CalendarView";
 import AddItemForm from "./AddItemForm";
 import RightSheet from "./RightSheet";
 import CommandPalette from "./CommandPalette";
 import { mutate, query } from "../rpc/clientSingleton";
-
-type ItemTraits = {
-  id: string;
-  type: "project" | "milestone" | "task";
-  title: string;
-  parent_id: string | null;
-  project_id: string;
-  depth: number;
-  status: string;
-  priority: number;
-  due_at: number | null;
-  estimate_minutes: number;
-  notes: string | null;
-  health: string;
-  health_mode: string;
-  schedule: {
-    has_blocks: boolean;
-    scheduled_minutes_total: number;
-    schedule_start_at: number | null;
-    schedule_end_at: number | null;
-  };
-  blocked: {
-    is_blocked: boolean;
-    blocked_by_deps: boolean;
-    blocked_by_blockers: boolean;
-    active_blocker_count: number;
-    unmet_dependency_count: number;
-    scheduled_but_blocked?: boolean;
-  };
-  assignees: { id: string; name: string | null }[];
-  tags: { id: string; name: string }[];
-  sequence_rank: number;
-};
+import type { ListItem } from "../domain/listTypes";
 
 const App = () => {
-  const [projectItems, setProjectItems] = useState<ItemTraits[]>([]);
+  const [projectItems, setProjectItems] = useState<ListItem[]>([]);
   const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [deleteError, setDeleteError] = useState<string | null>(null);
@@ -51,14 +20,18 @@ const App = () => {
   const [sheetType, setSheetType] = useState<"project" | "milestone" | "task">(
     "task"
   );
+  const [sheetMode, setSheetMode] = useState<"create" | "edit">("create");
+  const [sheetItemId, setSheetItemId] = useState<string | null>(null);
+  const [sheetFocusTitle, setSheetFocusTitle] = useState(false);
   const [paletteOpen, setPaletteOpen] = useState(false);
+  const [activeView, setActiveView] = useState<"list" | "calendar">("list");
 
   const loadProjectItems = useCallback(async () => {
     if (!selectedProjectId) {
       setProjectItems([]);
       return;
     }
-    const data = await query<{ items: ItemTraits[] }>("listItems", {
+    const data = await query<{ items: ListItem[] }>("listItems", {
       projectId: selectedProjectId,
       includeDone: true,
       includeCanceled: true,
@@ -137,11 +110,32 @@ const App = () => {
   const openSheet = useCallback(
     (type: "project" | "milestone" | "task") => {
       setPaletteOpen(false);
+      setSheetMode("create");
       setSheetType(type);
+      setSheetItemId(null);
+      setSheetFocusTitle(false);
       setSheetOpen(true);
     },
     []
   );
+
+  const openTaskEditor = useCallback((itemId: string) => {
+    setPaletteOpen(false);
+    setSheetMode("edit");
+    setSheetType("task");
+    setSheetItemId(itemId);
+    setSheetFocusTitle(true);
+    setSheetOpen(true);
+  }, []);
+
+  const handleSheetOpenChange = useCallback((open: boolean) => {
+    setSheetOpen(open);
+    if (!open) {
+      setSheetFocusTitle(false);
+      setSheetItemId(null);
+      setSheetMode("create");
+    }
+  }, []);
 
   return (
     <div className="app-root">
@@ -157,6 +151,30 @@ const App = () => {
             <h1 className="title">
               {selectedProject ? selectedProject.title : "Select a project"}
             </h1>
+            <div className="view-toggle">
+              <button
+                type="button"
+                className={
+                  activeView === "list"
+                    ? "view-toggle-button view-toggle-active"
+                    : "view-toggle-button"
+                }
+                onClick={() => setActiveView("list")}
+              >
+                List
+              </button>
+              <button
+                type="button"
+                className={
+                  activeView === "calendar"
+                    ? "view-toggle-button view-toggle-active"
+                    : "view-toggle-button"
+                }
+                onClick={() => setActiveView("calendar")}
+              >
+                Calendar
+              </button>
+            </div>
             <div className="title-actions">
               <button
                 type="button"
@@ -180,24 +198,37 @@ const App = () => {
           </div>
           {deleteError ? <div className="error">{deleteError}</div> : null}
           {error ? <div className="error">{error}</div> : null}
-          <ListView
-            selectedProjectId={selectedProjectId}
-            refreshToken={refreshToken}
-            onRefresh={triggerRefresh}
-          />
+          {activeView === "list" ? (
+            <ListView
+              selectedProjectId={selectedProjectId}
+              refreshToken={refreshToken}
+              onRefresh={triggerRefresh}
+            />
+          ) : (
+            <CalendarView
+              selectedProjectId={selectedProjectId}
+              projectItems={projectItems}
+              refreshToken={refreshToken}
+              onRefresh={triggerRefresh}
+              onOpenItem={openTaskEditor}
+            />
+          )}
           <RightSheet
             open={sheetOpen}
-            onOpenChange={setSheetOpen}
-            title={`New ${sheetType}`}
+            onOpenChange={handleSheetOpenChange}
+            title={sheetMode === "edit" ? "Edit task" : `New ${sheetType}`}
           >
             <AddItemForm
-              key={`${sheetType}-${selectedProjectId ?? "none"}`}
+              key={`${sheetMode}-${sheetType}-${selectedProjectId ?? "none"}-${sheetItemId ?? "none"}`}
               selectedProjectId={selectedProjectId}
               items={projectItems}
               onRefresh={triggerRefresh}
               initialType={sheetType}
+              initialMode={sheetMode}
+              initialItemId={sheetItemId}
+              autoFocusTitle={sheetFocusTitle}
               onCreated={() => {
-                setSheetOpen(false);
+                handleSheetOpenChange(false);
               }}
             />
           </RightSheet>

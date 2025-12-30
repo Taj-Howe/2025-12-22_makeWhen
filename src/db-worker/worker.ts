@@ -185,6 +185,17 @@ const ensureNonNegativeInteger = (value: unknown, name: string) => {
   return intValue;
 };
 
+const ensureTimeMs = (value: unknown, name: string) => {
+  if (typeof value === "string") {
+    const parsed = Date.parse(value);
+    if (!Number.isFinite(parsed)) {
+      throw new Error(`${name} must be a valid ISO timestamp`);
+    }
+    return parsed;
+  }
+  return ensureNumber(value, name);
+};
+
 const ensurePositiveInteger = (value: unknown, name: string) => {
   const intValue = ensureInteger(value, name);
   if (intValue <= 0) {
@@ -4691,6 +4702,102 @@ const handleRequest = async (message: RpcRequest): Promise<RpcResponse> => {
               locked: row[4],
               source: row[5],
             })),
+          };
+          break;
+        }
+        case "calendar_range": {
+          const timeMin = ensureTimeMs(args.time_min, "time_min");
+          const timeMax = ensureTimeMs(args.time_max, "time_max");
+          if (timeMax <= timeMin) {
+            throw new Error("time_max must be greater than time_min");
+          }
+          const scopeProjectId =
+            typeof args.scopeProjectId === "string" ? args.scopeProjectId : null;
+
+          let scopedIds: string[] | null = null;
+          if (scopeProjectId) {
+            const treeRows = dbHandle.exec({
+              sql: `WITH RECURSIVE tree AS (
+                SELECT id FROM items WHERE id = ?
+                UNION ALL
+                SELECT i.id FROM items i JOIN tree t ON i.parent_id = t.id
+              )
+              SELECT id FROM tree;`,
+              rowMode: "array",
+              returnValue: "resultRows",
+              bind: [scopeProjectId],
+            }) as Array<[string]>;
+            scopedIds = treeRows.map((row) => row[0]);
+          }
+
+          if (scopedIds && scopedIds.length === 0) {
+            result = { ok: true, result: { blocks: [], items: [] } };
+            break;
+          }
+
+          const blockSql = scopedIds
+            ? `SELECT block_id, item_id, start_at, duration_minutes
+                FROM scheduled_blocks
+                WHERE start_at < ?
+                  AND (start_at + duration_minutes * 60000) > ?
+                  AND item_id IN (${buildPlaceholders(scopedIds.length)})
+                ORDER BY start_at ASC;`
+            : `SELECT block_id, item_id, start_at, duration_minutes
+                FROM scheduled_blocks
+                WHERE start_at < ?
+                  AND (start_at + duration_minutes * 60000) > ?
+                ORDER BY start_at ASC;`;
+
+          const blockRows = dbHandle.exec({
+            sql: blockSql,
+            rowMode: "array",
+            returnValue: "resultRows",
+            bind: scopedIds ? [timeMax, timeMin, ...scopedIds] : [timeMax, timeMin],
+          }) as Array<[string, string, number, number]>;
+
+          const itemSql = scopedIds
+            ? `SELECT id, title, status, due_at, parent_id, type, priority
+                FROM items
+                WHERE due_at IS NOT NULL
+                  AND due_at >= ?
+                  AND due_at < ?
+                  AND id IN (${buildPlaceholders(scopedIds.length)})
+                ORDER BY due_at ASC;`
+            : `SELECT id, title, status, due_at, parent_id, type, priority
+                FROM items
+                WHERE due_at IS NOT NULL
+                  AND due_at >= ?
+                  AND due_at < ?
+                ORDER BY due_at ASC;`;
+
+          const itemRows = dbHandle.exec({
+            sql: itemSql,
+            rowMode: "array",
+            returnValue: "resultRows",
+            bind: scopedIds ? [timeMin, timeMax, ...scopedIds] : [timeMin, timeMax],
+          }) as Array<
+            [string, string, string, number, string | null, string, number]
+          >;
+
+          result = {
+            ok: true,
+            result: {
+              blocks: blockRows.map((row) => ({
+                block_id: row[0],
+                item_id: row[1],
+                start_at: row[2],
+                duration_minutes: row[3],
+              })),
+              items: itemRows.map((row) => ({
+                id: row[0],
+                title: row[1],
+                status: row[2],
+                due_at: row[3],
+                parent_id: row[4],
+                item_type: row[5],
+                priority: row[6],
+              })),
+            },
           };
           break;
         }

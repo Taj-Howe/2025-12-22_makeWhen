@@ -1,4 +1,11 @@
-import { useEffect, useMemo, useState, type FC, type FormEvent } from "react";
+import {
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type FC,
+  type FormEvent,
+} from "react";
 import { mutate, query } from "../rpc/clientSingleton";
 import { UNGROUPED_PROJECT_ID } from "./constants";
 import { toDateTimeLocal } from "../domain/formatters";
@@ -19,7 +26,7 @@ type ItemRow = {
   estimate_minutes: number;
   notes: string | null;
   health: string;
-  health_mode: string;
+  health_mode?: string;
   tags: { id: string; name: string }[];
   assignees: { id: string; name: string | null }[];
 };
@@ -52,6 +59,9 @@ type AddItemFormProps = {
   items: ItemRow[];
   onRefresh: () => void;
   initialType?: ItemType;
+  initialMode?: "create" | "edit";
+  initialItemId?: string | null;
+  autoFocusTitle?: boolean;
   onCreated?: () => void;
 };
 
@@ -78,10 +88,17 @@ const AddItemForm: FC<AddItemFormProps> = ({
   items,
   onRefresh,
   initialType,
+  initialMode,
+  initialItemId,
+  autoFocusTitle,
   onCreated,
 }) => {
-  const [mode, setMode] = useState<"create" | "edit">("create");
-  const [selectedItemId, setSelectedItemId] = useState<string>("");
+  const [mode, setMode] = useState<"create" | "edit">(
+    initialMode ?? "create"
+  );
+  const [selectedItemId, setSelectedItemId] = useState<string>(
+    initialMode === "edit" && initialItemId ? initialItemId : ""
+  );
   const [type, setType] = useState<ItemType>(initialType ?? "task");
   const [title, setTitle] = useState("");
   const [parentId, setParentId] = useState<string | null>(null);
@@ -106,6 +123,7 @@ const AddItemForm: FC<AddItemFormProps> = ({
   const [currentDeps, setCurrentDeps] = useState<string[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [loadingDetails, setLoadingDetails] = useState(false);
+  const titleInputRef = useRef<HTMLInputElement>(null);
 
   const parentTypeMap = useMemo(() => {
     const map = new Map<string, ItemType>();
@@ -250,6 +268,35 @@ const AddItemForm: FC<AddItemFormProps> = ({
       resetForm();
     }
   }, [items, mode, selectedItemId]);
+
+  useEffect(() => {
+    if (!initialMode) {
+      return;
+    }
+    setMode(initialMode);
+    if (initialMode === "edit") {
+      setSelectedItemId(initialItemId ?? "");
+    } else {
+      setSelectedItemId("");
+    }
+  }, [initialItemId, initialMode]);
+
+  useEffect(() => {
+    if (!autoFocusTitle) {
+      return;
+    }
+    if (loadingDetails) {
+      return;
+    }
+    if (mode === "edit" && !selectedItemId) {
+      return;
+    }
+    const input = titleInputRef.current;
+    if (input) {
+      input.focus();
+      input.select();
+    }
+  }, [autoFocusTitle, loadingDetails, mode, selectedItemId]);
 
   const handleEstimateMinutesChange = (value: string) => {
     setEstimateMinutes(value);
@@ -622,6 +669,7 @@ const AddItemForm: FC<AddItemFormProps> = ({
         <label>
           Title *
           <input
+            ref={titleInputRef}
             value={title}
             onChange={(event) => setTitle(event.target.value)}
             placeholder="New item"

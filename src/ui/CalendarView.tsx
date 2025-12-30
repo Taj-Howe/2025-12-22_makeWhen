@@ -139,6 +139,7 @@ const CalendarView: FC<CalendarViewProps> = ({
   const dragClickGuardRef = useRef(false);
   const contextMenuOpenRef = useRef(false);
   const suppressOpenUntilRef = useRef(0);
+  const suppressNextBlockClickRef = useRef(false);
   const refreshTimerRef = useRef<number | null>(null);
 
   const itemTitleMap = useMemo(
@@ -538,6 +539,10 @@ const CalendarView: FC<CalendarViewProps> = ({
       if (Date.now() < suppressOpenUntilRef.current) {
         return;
       }
+      if (suppressNextBlockClickRef.current) {
+        suppressNextBlockClickRef.current = false;
+        return;
+      }
       setDragCandidate(null);
       dragPreviewRef.current = null;
       setDragPreview(null);
@@ -549,6 +554,7 @@ const CalendarView: FC<CalendarViewProps> = ({
   const handleBlockContextMenu = useCallback(() => {
     dragClickGuardRef.current = true;
     suppressOpenUntilRef.current = Date.now() + 200;
+    suppressNextBlockClickRef.current = true;
     setDragCandidate(null);
     dragPreviewRef.current = null;
     setDragPreview(null);
@@ -559,6 +565,7 @@ const CalendarView: FC<CalendarViewProps> = ({
       contextMenuOpenRef.current = true;
       dragClickGuardRef.current = true;
       suppressOpenUntilRef.current = Date.now() + 200;
+      suppressNextBlockClickRef.current = true;
       setDragCandidate(null);
       dragPreviewRef.current = null;
       setDragPreview(null);
@@ -575,6 +582,14 @@ const CalendarView: FC<CalendarViewProps> = ({
         return;
       }
       if (dragBlock) {
+        return;
+      }
+      if (
+        contextMenuOpenRef.current ||
+        Date.now() < suppressOpenUntilRef.current ||
+        suppressNextBlockClickRef.current
+      ) {
+        suppressNextBlockClickRef.current = false;
         return;
       }
       if (event.button !== 0) {

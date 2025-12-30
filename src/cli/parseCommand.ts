@@ -360,11 +360,23 @@ const parseKeyValue = (
 };
 
 const parseDate = (value: string): number | null => {
-  const parsed = Date.parse(value);
-  if (Number.isNaN(parsed)) {
+  const trimmed = value.trim();
+  if (!trimmed) {
     return null;
   }
-  return parsed;
+  const noYearMatch = trimmed.match(
+    /^(\d{1,2})[/-](\d{1,2})(?:[ T](.*))?$/
+  );
+  if (noYearMatch) {
+    const [, month, day, timePart] = noYearMatch;
+    const year = new Date().getFullYear();
+    const datePart = `${year}-${month.padStart(2, "0")}-${day.padStart(2, "0")}`;
+    const withTime = timePart ? `${datePart} ${timePart}` : datePart;
+    const parsed = Date.parse(withTime);
+    return Number.isNaN(parsed) ? null : parsed;
+  }
+  const parsed = Date.parse(trimmed);
+  return Number.isNaN(parsed) ? null : parsed;
 };
 
 const splitList = (value: string): string[] => {

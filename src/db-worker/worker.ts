@@ -2594,6 +2594,13 @@ const handleRequest = async (message: RpcRequest): Promise<RpcResponse> => {
             returnValue: "resultRows",
             bind: [itemId],
           }) as Array<[number, number | null, number | null, number | null]>;
+          const primaryBlockRows = dbHandle.exec({
+            sql: "SELECT block_id, start_at, duration_minutes FROM scheduled_blocks WHERE item_id = ? ORDER BY start_at ASC LIMIT 1;",
+            rowMode: "array",
+            returnValue: "resultRows",
+            bind: [itemId],
+          }) as Array<[string, number, number]>;
+          const primaryBlock = primaryBlockRows[0] ?? null;
           const scheduleRow = scheduleRows[0] ?? [0, null, null, null];
           const scheduledCount = Number(scheduleRow[0]);
           const scheduledMinutesTotal = scheduleRow[1] ? Number(scheduleRow[1]) : 0;
@@ -2639,6 +2646,7 @@ const handleRequest = async (message: RpcRequest): Promise<RpcResponse> => {
               scheduled_minutes_total: scheduledMinutesTotal,
               schedule_start_at: scheduleStartAt,
               schedule_end_at: scheduleEndAt,
+              primary_block_id: primaryBlock ? primaryBlock[0] : null,
               running_timer: runningTimer,
               time_entries: timeEntryRows.map((row) => ({
                 entry_id: row[0],

@@ -45,6 +45,9 @@ type ItemDetails = {
   health_mode: string;
   notes: string | null;
   dependencies: string[];
+  scheduled_minutes_total: number;
+  schedule_start_at: number | null;
+  primary_block_id: string | null;
   blockers: {
     blocker_id: string;
     kind: string;
@@ -108,6 +111,8 @@ const AddItemForm: FC<AddItemFormProps> = ({
   );
   const [estimateMinutes, setEstimateMinutes] = useState("0");
   const [scheduledFor, setScheduledFor] = useState("");
+  const [scheduledBlockId, setScheduledBlockId] = useState<string | null>(null);
+  const scheduledForInitialRef = useRef("");
   const [status, setStatus] = useState("backlog");
   const [priority, setPriority] = useState("0");
   const [healthMode, setHealthMode] = useState<"auto" | "manual">("auto");
@@ -237,7 +242,15 @@ const AddItemForm: FC<AddItemFormProps> = ({
           setEstimateMode(
             data.estimate_mode === "rollup" ? "rollup" : "manual"
           );
-          setEstimateMinutes(String(data.estimate_minutes));
+          const scheduleMinutes = data.scheduled_minutes_total ?? 0;
+          const estimateFromItem = Number(data.estimate_minutes ?? 0);
+          const estimateValue =
+            data.estimate_mode === "manual" &&
+            estimateFromItem <= 0 &&
+            scheduleMinutes > 0
+              ? scheduleMinutes
+              : estimateFromItem;
+          setEstimateMinutes(String(estimateValue));
           setStatus(data.status);
           setPriority(String(data.priority));
           setHealthMode(data.health_mode === "manual" ? "manual" : "auto");
@@ -246,6 +259,10 @@ const AddItemForm: FC<AddItemFormProps> = ({
           setBlockers(data.blockers);
           setCurrentDeps(data.dependencies ?? []);
           setDepChips(data.dependencies ?? []);
+          const nextScheduledFor = toDateTimeLocal(data.schedule_start_at);
+          setScheduledFor(nextScheduledFor);
+          setScheduledBlockId(data.primary_block_id ?? null);
+          scheduledForInitialRef.current = nextScheduledFor;
           const fromList = items.find((item) => item.id === data.id);
           if (fromList) {
             setTagsInput("");
@@ -354,6 +371,8 @@ const AddItemForm: FC<AddItemFormProps> = ({
     setEstimateMinutes("0");
     setEstimateMode("manual");
     setScheduledFor("");
+    setScheduledBlockId(null);
+    scheduledForInitialRef.current = "";
     setPriority("0");
     setStatus("backlog");
     setHealthMode("auto");
@@ -394,7 +413,10 @@ const AddItemForm: FC<AddItemFormProps> = ({
         return "Estimate must be 0 or greater.";
       }
     }
-    if (scheduledFor && estimate <= 0) {
+    const scheduleChange =
+      scheduledFor &&
+      (mode === "create" || scheduledFor !== scheduledForInitialRef.current);
+    if (scheduleChange && estimate <= 0) {
       return "Est Dur must be greater than 0 to schedule.";
     }
     if (type === "milestone" && !selectedProjectId) {
@@ -454,16 +476,16 @@ const AddItemForm: FC<AddItemFormProps> = ({
         });
         const itemId = result?.id;
         if (itemId) {
-          if (scheduledFor) {
-            const startAt = new Date(scheduledFor).getTime();
-            const durationMinutes = Math.round(estimate);
-            await mutate("scheduled_block.create", {
-              item_id: itemId,
-              start_at: startAt,
-              duration_minutes: durationMinutes,
-              source: "manual",
-            });
-          }
+        if (scheduledFor) {
+          const startAt = new Date(scheduledFor).getTime();
+          const durationMinutes = Math.round(estimate);
+          await mutate("scheduled_block.create", {
+            item_id: itemId,
+            start_at: startAt,
+            duration_minutes: durationMinutes,
+            source: "manual",
+          });
+        }
           const tags = tagChips;
           if (tags.length > 0) {
             await mutate("set_item_tags", { item_id: itemId, tags });
@@ -499,15 +521,31 @@ const AddItemForm: FC<AddItemFormProps> = ({
             notes: notes.trim() ? notes.trim() : null,
           },
         });
-        if (scheduledFor) {
+        const scheduleChanged =
+          scheduledFor &&
+          scheduledFor !== scheduledForInitialRef.current;
+        if (scheduleChanged) {
           const startAt = new Date(scheduledFor).getTime();
           const durationMinutes = Math.round(estimate);
-          await mutate("scheduled_block.create", {
-            item_id: selectedItemId,
-            start_at: startAt,
-            duration_minutes: durationMinutes,
-            source: "manual",
-          });
+          if (scheduledBlockId) {
+            await mutate("scheduled_block.update", {
+              block_id: scheduledBlockId,
+              start_at: startAt,
+              duration_minutes: durationMinutes,
+            });
+          } else {
+            const created = await mutate<{ block_id: string }>(
+              "scheduled_block.create",
+              {
+                item_id: selectedItemId,
+                start_at: startAt,
+                duration_minutes: durationMinutes,
+                source: "manual",
+              }
+            );
+            setScheduledBlockId(created?.block_id ?? null);
+          }
+          scheduledForInitialRef.current = scheduledFor;
         }
         await mutate("set_status", { id: selectedItemId, status });
         const tags = tagChips;

@@ -423,13 +423,6 @@ button:focus-visible {
   cursor: pointer;
 }
 
-.row-actions {
-  display: inline-flex;
-  gap: 4px;
-  margin-left: 10px;
-  vertical-align: middle;
-}
-
 .cell-title {
   display: flex;
   align-items: center;
@@ -531,25 +524,38 @@ button:focus-visible {
   opacity: 0.7;
 }
 
-.drag-over td {
+.cell-title-text {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.task-checkbox-wrap {
+  display: inline-flex;
+  align-items: center;
+  padding-right: 2px;
+}
+
+.cell-title-label {
+  display: inline-block;
+  padding-left: 4px;
+}
+
+.title-header {
+  padding-left: 22px;
+}
+
+.task-checkbox {
+  margin-right: 8px;
+  accent-color: var(--color-accent);
+}
+
+.drag-over-top td {
   border-top: 2px solid var(--color-accent);
 }
 
-.drop-row td {
-  padding: 4px 6px;
-}
-
-.drop-target {
-  border: 1px dashed var(--color-border);
-  border-radius: 6px;
-  padding: 6px 8px;
-  font-size: 12px;
-  opacity: 0.7;
-}
-
-.drop-target.is-active {
-  opacity: 1;
-  border-color: var(--color-accent);
+.drag-over-bottom td {
+  border-bottom: 2px solid var(--color-accent);
 }
 
 .add-row td {
@@ -599,6 +605,48 @@ button:focus-visible {
   border: 1px solid var(--color-border);
   border-radius: 6px;
   padding: 6px 8px;
+}
+
+.chip-input {
+  display: grid;
+  gap: 6px;
+}
+
+.chip-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.chip {
+  border: 1px solid var(--color-border);
+  border-radius: 999px;
+  padding: 4px 8px;
+  background: var(--color-panel-2);
+  color: var(--color-text);
+  font-size: 12px;
+}
+
+.chip-suggestions {
+  display: grid;
+  gap: 4px;
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  padding: 6px;
+  background: var(--color-panel);
+}
+
+.chip-suggestion {
+  text-align: left;
+  padding: 4px 6px;
+  border-radius: 6px;
+  background: transparent;
+  border: 1px solid transparent;
+}
+
+.chip-suggestion:hover {
+  border-color: var(--color-border);
+  background: var(--color-panel-2);
 }
 
 @media (max-width: 800px) {

@@ -168,13 +168,6 @@ const App = () => {
               <button
                 type="button"
                 className="button"
-                onClick={() => openSheet("task")}
-              >
-                New Task
-              </button>
-              <button
-                type="button"
-                className="button"
                 onClick={handleDeleteProject}
                 disabled={
                   !selectedProjectId ||

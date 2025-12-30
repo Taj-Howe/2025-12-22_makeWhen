@@ -11,60 +11,27 @@ import {
 import * as ContextMenu from "@radix-ui/react-context-menu";
 import { query, mutate } from "../rpc/clientSingleton";
 import { UNGROUPED_PROJECT_ID } from "./constants";
-
-const formatDate = (value: number | null) =>
-  value ? new Date(value).toLocaleString() : "—";
-
-const shortId = (value: string | null) => {
-  if (!value) {
-    return "—";
-  }
-  return value.slice(0, 8);
-};
-
-const truncate = (value: string | null, max = 40) => {
-  if (!value) {
-    return "—";
-  }
-  if (value.length <= max) {
-    return value;
-  }
-  return `${value.slice(0, max)}…`;
-};
-
-type ListItem = {
-  id: string;
-  type: "project" | "milestone" | "task";
-  title: string;
-  parent_id: string | null;
-  depth: number;
-  project_id: string;
-  sort_order: number;
-  due_at: number | null;
-  estimate_mode?: string;
-  status: string;
-  priority: number;
-  estimate_minutes: number;
-  schedule: {
-    has_blocks: boolean;
-    scheduled_minutes_total: number;
-    schedule_start_at: number | null;
-    schedule_end_at: number | null;
-  };
-  depends_on: string[];
-  notes: string | null;
-  blocked: {
-    is_blocked: boolean;
-    blocked_by_deps: boolean;
-    blocked_by_blockers: boolean;
-    active_blocker_count: number;
-    unmet_dependency_count: number;
-  };
-  assignees: { id: string; name: string | null }[];
-  tags: { id: string; name: string }[];
-  health: string;
-  health_mode?: string;
-};
+import type { ListItem } from "../domain/listTypes";
+import { buildListViewModel } from "../domain/listViewModel";
+import {
+  formatDate,
+  formatEstimateMinutes,
+  parseEstimateMinutesInput,
+  shortId,
+  toDateTimeLocal,
+  truncate,
+} from "../domain/formatters";
+import {
+  addDependency,
+  createBlock,
+  createItem,
+  deleteItem,
+  duplicateTaskFromItem,
+  removeDependency,
+  setItemTags,
+  setStatus,
+  updateItemFields,
+} from "./itemActions";
 
 type Column = {
   key: string;
@@ -99,7 +66,7 @@ const ListView: FC<ListViewProps> = ({
   const [dragOver, setDragOver] = useState<{
     itemId: string;
     groupKey: string;
-    position: "before" | "end" | "into";
+    position: "before" | "after" | "into";
   } | null>(null);
   const [inlineAdd, setInlineAdd] = useState<{
     groupKey: string;
@@ -116,32 +83,139 @@ const ListView: FC<ListViewProps> = ({
     position: "top" | "bottom";
   } | null>(null);
 
+  const getLastVisibleId = (groupItems: ListItem[]) => {
+    if (groupItems.length === 0) {
+      return undefined;
+    }
+    const lastItem = groupItems[groupItems.length - 1];
+    const children = taskChildren.get(lastItem.id) ?? [];
+    if (children.length > 0) {
+      return children[children.length - 1].id;
+    }
+    return lastItem.id;
+  };
+
+  const loadItems = useCallback(async () => {
+    if (!selectedProjectId) {
+      setItems([]);
+      setError(null);
+      return;
+    }
+    setLoading(true);
+    setError(null);
+    const data = await query<{ items: ListItem[] }>("listItems", {
+      projectId: selectedProjectId,
+      includeDone: true,
+      includeCanceled: true,
+      orderBy: "due_at",
+      orderDir: "asc",
+    });
+    setItems(data.items);
+    setLoading(false);
+  }, [selectedProjectId]);
+
+  useEffect(() => {
+    if (!selectedProjectId) {
+      setItems([]);
+      setError(null);
+      return;
+    }
+    let isMounted = true;
+    setLoading(true);
+    setError(null);
+    loadItems()
+      .catch((err) => {
+        if (!isMounted) {
+          return;
+        }
+        const message = err instanceof Error ? err.message : "Unknown error";
+        setError(message);
+      })
+      .finally(() => {
+        if (isMounted) {
+          setLoading(false);
+        }
+      });
+    return () => {
+      isMounted = false;
+    };
+  }, [loadItems, refreshToken, selectedProjectId]);
+
+  const viewModel = useMemo(
+    () =>
+      buildListViewModel({
+        items,
+        selectedProjectId,
+        ungroupedProjectId: UNGROUPED_PROJECT_ID,
+      }),
+    [items, selectedProjectId]
+  );
+
+  const {
+    parentTypeMap,
+    itemById,
+    milestones,
+    taskChildren,
+    tasksUnderMilestone,
+    ungroupedTasks,
+    ungroupedParentId,
+    getAllTasksUnderMilestone,
+  } = viewModel;
+
+  const handleToggleTaskDone = useCallback(
+    async (item: ListItem, checked: boolean) => {
+      setError(null);
+      try {
+        const nextStatus = checked ? "done" : "ready";
+        let milestoneStatus: string | null = null;
+        let milestoneId: string | null = null;
+        await setStatus(item.id, nextStatus);
+        if (item.parent_id && parentTypeMap.get(item.parent_id) === "milestone") {
+          milestoneId = item.parent_id;
+          const allTasks = getAllTasksUnderMilestone(milestoneId);
+          if (allTasks.length > 0) {
+            const allDone = allTasks.every((task) =>
+              task.id === item.id ? checked : task.status === "done"
+            );
+            const anyDone = allTasks.some((task) =>
+              task.id === item.id ? checked : task.status === "done"
+            );
+            if (allDone) {
+              await setStatus(milestoneId, "done");
+              milestoneStatus = "done";
+            } else if (anyDone) {
+              await setStatus(milestoneId, "in_progress");
+              milestoneStatus = "in_progress";
+            } else {
+              const milestone = itemById.get(milestoneId);
+              if (milestone?.status === "done") {
+                await setStatus(milestoneId, "ready");
+                milestoneStatus = "ready";
+              }
+            }
+          }
+        }
+        setItems((prev) =>
+          prev.map((current) => {
+            if (current.id === item.id) {
+              return { ...current, status: nextStatus };
+            }
+            if (milestoneId && current.id === milestoneId && milestoneStatus) {
+              return { ...current, status: milestoneStatus };
+            }
+            return current;
+          })
+        );
+      } catch (err) {
+        const message = err instanceof Error ? err.message : "Unknown error";
+        setError(message);
+      }
+    },
+    [getAllTasksUnderMilestone, itemById, parentTypeMap]
+  );
+
   const columns = useMemo<Column[]>(
     () => [
-      {
-        key: "id",
-        label: "ID",
-        minWidth: 120,
-        render: (item: ListItem) => (
-          <span className="cell-id">
-            {shortId(item.id)}
-            <button
-              type="button"
-              className="button button-ghost"
-              onClick={() => navigator.clipboard?.writeText(item.id)}
-              title="Copy ID"
-            >
-              Copy
-            </button>
-          </span>
-        ),
-      },
-      {
-        key: "type",
-        label: "Type",
-        minWidth: 110,
-        render: (item: ListItem) => item.type ?? "—",
-      },
       {
         key: "title",
         label: "Title",
@@ -154,18 +228,25 @@ const ListView: FC<ListViewProps> = ({
         ) => (
           <div className="cell-title" style={{ paddingLeft: `${indent}px` }}>
             <span className="cell-title-text">
+              {item.type === "task" ? (
+                <span className="task-checkbox-wrap">
+                  <input
+                    type="checkbox"
+                    className="task-checkbox"
+                    checked={item.status === "done"}
+                    onChange={(event) =>
+                      void handleToggleTaskDone(item, event.target.checked)
+                    }
+                    onClick={(event) => event.stopPropagation()}
+                  />
+                </span>
+              ) : null}
               {dragHandle}
-              {item.title || "—"}
+              <span className="cell-title-label">{item.title || "—"}</span>
             </span>
             {actions}
           </div>
         ),
-      },
-      {
-        key: "parent_id",
-        label: "Parent ID",
-        minWidth: 120,
-        render: (item: ListItem) => shortId(item.parent_id),
       },
       {
         key: "assignees",
@@ -218,8 +299,15 @@ const ListView: FC<ListViewProps> = ({
         key: "estimate_minutes",
         label: "Estimate (min)",
         minWidth: 140,
-        render: (item: ListItem) =>
-          Number.isFinite(item.estimate_minutes) ? item.estimate_minutes : 0,
+        render: (item: ListItem) => {
+          const mode =
+            item.estimate_mode ?? (item.type === "task" ? "manual" : "rollup");
+          const estimate =
+            mode === "rollup"
+              ? item.rollup_estimate_minutes ?? item.estimate_minutes
+              : item.estimate_minutes;
+          return formatEstimateMinutes(estimate ?? 0);
+        },
       },
       {
         key: "depends_on",
@@ -257,140 +345,35 @@ const ListView: FC<ListViewProps> = ({
       },
       {
         key: "health",
-        label: "Health (mode)",
+        label: "Health",
         minWidth: 160,
-        render: (item: ListItem) =>
-          `${item.health ?? "unknown"} (${item.health_mode ?? "auto"})`,
+        render: (item: ListItem) => item.health ?? "unknown",
+      },
+      {
+        key: "id",
+        label: "ID",
+        minWidth: 120,
+        render: (item: ListItem) => (
+          <span className="cell-id">{shortId(item.id)}</span>
+        ),
+      },
+      {
+        key: "delete",
+        label: "",
+        minWidth: 80,
+        render: (item: ListItem) => (
+          <button
+            type="button"
+            className="button button-ghost"
+            onClick={() => handleDelete(item)}
+          >
+            Delete
+          </button>
+        ),
       },
     ],
-    []
+    [handleToggleTaskDone]
   );
-
-  const loadItems = useCallback(async () => {
-    if (!selectedProjectId) {
-      setItems([]);
-      setError(null);
-      return;
-    }
-    setLoading(true);
-    setError(null);
-    const data = await query<{ items: ListItem[] }>("listItems", {
-      projectId: selectedProjectId,
-      includeDone: true,
-      includeCanceled: true,
-      orderBy: "due_at",
-      orderDir: "asc",
-    });
-    setItems(data.items);
-    setLoading(false);
-  }, [selectedProjectId]);
-
-  useEffect(() => {
-    if (!selectedProjectId) {
-      setItems([]);
-      setError(null);
-      return;
-    }
-    let isMounted = true;
-    setLoading(true);
-    setError(null);
-    loadItems()
-      .catch((err) => {
-        if (!isMounted) {
-          return;
-        }
-        const message = err instanceof Error ? err.message : "Unknown error";
-        setError(message);
-      })
-      .finally(() => {
-        if (isMounted) {
-          setLoading(false);
-        }
-      });
-    return () => {
-      isMounted = false;
-    };
-  }, [loadItems, refreshToken, selectedProjectId]);
-
-  const parentTypeMap = useMemo(() => {
-    const map = new Map<string, ListItem["type"]>();
-    for (const item of items) {
-      map.set(item.id, item.type);
-    }
-    return map;
-  }, [items]);
-
-  const itemById = useMemo(() => {
-    const map = new Map<string, ListItem>();
-    for (const item of items) {
-      map.set(item.id, item);
-    }
-    return map;
-  }, [items]);
-
-  const tasks = useMemo(
-    () => items.filter((item) => item.type === "task"),
-    [items]
-  );
-
-  const milestones = useMemo(
-    () =>
-      items
-        .filter(
-          (item) =>
-            item.type === "milestone" && item.parent_id === selectedProjectId
-        )
-        .sort((a, b) => a.sort_order - b.sort_order),
-    [items, selectedProjectId]
-  );
-
-  const taskChildren = useMemo(() => {
-    const map = new Map<string, ListItem[]>();
-    for (const task of tasks) {
-      if (!task.parent_id) {
-        continue;
-      }
-      const list = map.get(task.parent_id) ?? [];
-      list.push(task);
-      map.set(task.parent_id, list);
-    }
-    for (const [key, list] of map.entries()) {
-      map.set(key, list.sort((a, b) => a.sort_order - b.sort_order));
-    }
-    return map;
-  }, [tasks]);
-
-  const tasksUnderMilestone = useMemo(() => {
-    const map = new Map<string, ListItem[]>();
-    for (const task of tasks) {
-      if (task.parent_id && task.parent_id !== selectedProjectId) {
-        const parentType = parentTypeMap.get(task.parent_id);
-        if (parentType === "milestone") {
-          const list = map.get(task.parent_id) ?? [];
-          list.push(task);
-          map.set(task.parent_id, list);
-        }
-      }
-    }
-    for (const [key, list] of map.entries()) {
-      map.set(key, list.sort((a, b) => a.sort_order - b.sort_order));
-    }
-    return map;
-  }, [parentTypeMap, selectedProjectId, tasks]);
-
-  const ungroupedTasks = useMemo(() => {
-    if (selectedProjectId === UNGROUPED_PROJECT_ID) {
-      return tasks
-        .filter((task) => task.parent_id === null)
-        .sort((a, b) => a.sort_order - b.sort_order);
-    }
-    return tasks
-      .filter((task) => task.parent_id === selectedProjectId)
-      .sort((a, b) => a.sort_order - b.sort_order);
-  }, [selectedProjectId, tasks]);
-
-  const ungroupedParentId =
-    selectedProjectId === UNGROUPED_PROJECT_ID ? null : selectedProjectId;
 
   const [collapsedMilestones, setCollapsedMilestones] = useState<Set<string>>(
     () => new Set()
@@ -410,7 +393,7 @@ const ListView: FC<ListViewProps> = ({
     }
     setError(null);
     try {
-      await mutate("delete_item", { item_id: item.id });
+      await deleteItem(item.id);
       onRefresh();
     } catch (err) {
       const message = err instanceof Error ? err.message : "Unknown error";
@@ -425,10 +408,7 @@ const ListView: FC<ListViewProps> = ({
     }
     setError(null);
     try {
-      await mutate("update_item_fields", {
-        id: item.id,
-        fields: { title: nextTitle.trim() },
-      });
+      await updateItemFields(item.id, { title: nextTitle.trim() });
       onRefresh();
     } catch (err) {
       const message = err instanceof Error ? err.message : "Unknown error";
@@ -439,7 +419,7 @@ const ListView: FC<ListViewProps> = ({
   const handleAddTaskUnder = async (parentId: string) => {
     setError(null);
     try {
-      await mutate("create_item", {
+      await createItem({
         type: "task",
         title: "New task",
         parent_id: parentId,
@@ -456,17 +436,7 @@ const ListView: FC<ListViewProps> = ({
   const handleDuplicateTask = async (item: ListItem) => {
     setError(null);
     try {
-      await mutate("create_item", {
-        type: "task",
-        title: `${item.title} (copy)`,
-        parent_id: item.parent_id,
-        due_at: item.due_at ?? null,
-        estimate_mode: item.estimate_mode ?? "manual",
-        estimate_minutes: item.estimate_minutes ?? 0,
-        status: item.status,
-        priority: item.priority ?? 0,
-        notes: item.notes ?? null,
-      });
+      await duplicateTaskFromItem(item);
       onRefresh();
     } catch (err) {
       const message = err instanceof Error ? err.message : "Unknown error";
@@ -486,7 +456,7 @@ const ListView: FC<ListViewProps> = ({
     }
     setError(null);
     try {
-      await mutate("create_item", {
+      await createItem({
         type: "task",
         title,
         parent_id: inlineAdd.parentId,
@@ -513,15 +483,6 @@ const ListView: FC<ListViewProps> = ({
     setInlineTitle("");
   };
 
-  const toDateTimeLocal = (value: number | null) => {
-    if (!value) {
-      return "";
-    }
-    const date = new Date(value);
-    const offset = date.getTimezoneOffset() * 60000;
-    return new Date(value - offset).toISOString().slice(0, 16);
-  };
-
   const startEdit = (itemId: string, field: string, value: string) => {
     setEditing({ itemId, field });
     setEditValue(value);
@@ -542,44 +503,39 @@ const ListView: FC<ListViewProps> = ({
       return;
     }
     const value = editValue.trim();
+    if (editing.field === "estimate_minutes") {
+      const parsed = parseEstimateMinutesInput(value);
+      if (parsed === null) {
+        setError("Estimate must be minutes (30 min) or hours (2 hours or 2:30).");
+        return;
+      }
+    }
     setError(null);
     try {
       switch (editing.field) {
         case "title":
           if (value) {
-            await mutate("update_item_fields", {
-              id: item.id,
-              fields: { title: value },
-            });
+            await updateItemFields(item.id, { title: value });
           }
           break;
         case "status":
-          await mutate("set_status", { id: item.id, status: value });
+          await setStatus(item.id, value);
           break;
         case "priority": {
           const priority = Number(value);
           if (Number.isFinite(priority)) {
-            await mutate("update_item_fields", {
-              id: item.id,
-              fields: { priority },
-            });
+            await updateItemFields(item.id, { priority });
           }
           break;
         }
         case "due_at": {
           if (!value) {
-            await mutate("update_item_fields", {
-              id: item.id,
-              fields: { due_at: null },
-            });
+            await updateItemFields(item.id, { due_at: null });
             break;
           }
           const dueAt = new Date(value).getTime();
           if (Number.isFinite(dueAt)) {
-            await mutate("update_item_fields", {
-              id: item.id,
-              fields: { due_at: dueAt },
-            });
+            await updateItemFields(item.id, { due_at: dueAt });
           }
           break;
         }
@@ -589,7 +545,7 @@ const ListView: FC<ListViewProps> = ({
           }
           const startAt = new Date(value).getTime();
           if (Number.isFinite(startAt)) {
-            await mutate("create_block", {
+            await createBlock({
               item_id: item.id,
               start_at: startAt,
               duration_minutes: 60,
@@ -605,7 +561,7 @@ const ListView: FC<ListViewProps> = ({
                 .map((entry) => entry.trim())
                 .filter(Boolean)
             : [];
-          await mutate("set_item_tags", { item_id: item.id, tags });
+          await setItemTags(item.id, tags);
           break;
         }
         case "depends_on": {
@@ -618,32 +574,42 @@ const ListView: FC<ListViewProps> = ({
           const existing = new Set(item.depends_on ?? []);
           for (const depId of desired) {
             if (!existing.has(depId)) {
-              await mutate("add_dependency", {
-                item_id: item.id,
-                depends_on_id: depId,
-              });
+              await addDependency(item.id, depId);
             }
           }
           for (const depId of existing) {
             if (!desired.has(depId)) {
-              await mutate("remove_dependency", {
-                item_id: item.id,
-                depends_on_id: depId,
-              });
+              await removeDependency(item.id, depId);
             }
           }
           break;
         }
         case "notes":
-          await mutate("update_item_fields", {
-            id: item.id,
-            fields: { notes: value ? value : null },
-          });
+          await updateItemFields(item.id, { notes: value ? value : null });
           break;
+        case "estimate_mode": {
+          const mode = value === "rollup" ? "rollup" : "manual";
+          await updateItemFields(
+            item.id,
+            mode === "rollup"
+              ? { estimate_mode: mode, estimate_minutes: 0 }
+              : { estimate_mode: mode }
+          );
+          break;
+        }
+        case "estimate_minutes": {
+          const minutes = parseEstimateMinutesInput(value);
+          if (minutes !== null && Number.isFinite(minutes) && minutes >= 0) {
+            await updateItemFields(item.id, {
+              estimate_minutes: Math.floor(minutes),
+            });
+          }
+          break;
+        }
         case "health":
-          await mutate("update_item_fields", {
-            id: item.id,
-            fields: { health: value, health_mode: "manual" },
+          await updateItemFields(item.id, {
+            health: value,
+            health_mode: "manual",
           });
           break;
         default:
@@ -784,6 +750,63 @@ const ListView: FC<ListViewProps> = ({
           autoFocus
         />,
         String(item.priority ?? 0)
+      );
+    }
+    if (column.key === "estimate_mode") {
+      const initial =
+        item.estimate_mode ?? (item.type === "task" ? "manual" : "rollup");
+      return renderEditableCell(
+        item,
+        "estimate_mode",
+        column.render(item, 0, null),
+        <select
+          value={editValue}
+          onChange={(event) => setEditValue(event.target.value)}
+          onBlur={() => void commitEdit()}
+          onKeyDown={(event) => {
+            if (event.key === "Enter") {
+              event.preventDefault();
+              void commitEdit();
+            }
+            if (event.key === "Escape") {
+              event.preventDefault();
+              cancelEdit();
+            }
+          }}
+          autoFocus
+        >
+          <option value="manual">manual</option>
+          <option value="rollup">rollup</option>
+        </select>,
+        initial
+      );
+    }
+    if (column.key === "estimate_minutes") {
+      if (item.estimate_mode === "rollup") {
+        return column.render(item, 0, null);
+      }
+      return renderEditableCell(
+        item,
+        "estimate_minutes",
+        column.render(item, 0, null),
+        <input
+          type="text"
+          value={editValue}
+          onChange={(event) => setEditValue(event.target.value)}
+          onBlur={() => void commitEdit()}
+          onKeyDown={(event) => {
+            if (event.key === "Enter") {
+              event.preventDefault();
+              void commitEdit();
+            }
+            if (event.key === "Escape") {
+              event.preventDefault();
+              cancelEdit();
+            }
+          }}
+          autoFocus
+        />,
+        formatEstimateMinutes(item.estimate_minutes ?? 0)
       );
     }
     if (column.key === "due_at") {
@@ -988,10 +1011,7 @@ const ListView: FC<ListViewProps> = ({
   ) => {
     setError(null);
     try {
-      await mutate("update_item_fields", {
-        id: itemId,
-        fields: { parent_id: targetParentId },
-      });
+      await updateItemFields(itemId, { parent_id: targetParentId });
       onRefresh();
     } catch (err) {
       const message = err instanceof Error ? err.message : "Unknown error";
@@ -1013,9 +1033,9 @@ const ListView: FC<ListViewProps> = ({
 
     setError(null);
     try {
-      await mutate("update_item_fields", {
-        id: itemId,
-        fields: { parent_id: targetParentId, sort_order: nextSort },
+      await updateItemFields(itemId, {
+        parent_id: targetParentId,
+        sort_order: nextSort,
       });
       onRefresh();
     } catch (err) {
@@ -1023,6 +1043,25 @@ const ListView: FC<ListViewProps> = ({
       setError(message);
     }
   };
+
+  const handleMoveAcrossParents = async (
+    itemId: string,
+    targetParentId: string | null,
+    sortOrder: number
+  ) => {
+    setError(null);
+    try {
+      await updateItemFields(itemId, {
+        parent_id: targetParentId,
+        sort_order: sortOrder,
+      });
+      onRefresh();
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Unknown error";
+      setError(message);
+    }
+  };
+
 
   const handleDragStart = (itemId: string, groupKey: string) => (
     event: DragEvent
@@ -1038,14 +1077,31 @@ const ListView: FC<ListViewProps> = ({
     setMilestoneDrop(null);
   };
 
+  const canDragOverRow = (itemId: string, groupKey: string) => {
+    if (!dragging) {
+      return false;
+    }
+    if (dragging.groupKey === groupKey) {
+      return true;
+    }
+    if (groupKey === "milestones" || groupKey.startsWith("task:")) {
+      return false;
+    }
+    const targetParentId = itemById.get(itemId)?.parent_id ?? null;
+    return canMoveTaskToParent(dragging.itemId, targetParentId);
+  };
+
   const handleDragOverRow = (itemId: string, groupKey: string) => (
     event: DragEvent
   ) => {
-    if (!dragging || dragging.groupKey !== groupKey) {
+    if (!canDragOverRow(itemId, groupKey)) {
       return;
     }
     event.preventDefault();
-    setDragOver({ itemId, groupKey, position: "before" });
+    const rect = (event.currentTarget as HTMLElement).getBoundingClientRect();
+    const midpoint = rect.top + rect.height / 2;
+    const position = event.clientY < midpoint ? "before" : "after";
+    setDragOver({ itemId, groupKey, position });
   };
 
   const handleDragOverGroup = (
@@ -1128,29 +1184,103 @@ const ListView: FC<ListViewProps> = ({
   const handleDropBefore = (itemId: string, groupKey: string) => (
     event: DragEvent
   ) => {
-    if (!dragging || dragging.groupKey !== groupKey) {
+    if (!dragging) {
+      return;
+    }
+    if (!canDragOverRow(itemId, groupKey)) {
       return;
     }
     event.preventDefault();
-    const parentId = itemById.get(itemId)?.parent_id ?? null;
+    const targetItem = itemById.get(itemId);
+    const parentId = targetItem?.parent_id ?? null;
     if (dragging.itemId === itemId) {
       return;
     }
-    void handleMove(dragging.itemId, parentId, itemId, undefined);
+    if (dragging.groupKey === groupKey) {
+      void handleMove(dragging.itemId, parentId, itemId, undefined);
+      setDragOver(null);
+      return;
+    }
+    const targetSort = targetItem?.sort_order ?? 0;
+    void handleMoveAcrossParents(dragging.itemId, parentId, targetSort - 1);
     setDragOver(null);
   };
 
-  const handleDropEnd = (groupKey: string, lastId: string) => (
+  const handleDropAfter = (itemId: string, groupKey: string) => (
     event: DragEvent
   ) => {
-    if (!dragging || dragging.groupKey !== groupKey) {
+    if (!dragging) {
+      return;
+    }
+    if (!canDragOverRow(itemId, groupKey)) {
       return;
     }
     event.preventDefault();
-    const parentId = itemById.get(lastId)?.parent_id ?? null;
-    void handleMove(dragging.itemId, parentId, undefined, lastId);
+    const targetItem = itemById.get(itemId);
+    const parentId = targetItem?.parent_id ?? null;
+    if (dragging.itemId === itemId) {
+      return;
+    }
+    if (dragging.groupKey === groupKey) {
+      void handleMove(dragging.itemId, parentId, undefined, itemId);
+      setDragOver(null);
+      return;
+    }
+    const targetSort = targetItem?.sort_order ?? 0;
+    void handleMoveAcrossParents(dragging.itemId, parentId, targetSort + 1);
     setDragOver(null);
   };
+
+  const handleDropOnRow = (itemId: string, groupKey: string) => (
+    event: DragEvent
+  ) => {
+    if (dragOver?.position === "after") {
+      handleDropAfter(itemId, groupKey)(event);
+      return;
+    }
+    handleDropBefore(itemId, groupKey)(event);
+  };
+
+  const handleDragOverAppend = (
+    groupKey: string,
+    parentId: string | null,
+    lastItemId?: string
+  ) => (event: DragEvent) => {
+    if (!dragging) {
+      return;
+    }
+    const allowDrop =
+      dragging.groupKey === groupKey ||
+      (groupKey !== "milestones" &&
+        !groupKey.startsWith("task:") &&
+        canMoveTaskToParent(dragging.itemId, parentId));
+    if (!allowDrop) {
+      return;
+    }
+    event.preventDefault();
+    if (lastItemId) {
+      setDragOver({ itemId: lastItemId, groupKey, position: "after" });
+      return;
+    }
+    setDragOver({
+      itemId: parentId ?? "ungrouped",
+      groupKey: `move-target:${parentId ?? "ungrouped"}`,
+      position: "into",
+    });
+  };
+
+  const handleDropAppend = (
+    groupKey: string,
+    parentId: string | null,
+    lastItemId?: string
+  ) => (event: DragEvent) => {
+    if (lastItemId) {
+      handleDropAfter(lastItemId, groupKey)(event);
+      return;
+    }
+    handleDropOnGroup(parentId)(event);
+  };
+
 
   const renderDragHandle = (itemId: string, groupKey: string) => (
     <span
@@ -1162,42 +1292,6 @@ const ListView: FC<ListViewProps> = ({
     >
       ⋮⋮
     </span>
-  );
-
-  const handleReorder = async (itemId: string, direction: "up" | "down") => {
-    setError(null);
-    try {
-      await mutate("reorder_item", { item_id: itemId, direction });
-      onRefresh();
-    } catch (err) {
-      const message = err instanceof Error ? err.message : "Unknown error";
-      setError(message);
-    }
-  };
-
-  const renderMoveButtons = (
-    itemId: string,
-    index: number,
-    total: number
-  ) => (
-    <div className="row-actions">
-      <button
-        type="button"
-        className="button button-ghost"
-        onClick={() => handleReorder(itemId, "up")}
-        disabled={index === 0}
-      >
-        ↑
-      </button>
-      <button
-        type="button"
-        className="button button-ghost"
-        onClick={() => handleReorder(itemId, "down")}
-        disabled={index === total - 1}
-      >
-        ↓
-      </button>
-    </div>
   );
 
   if (!selectedProjectId) {
@@ -1215,7 +1309,11 @@ const ListView: FC<ListViewProps> = ({
           <thead>
             <tr>
               {columns.map((column) => (
-                <th key={column.key} style={{ minWidth: column.minWidth }}>
+                <th
+                  key={column.key}
+                  style={{ minWidth: column.minWidth }}
+                  className={column.key === "title" ? "title-header" : undefined}
+                >
                   {column.label}
                 </th>
               ))}
@@ -1230,26 +1328,200 @@ const ListView: FC<ListViewProps> = ({
                 </tr>
               ) : (
                 <>
-                {milestones.map((milestone, milestoneIndex) => {
+                <tr
+                  className={
+                    dragOver?.groupKey === "move-target:ungrouped"
+                      ? "group-row drag-over"
+                      : "group-row"
+                  }
+                  onDragOver={handleDragOverGroup(
+                    ungroupedParentId,
+                    "move-target:ungrouped"
+                  )}
+                  onDrop={handleDropOnGroup(ungroupedParentId)}
+                >
+                  <td colSpan={columns.length}>
+                    <button
+                      type="button"
+                      className="group-toggle"
+                      onClick={() => setCollapsedUngrouped((prev) => !prev)}
+                    >
+                      {collapsedUngrouped ? "▶" : "▼"} Ungrouped
+                    </button>
+                  </td>
+                </tr>
+                {collapsedUngrouped
+                  ? null
+                  : ungroupedTasks.map((item) => {
+                      const children = taskChildren.get(item.id) ?? [];
+                      const groupKey = "ungrouped";
+                      const actions = undefined;
+                      return (
+                        <Fragment key={item.id}>
+                            <ContextMenu.Root>
+                              <ContextMenu.Trigger asChild>
+                                <tr
+                                  className={
+                                    dragOver?.itemId === item.id &&
+                                    dragOver.groupKey === groupKey
+                                      ? dragOver.position === "after"
+                                        ? "drag-over-bottom"
+                                        : "drag-over-top"
+                                      : undefined
+                                  }
+                                  onDragOver={handleDragOverRow(item.id, groupKey)}
+                                  onDrop={handleDropOnRow(item.id, groupKey)}
+                                >
+                                    {columns.map((column) => (
+                                      <td key={`${item.id}-${column.key}`}>
+                                        {renderCell(
+                                          item,
+                                          column,
+                                          item.depth * 16,
+                                          renderDragHandle(item.id, groupKey),
+                                          actions
+                                        )}
+                                      </td>
+                                    ))}
+                                </tr>
+                              </ContextMenu.Trigger>
+                              <ContextMenu.Portal>
+                                <ContextMenu.Content className="context-menu-content">
+                                  <ContextMenu.Item
+                                    className="context-menu-item"
+                                    onSelect={() => handleDelete(item)}
+                                  >
+                                    Delete task
+                                  </ContextMenu.Item>
+                                  <ContextMenu.Item
+                                    className="context-menu-item"
+                                    onSelect={() => handleDuplicateTask(item)}
+                                  >
+                                    Duplicate task
+                                  </ContextMenu.Item>
+                                  <ContextMenu.Item
+                                    className="context-menu-item"
+                                    disabled
+                                  >
+                                    Move to…
+                                  </ContextMenu.Item>
+                                </ContextMenu.Content>
+                              </ContextMenu.Portal>
+                            </ContextMenu.Root>
+                          {children.map((child) => {
+                            const childGroupKey = `task:${item.id}`;
+                            const childActions = undefined;
+                            return (
+                              <ContextMenu.Root key={child.id}>
+                                <ContextMenu.Trigger asChild>
+                                  <tr
+                                    className={
+                                      dragOver?.itemId === child.id &&
+                                      dragOver.groupKey === childGroupKey
+                                        ? dragOver.position === "after"
+                                          ? "drag-over-bottom"
+                                          : "drag-over-top"
+                                        : undefined
+                                    }
+                                    onDragOver={handleDragOverRow(
+                                      child.id,
+                                      childGroupKey
+                                    )}
+                                    onDrop={handleDropOnRow(
+                                      child.id,
+                                      childGroupKey
+                                    )}
+                                  >
+                                    {columns.map((column) => (
+                                      <td key={`${child.id}-${column.key}`}>
+                                        {renderCell(
+                                          child,
+                                          column,
+                                          child.depth * 16,
+                                          renderDragHandle(child.id, childGroupKey),
+                                          childActions
+                                        )}
+                                      </td>
+                                    ))}
+                                  </tr>
+                                </ContextMenu.Trigger>
+                                <ContextMenu.Portal>
+                                  <ContextMenu.Content className="context-menu-content">
+                                    <ContextMenu.Item
+                                      className="context-menu-item"
+                                      onSelect={() => handleDelete(child)}
+                                    >
+                                      Delete task
+                                    </ContextMenu.Item>
+                                    <ContextMenu.Item
+                                      className="context-menu-item"
+                                      onSelect={() => handleDuplicateTask(child)}
+                                    >
+                                      Duplicate task
+                                    </ContextMenu.Item>
+                                    <ContextMenu.Item
+                                      className="context-menu-item"
+                                      disabled
+                                    >
+                                      Move to…
+                                    </ContextMenu.Item>
+                                  </ContextMenu.Content>
+                                </ContextMenu.Portal>
+                              </ContextMenu.Root>
+                            );
+                          })}
+                        </Fragment>
+                      );
+                    })}
+                <tr className="add-row">
+                  <td colSpan={columns.length}>
+                    <div
+                      onDragOver={handleDragOverAppend(
+                        "ungrouped",
+                        ungroupedParentId,
+                        getLastVisibleId(ungroupedTasks)
+                      )}
+                      onDrop={handleDropAppend(
+                        "ungrouped",
+                        ungroupedParentId,
+                        getLastVisibleId(ungroupedTasks)
+                      )}
+                    >
+                    {inlineAdd?.groupKey === "ungrouped" ? (
+                      <input
+                        className="add-row-input"
+                        value={inlineTitle}
+                        onChange={(event) => setInlineTitle(event.target.value)}
+                        onKeyDown={(event) => {
+                          if (event.key === "Enter") {
+                            event.preventDefault();
+                            void handleInlineCommit();
+                          }
+                          if (event.key === "Escape") {
+                            event.preventDefault();
+                            handleInlineCancel();
+                          }
+                        }}
+                        placeholder="New task title"
+                        autoFocus
+                      />
+                    ) : (
+                      <button
+                        type="button"
+                        className="add-row-button"
+                        onClick={() => startInlineAdd("ungrouped", ungroupedParentId)}
+                      >
+                        Add task…
+                      </button>
+                    )}
+                    </div>
+                  </td>
+                </tr>
+                {milestones.map((milestone) => {
                   const isCollapsed = collapsedMilestones.has(milestone.id);
                   const milestoneTasks = tasksUnderMilestone.get(milestone.id) ?? [];
                   const groupKey = `milestone:${milestone.id}`;
-                  const milestoneActions = (
-                    <span className="cell-actions">
-                      {renderMoveButtons(
-                        milestone.id,
-                        milestoneIndex,
-                        milestones.length
-                      )}
-                      <button
-                        type="button"
-                        className="button button-ghost"
-                        onClick={() => handleDelete(milestone)}
-                      >
-                        Delete
-                      </button>
-                    </span>
-                  );
+                  const milestoneActions = undefined;
                   const milestoneDragHandle = (
                     <span className="cell-title-controls">
                       {renderDragHandle(milestone.id, "milestones")}
@@ -1331,24 +1603,9 @@ const ListView: FC<ListViewProps> = ({
                       </ContextMenu.Root>
                       {isCollapsed
                         ? null
-                        : milestoneTasks.map((item, itemIndex) => {
+                        : milestoneTasks.map((item) => {
                             const children = taskChildren.get(item.id) ?? [];
-                            const actions = (
-                              <span className="cell-actions">
-                                {renderMoveButtons(
-                                  item.id,
-                                  itemIndex,
-                                  milestoneTasks.length
-                                )}
-                                <button
-                                  type="button"
-                                  className="button button-ghost"
-                                  onClick={() => handleDelete(item)}
-                                >
-                                  Delete
-                                </button>
-                              </span>
-                            );
+                            const actions = undefined;
                             return (
                               <Fragment key={item.id}>
                                 <ContextMenu.Root>
@@ -1357,11 +1614,13 @@ const ListView: FC<ListViewProps> = ({
                                       className={
                                         dragOver?.itemId === item.id &&
                                         dragOver.groupKey === groupKey
-                                          ? "drag-over"
+                                          ? dragOver.position === "after"
+                                            ? "drag-over-bottom"
+                                            : "drag-over-top"
                                           : undefined
                                       }
                                       onDragOver={handleDragOverRow(item.id, groupKey)}
-                                      onDrop={handleDropBefore(item.id, groupKey)}
+                                      onDrop={handleDropOnRow(item.id, groupKey)}
                                     >
                                       {columns.map((column) => (
                                         <td key={`${item.id}-${column.key}`}>
@@ -1399,24 +1658,9 @@ const ListView: FC<ListViewProps> = ({
                                     </ContextMenu.Content>
                                   </ContextMenu.Portal>
                                 </ContextMenu.Root>
-                                {children.map((child, childIndex) => {
+                                {children.map((child) => {
                                   const childGroupKey = `task:${item.id}`;
-                                  const childActions = (
-                                    <span className="cell-actions">
-                                      {renderMoveButtons(
-                                        child.id,
-                                        childIndex,
-                                        children.length
-                                      )}
-                                      <button
-                                        type="button"
-                                        className="button button-ghost"
-                                        onClick={() => handleDelete(child)}
-                                      >
-                                        Delete
-                                      </button>
-                                    </span>
-                                  );
+                                  const childActions = undefined;
                                   return (
                                     <ContextMenu.Root key={child.id}>
                                       <ContextMenu.Trigger asChild>
@@ -1424,14 +1668,16 @@ const ListView: FC<ListViewProps> = ({
                                           className={
                                             dragOver?.itemId === child.id &&
                                             dragOver.groupKey === childGroupKey
-                                              ? "drag-over"
+                                              ? dragOver.position === "after"
+                                                ? "drag-over-bottom"
+                                                : "drag-over-top"
                                               : undefined
                                           }
                                           onDragOver={handleDragOverRow(
                                             child.id,
                                             childGroupKey
                                           )}
-                                          onDrop={handleDropBefore(
+                                          onDrop={handleDropOnRow(
                                             child.id,
                                             childGroupKey
                                           )}
@@ -1476,74 +1722,23 @@ const ListView: FC<ListViewProps> = ({
                                     </ContextMenu.Root>
                                   );
                                 })}
-                                {children.length > 0 ? (
-                                  <tr className="drop-row">
-                                    <td colSpan={columns.length}>
-                                      <div
-                                        className={
-                                          dragOver?.position === "end" &&
-                                          dragOver.groupKey === `task:${item.id}`
-                                            ? "drop-target is-active"
-                                            : "drop-target"
-                                        }
-                                        onDragOver={(event) => {
-                                          if (
-                                            dragging &&
-                                            dragging.groupKey === `task:${item.id}`
-                                          ) {
-                                            event.preventDefault();
-                                            setDragOver({
-                                              itemId: item.id,
-                                              groupKey: `task:${item.id}`,
-                                              position: "end",
-                                            });
-                                          }
-                                        }}
-                                        onDrop={handleDropEnd(
-                                          `task:${item.id}`,
-                                          children[children.length - 1].id
-                                        )}
-                                      >
-                                        Drop to end
-                                      </div>
-                                    </td>
-                                  </tr>
-                                ) : null}
                               </Fragment>
                             );
                           })}
-                      {milestoneTasks.length > 0 ? (
-                        <tr className="drop-row">
-                          <td colSpan={columns.length}>
-                            <div
-                              className={
-                                dragOver?.position === "end" &&
-                                dragOver.groupKey === groupKey
-                                  ? "drop-target is-active"
-                                  : "drop-target"
-                              }
-                              onDragOver={(event) => {
-                                if (dragging && dragging.groupKey === groupKey) {
-                                  event.preventDefault();
-                                  setDragOver({
-                                    itemId: milestone.id,
-                                    groupKey,
-                                    position: "end",
-                                  });
-                                }
-                              }}
-                              onDrop={handleDropEnd(
-                                groupKey,
-                                milestoneTasks[milestoneTasks.length - 1].id
-                              )}
-                            >
-                              Drop to end
-                            </div>
-                          </td>
-                        </tr>
-                      ) : null}
                       <tr className="add-row">
                         <td colSpan={columns.length}>
+                          <div
+                            onDragOver={handleDragOverAppend(
+                              groupKey,
+                              milestone.id,
+                              getLastVisibleId(milestoneTasks)
+                            )}
+                            onDrop={handleDropAppend(
+                              groupKey,
+                              milestone.id,
+                              getLastVisibleId(milestoneTasks)
+                            )}
+                          >
                           {inlineAdd?.groupKey === groupKey ? (
                             <input
                               className="add-row-input"
@@ -1571,306 +1766,12 @@ const ListView: FC<ListViewProps> = ({
                               Add task…
                             </button>
                           )}
+                          </div>
                         </td>
                       </tr>
                     </Fragment>
                   );
                 })}
-                {milestones.length > 0 ? (
-                  <tr className="drop-row">
-                    <td colSpan={columns.length}>
-                      <div
-                        className={
-                          dragOver?.position === "end" &&
-                          dragOver.groupKey === "milestones"
-                            ? "drop-target is-active"
-                            : "drop-target"
-                        }
-                        onDragOver={(event) => {
-                          if (dragging && dragging.groupKey === "milestones") {
-                            event.preventDefault();
-                            setDragOver({
-                              itemId: "milestones",
-                              groupKey: "milestones",
-                              position: "end",
-                            });
-                          }
-                        }}
-                        onDrop={handleDropEnd(
-                          "milestones",
-                          milestones[milestones.length - 1].id
-                        )}
-                      >
-                        Drop to end
-                      </div>
-                    </td>
-                  </tr>
-                ) : null}
-                <tr
-                  className={
-                    dragOver?.groupKey === "move-target:ungrouped"
-                      ? "group-row drag-over"
-                      : "group-row"
-                  }
-                  onDragOver={handleDragOverGroup(
-                    ungroupedParentId,
-                    "move-target:ungrouped"
-                  )}
-                  onDrop={handleDropOnGroup(ungroupedParentId)}
-                >
-                  <td colSpan={columns.length}>
-                    <button
-                      type="button"
-                      className="group-toggle"
-                      onClick={() => setCollapsedUngrouped((prev) => !prev)}
-                    >
-                      {collapsedUngrouped ? "▶" : "▼"} Ungrouped
-                    </button>
-                  </td>
-                </tr>
-                {collapsedUngrouped
-                  ? null
-                  : ungroupedTasks.map((item, itemIndex) => {
-                      const children = taskChildren.get(item.id) ?? [];
-                      const groupKey = "ungrouped";
-                      const actions = (
-                        <span className="cell-actions">
-                          {renderMoveButtons(
-                            item.id,
-                            itemIndex,
-                            ungroupedTasks.length
-                          )}
-                          <button
-                            type="button"
-                            className="button button-ghost"
-                            onClick={() => handleDelete(item)}
-                          >
-                            Delete
-                          </button>
-                        </span>
-                      );
-                      return (
-                        <Fragment key={item.id}>
-                            <ContextMenu.Root>
-                              <ContextMenu.Trigger asChild>
-                                <tr
-                                  className={
-                                    dragOver?.itemId === item.id &&
-                                    dragOver.groupKey === groupKey
-                                      ? "drag-over"
-                                      : undefined
-                                  }
-                                  onDragOver={handleDragOverRow(item.id, groupKey)}
-                                  onDrop={handleDropBefore(item.id, groupKey)}
-                                >
-                                    {columns.map((column) => (
-                                      <td key={`${item.id}-${column.key}`}>
-                                        {renderCell(
-                                          item,
-                                          column,
-                                          item.depth * 16,
-                                          renderDragHandle(item.id, groupKey),
-                                          actions
-                                        )}
-                                      </td>
-                                    ))}
-                                </tr>
-                              </ContextMenu.Trigger>
-                              <ContextMenu.Portal>
-                                <ContextMenu.Content className="context-menu-content">
-                                  <ContextMenu.Item
-                                    className="context-menu-item"
-                                    onSelect={() => handleDelete(item)}
-                                  >
-                                    Delete task
-                                  </ContextMenu.Item>
-                                  <ContextMenu.Item
-                                    className="context-menu-item"
-                                    onSelect={() => handleDuplicateTask(item)}
-                                  >
-                                    Duplicate task
-                                  </ContextMenu.Item>
-                                  <ContextMenu.Item
-                                    className="context-menu-item"
-                                    disabled
-                                  >
-                                    Move to…
-                                  </ContextMenu.Item>
-                                </ContextMenu.Content>
-                              </ContextMenu.Portal>
-                            </ContextMenu.Root>
-                          {children.map((child, childIndex) => {
-                            const childGroupKey = `task:${item.id}`;
-                            const childActions = (
-                              <span className="cell-actions">
-                                {renderMoveButtons(
-                                  child.id,
-                                  childIndex,
-                                  children.length
-                                )}
-                                <button
-                                  type="button"
-                                  className="button button-ghost"
-                                  onClick={() => handleDelete(child)}
-                                >
-                                  Delete
-                                </button>
-                              </span>
-                            );
-                            return (
-                              <ContextMenu.Root key={child.id}>
-                                <ContextMenu.Trigger asChild>
-                                  <tr
-                                    className={
-                                      dragOver?.itemId === child.id &&
-                                      dragOver.groupKey === childGroupKey
-                                        ? "drag-over"
-                                        : undefined
-                                    }
-                                    onDragOver={handleDragOverRow(
-                                      child.id,
-                                      childGroupKey
-                                    )}
-                                    onDrop={handleDropBefore(
-                                      child.id,
-                                      childGroupKey
-                                    )}
-                                  >
-                                    {columns.map((column) => (
-                                      <td key={`${child.id}-${column.key}`}>
-                                        {renderCell(
-                                          child,
-                                          column,
-                                          child.depth * 16,
-                                          renderDragHandle(child.id, childGroupKey),
-                                          childActions
-                                        )}
-                                      </td>
-                                    ))}
-                                  </tr>
-                                </ContextMenu.Trigger>
-                                <ContextMenu.Portal>
-                                  <ContextMenu.Content className="context-menu-content">
-                                    <ContextMenu.Item
-                                      className="context-menu-item"
-                                      onSelect={() => handleDelete(child)}
-                                    >
-                                      Delete task
-                                    </ContextMenu.Item>
-                                    <ContextMenu.Item
-                                      className="context-menu-item"
-                                      onSelect={() => handleDuplicateTask(child)}
-                                    >
-                                      Duplicate task
-                                    </ContextMenu.Item>
-                                    <ContextMenu.Item
-                                      className="context-menu-item"
-                                      disabled
-                                    >
-                                      Move to…
-                                    </ContextMenu.Item>
-                                  </ContextMenu.Content>
-                                </ContextMenu.Portal>
-                              </ContextMenu.Root>
-                            );
-                          })}
-                          {children.length > 0 ? (
-                            <tr className="drop-row">
-                              <td colSpan={columns.length}>
-                                <div
-                                  className={
-                                    dragOver?.position === "end" &&
-                                    dragOver.groupKey === `task:${item.id}`
-                                      ? "drop-target is-active"
-                                      : "drop-target"
-                                  }
-                                  onDragOver={(event) => {
-                                    if (
-                                      dragging &&
-                                      dragging.groupKey === `task:${item.id}`
-                                    ) {
-                                      event.preventDefault();
-                                      setDragOver({
-                                        itemId: item.id,
-                                        groupKey: `task:${item.id}`,
-                                        position: "end",
-                                      });
-                                    }
-                                  }}
-                                  onDrop={handleDropEnd(
-                                    `task:${item.id}`,
-                                    children[children.length - 1].id
-                                  )}
-                                >
-                                  Drop to end
-                                </div>
-                              </td>
-                            </tr>
-                          ) : null}
-                        </Fragment>
-                      );
-                    })}
-                <tr className="add-row">
-                  <td colSpan={columns.length}>
-                    {inlineAdd?.groupKey === "ungrouped" ? (
-                      <input
-                        className="add-row-input"
-                        value={inlineTitle}
-                        onChange={(event) => setInlineTitle(event.target.value)}
-                        onKeyDown={(event) => {
-                          if (event.key === "Enter") {
-                            event.preventDefault();
-                            void handleInlineCommit();
-                          }
-                          if (event.key === "Escape") {
-                            event.preventDefault();
-                            handleInlineCancel();
-                          }
-                        }}
-                        placeholder="New task title"
-                        autoFocus
-                      />
-                    ) : (
-                      <button
-                        type="button"
-                        className="add-row-button"
-                        onClick={() => startInlineAdd("ungrouped", ungroupedParentId)}
-                      >
-                        Add task…
-                      </button>
-                    )}
-                  </td>
-                </tr>
-                {collapsedUngrouped || ungroupedTasks.length === 0 ? null : (
-                  <tr className="drop-row">
-                    <td colSpan={columns.length}>
-                      <div
-                        className={
-                          dragOver?.position === "end" &&
-                          dragOver.groupKey === "ungrouped"
-                            ? "drop-target is-active"
-                            : "drop-target"
-                        }
-                        onDragOver={(event) => {
-                          if (dragging && dragging.groupKey === "ungrouped") {
-                            event.preventDefault();
-                            setDragOver({
-                              itemId: "ungrouped",
-                              groupKey: "ungrouped",
-                              position: "end",
-                            });
-                          }
-                        }}
-                        onDrop={handleDropEnd(
-                          "ungrouped",
-                          ungroupedTasks[ungroupedTasks.length - 1].id
-                        )}
-                      >
-                        Drop to end
-                      </div>
-                    </td>
-                  </tr>
-                )}
               </>
             )}
           </tbody>

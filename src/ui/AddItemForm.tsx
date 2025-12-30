@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState, type FC, type FormEvent } from "react";
 import { mutate, query } from "../rpc/clientSingleton";
 import { UNGROUPED_PROJECT_ID } from "./constants";
+import { toDateTimeLocal } from "../domain/formatters";
 
 type ItemType = "project" | "milestone" | "task";
 
@@ -59,15 +60,6 @@ const formatOptionLabel = (item: ItemRow, parentType: ItemType | null) => {
   return `${" ".repeat(item.depth * 2)}${item.title} (${labelType})`;
 };
 
-const toDateTimeLocal = (value: number | null) => {
-  if (!value) {
-    return "";
-  }
-  const date = new Date(value);
-  const offset = date.getTimezoneOffset() * 60000;
-  return new Date(value - offset).toISOString().slice(0, 16);
-};
-
 const parseCommaList = (value: string) =>
   Array.from(
     new Set(
@@ -77,6 +69,8 @@ const parseCommaList = (value: string) =>
         .filter(Boolean)
     )
   );
+
+const normalizeAssignees = (value: string) => parseCommaList(value).join(", ");
 
 const AddItemForm: FC<AddItemFormProps> = ({
   selectedProjectId,
@@ -103,8 +97,10 @@ const AddItemForm: FC<AddItemFormProps> = ({
   const [health, setHealth] = useState("unknown");
   const [notes, setNotes] = useState("");
   const [tagsInput, setTagsInput] = useState("");
+  const [tagChips, setTagChips] = useState<string[]>([]);
   const [assigneesInput, setAssigneesInput] = useState("");
   const [depsInput, setDepsInput] = useState("");
+  const [depChips, setDepChips] = useState<string[]>([]);
   const [blockerKind, setBlockerKind] = useState("general");
   const [blockerText, setBlockerText] = useState("");
   const [blockers, setBlockers] = useState<ItemDetails["blockers"]>([]);
@@ -141,6 +137,48 @@ const AddItemForm: FC<AddItemFormProps> = ({
     [projectItems]
   );
 
+  const tagSuggestions = useMemo(() => {
+    const set = new Set<string>();
+    for (const item of items) {
+      for (const tag of item.tags ?? []) {
+        if (tag.name) {
+          set.add(tag.name);
+        }
+      }
+    }
+    return Array.from(set).sort();
+  }, [items]);
+
+  const filteredTagSuggestions = useMemo(() => {
+    const input = tagsInput.trim().toLowerCase();
+    if (!input) {
+      return [];
+    }
+    return tagSuggestions
+      .filter((tag) => tag.toLowerCase().includes(input))
+      .filter((tag) => !tagChips.includes(tag))
+      .slice(0, 6);
+  }, [tagChips, tagSuggestions, tagsInput]);
+
+  const dependencyOptions = useMemo(() => {
+    return projectItems.filter((item) => item.type !== "project");
+  }, [projectItems]);
+
+  const filteredDepSuggestions = useMemo(() => {
+    const input = depsInput.trim().toLowerCase();
+    if (!input) {
+      return [];
+    }
+    return dependencyOptions
+      .filter((item) => {
+        if (depChips.includes(item.id)) {
+          return false;
+        }
+        return item.title.toLowerCase().includes(input);
+      })
+      .slice(0, 6);
+  }, [depChips, dependencyOptions, depsInput]);
+
   useEffect(() => {
     if (mode === "edit" && selectedItemId) {
       setLoadingDetails(true);
@@ -164,10 +202,12 @@ const AddItemForm: FC<AddItemFormProps> = ({
           setNotes(data.notes ?? "");
           setBlockers(data.blockers);
           setCurrentDeps(data.dependencies ?? []);
-          setDepsInput((data.dependencies ?? []).join(", "));
+          setDepsInput("");
+          setDepChips(data.dependencies ?? []);
           const fromList = items.find((item) => item.id === data.id);
           if (fromList) {
-            setTagsInput(fromList.tags.map((tag) => tag.name).join(", "));
+            setTagsInput("");
+            setTagChips(fromList.tags.map((tag) => tag.name));
             setAssigneesInput(
               fromList.assignees.map((assignee) => assignee.id).join(", ")
             );
@@ -187,11 +227,37 @@ const AddItemForm: FC<AddItemFormProps> = ({
     }
   }, [items, mode, selectedItemId]);
 
-  useEffect(() => {
-    if (estimateMode === "rollup") {
-      setEstimateMinutes("0");
+  const handleEstimateMinutesChange = (value: string) => {
+    setEstimateMinutes(value);
+  };
+
+  const normalizeEstimateMinutes = () => {
+    if (estimateMode !== "manual") {
+      return;
     }
-  }, [estimateMode]);
+    const trimmed = estimateMinutes.trim();
+    if (trimmed === "") {
+      setEstimateMinutes("0");
+      return;
+    }
+    const numeric = Number(trimmed);
+    if (!Number.isFinite(numeric) || numeric < 0) {
+      setEstimateMinutes("0");
+      return;
+    }
+    setEstimateMinutes(String(Math.floor(numeric)));
+  };
+
+  useEffect(() => {
+    if (mode === "edit") {
+      return;
+    }
+    if (type === "task") {
+      setEstimateMode("manual");
+      return;
+    }
+    setEstimateMode("rollup");
+  }, [mode, type]);
 
   useEffect(() => {
     if (mode === "create" && initialType) {
@@ -223,8 +289,10 @@ const AddItemForm: FC<AddItemFormProps> = ({
     setHealthMode("auto");
     setHealth("unknown");
     setTagsInput("");
+    setTagChips([]);
     setAssigneesInput("");
     setDepsInput("");
+    setDepChips([]);
     setBlockerKind("general");
     setBlockerText("");
     setBlockers([]);
@@ -244,7 +312,13 @@ const AddItemForm: FC<AddItemFormProps> = ({
     if (!estimateMode) {
       return "Estimate mode is required.";
     }
-    const estimate = Number(estimateMinutes);
+    const estimateValue = estimateMinutes.trim();
+    const estimate =
+      estimateMode === "manual"
+        ? estimateValue === ""
+          ? 0
+          : Number(estimateValue)
+        : 0;
     if (estimateMode === "manual") {
       if (!Number.isFinite(estimate) || estimate < 0) {
         return "Estimate must be 0 or greater.";
@@ -281,8 +355,11 @@ const AddItemForm: FC<AddItemFormProps> = ({
     }
 
     const dueMs = dueAt ? new Date(dueAt).getTime() : null;
+    const estimateValue = estimateMinutes.trim();
     const estimate =
-      estimateMode === "rollup" ? 0 : Math.max(0, Number(estimateMinutes));
+      estimateMode === "rollup"
+        ? 0
+        : Math.max(0, Number(estimateValue === "" ? 0 : estimateValue));
     const resolvedParentId =
       type === "project"
         ? null
@@ -323,7 +400,7 @@ const AddItemForm: FC<AddItemFormProps> = ({
               source: "manual",
             });
           }
-          const tags = parseCommaList(tagsInput);
+          const tags = tagChips;
           if (tags.length > 0) {
             await mutate("set_item_tags", { item_id: itemId, tags });
           }
@@ -334,8 +411,7 @@ const AddItemForm: FC<AddItemFormProps> = ({
               assignee_ids: assignees,
             });
           }
-          const deps = parseCommaList(depsInput);
-          for (const depId of deps) {
+          for (const depId of depChips) {
             await mutate("add_dependency", {
               item_id: itemId,
               depends_on_id: depId,
@@ -373,14 +449,14 @@ const AddItemForm: FC<AddItemFormProps> = ({
           });
         }
         await mutate("set_status", { id: selectedItemId, status });
-        const tags = parseCommaList(tagsInput);
+        const tags = tagChips;
         await mutate("set_item_tags", { item_id: selectedItemId, tags });
         const assignees = parseCommaList(assigneesInput);
         await mutate("set_item_assignees", {
           item_id: selectedItemId,
           assignee_ids: assignees,
         });
-        const desiredDeps = new Set(parseCommaList(depsInput));
+        const desiredDeps = new Set(depChips);
         const existingDeps = new Set(currentDeps);
         for (const depId of desiredDeps) {
           if (!existingDeps.has(depId)) {
@@ -527,9 +603,13 @@ const AddItemForm: FC<AddItemFormProps> = ({
           Estimate mode *
           <select
             value={estimateMode}
-            onChange={(event) =>
-              setEstimateMode(event.target.value as "manual" | "rollup")
-            }
+            onChange={(event) => {
+              const next = event.target.value as "manual" | "rollup";
+              setEstimateMode(next);
+              if (next === "rollup") {
+                setEstimateMinutes("0");
+              }
+            }}
           >
             <option value="manual">Manual</option>
             <option value="rollup">Rollup</option>
@@ -540,8 +620,13 @@ const AddItemForm: FC<AddItemFormProps> = ({
           <input
             type="number"
             min={0}
-            value={estimateMode === "rollup" ? "0" : estimateMinutes}
-            onChange={(event) => setEstimateMinutes(event.target.value)}
+            inputMode="numeric"
+            step={1}
+            value={estimateMinutes}
+            onChange={(event) =>
+              handleEstimateMinutesChange(event.target.value)
+            }
+            onBlur={normalizeEstimateMinutes}
             disabled={estimateMode === "rollup"}
           />
         </label>
@@ -677,28 +762,122 @@ const AddItemForm: FC<AddItemFormProps> = ({
 
       <div className="form-row">
         <label>
-          Tags (comma-separated)
-          <input
-            value={tagsInput}
-            onChange={(event) => setTagsInput(event.target.value)}
-            placeholder="tag-a, tag-b"
-          />
+          Tags
+          <div className="chip-input">
+            <div className="chip-list">
+              {tagChips.map((tag) => (
+                <button
+                  key={tag}
+                  type="button"
+                  className="chip"
+                  onClick={() =>
+                    setTagChips((prev) => prev.filter((entry) => entry !== tag))
+                  }
+                >
+                  {tag} ×
+                </button>
+              ))}
+            </div>
+            <input
+              value={tagsInput}
+              onChange={(event) => setTagsInput(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === "Enter" && tagsInput.trim()) {
+                  event.preventDefault();
+                  const nextTag = tagsInput.trim();
+                  if (!tagChips.includes(nextTag)) {
+                    setTagChips((prev) => [...prev, nextTag]);
+                  }
+                  setTagsInput("");
+                }
+              }}
+              placeholder="Add tag"
+            />
+            {filteredTagSuggestions.length > 0 ? (
+              <div className="chip-suggestions">
+                {filteredTagSuggestions.map((tag) => (
+                  <button
+                    key={tag}
+                    type="button"
+                    className="chip-suggestion"
+                    onClick={() => {
+                      setTagChips((prev) =>
+                        prev.includes(tag) ? prev : [...prev, tag]
+                      );
+                      setTagsInput("");
+                    }}
+                  >
+                    {tag}
+                  </button>
+                ))}
+              </div>
+            ) : null}
+          </div>
         </label>
         <label>
           Assignees (comma-separated IDs)
           <input
             value={assigneesInput}
             onChange={(event) => setAssigneesInput(event.target.value)}
+            onBlur={() => setAssigneesInput((current) => normalizeAssignees(current))}
             placeholder="user-1, user-2"
           />
         </label>
         <label>
-          Dependencies (comma-separated IDs)
-          <input
-            value={depsInput}
-            onChange={(event) => setDepsInput(event.target.value)}
-            placeholder="item-1, item-2"
-          />
+          Dependencies
+          <div className="chip-input">
+            <div className="chip-list">
+              {depChips.map((depId) => (
+                <button
+                  key={depId}
+                  type="button"
+                  className="chip"
+                  onClick={() =>
+                    setDepChips((prev) => prev.filter((entry) => entry !== depId))
+                  }
+                >
+                  {depId.slice(0, 8)} ×
+                </button>
+              ))}
+            </div>
+            <input
+              value={depsInput}
+              onChange={(event) => setDepsInput(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === "Enter") {
+                  event.preventDefault();
+                  const input = depsInput.trim();
+                  const match = dependencyOptions.find(
+                    (item) => item.id === input
+                  );
+                  if (match && !depChips.includes(match.id)) {
+                    setDepChips((prev) => [...prev, match.id]);
+                  }
+                  setDepsInput("");
+                }
+              }}
+              placeholder="Search tasks"
+            />
+            {filteredDepSuggestions.length > 0 ? (
+              <div className="chip-suggestions">
+                {filteredDepSuggestions.map((item) => (
+                  <button
+                    key={item.id}
+                    type="button"
+                    className="chip-suggestion"
+                    onClick={() => {
+                      setDepChips((prev) =>
+                        prev.includes(item.id) ? prev : [...prev, item.id]
+                      );
+                      setDepsInput("");
+                    }}
+                  >
+                    {item.title} ({item.id.slice(0, 6)})
+                  </button>
+                ))}
+              </div>
+            ) : null}
+          </div>
         </label>
       </div>
 

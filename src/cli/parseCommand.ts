@@ -1,12 +1,21 @@
 export type ParsedCommand = {
-  type: "project" | "milestone" | "task";
-  title: string;
+  verb: "create" | "edit" | "delete";
+  type: "project" | "milestone" | "task" | "subtask";
+  title?: string;
+  target?: string;
+  id?: string;
   parentId?: string;
+  inProject?: string;
   dueAt?: number;
   scheduledFor?: number;
   priority?: number;
+  status?: string;
   tags?: string[];
   dependsOn?: string[];
+  assignees?: string[];
+  notes?: string;
+  estimateMode?: "manual" | "rollup";
+  estimateMinutes?: number;
 };
 
 type ParseError = {
@@ -17,16 +26,27 @@ type ParseResult =
   | { ok: true; value: ParsedCommand }
   | { ok: false; error: ParseError };
 
-const COMMANDS = new Set(["project", "milestone", "task", "subtask"]);
+const VERBS = new Set(["create", "edit", "delete"]);
+const TYPES = new Set(["project", "milestone", "task", "subtask"]);
 const KEYS = new Set([
   "title",
   "parent",
   "under",
+  "in",
+  "id",
   "due",
+  "due_at",
   "scheduled_for",
+  "priority",
   "pri",
   "tags",
   "dep",
+  "depends_on",
+  "status",
+  "assignees",
+  "notes",
+  "estimate_mode",
+  "estimate_minutes",
 ]);
 
 export const parseCommand = (input: string): ParseResult => {
@@ -38,28 +58,67 @@ export const parseCommand = (input: string): ParseResult => {
   if (tokens.length === 0) {
     return { ok: false, error: { message: "Command is empty" } };
   }
-  const rawCommand = tokens[0].toLowerCase();
-  if (!COMMANDS.has(rawCommand)) {
+  let index = 0;
+  let verb = "create";
+  let rawToken = tokens[index].toLowerCase();
+  if (VERBS.has(rawToken)) {
+    verb = rawToken;
+    index += 1;
+    rawToken = tokens[index]?.toLowerCase();
+  }
+  if (!rawToken || !TYPES.has(rawToken)) {
     return {
       ok: false,
-      error: { message: `Unknown command: ${tokens[0]}` },
+      error: { message: "Missing or invalid item type" },
     };
   }
+  const type = rawToken as ParsedCommand["type"];
+  index += 1;
 
-  const type = rawCommand === "subtask" ? "task" : rawCommand;
   let titleFromKey: string | null = null;
   const titleParts: string[] = [];
   let sawKey = false;
   let parentId: string | undefined;
+  let inProject: string | undefined;
+  let id: string | undefined;
   let dueAt: number | undefined;
   let scheduledFor: number | undefined;
   let priority: number | undefined;
+  let status: string | undefined;
   let tags: string[] | undefined;
   let dependsOn: string[] | undefined;
+  let assignees: string[] | undefined;
+  let notes: string | undefined;
+  let estimateMode: "manual" | "rollup" | undefined;
+  let estimateMinutes: number | undefined;
+  let target: string | undefined;
 
-  for (let i = 1; i < tokens.length; i += 1) {
+  if (verb !== "create") {
+    const targetToken = tokens[index];
+    const targetKey = targetToken ? parseKeyValue(targetToken) : null;
+    if (targetKey && targetKey.key === "id") {
+      id = targetKey.value;
+      sawKey = true;
+      index += 1;
+    } else if (targetToken && !targetKey) {
+      target = targetToken;
+      index += 1;
+    } else {
+      return {
+        ok: false,
+        error: { message: "Edit/delete requires an id or quoted title" },
+      };
+    }
+  }
+
+  for (let i = index; i < tokens.length; i += 1) {
     const token = tokens[i];
-    const kv = parseKeyValue(token, tokens[i + 1]);
+    const tokenLower = token.toLowerCase();
+    const nextToken = tokens[i + 1];
+    const kv =
+      tokenLower === "in" && nextToken && !parseKeyValue(nextToken)
+        ? { key: "in", value: nextToken, consumedNext: true }
+        : parseKeyValue(token, nextToken);
     if (kv) {
       const { key, value, consumedNext } = kv;
       if (!KEYS.has(key)) {
@@ -100,7 +159,28 @@ export const parseCommand = (input: string): ParseResult => {
           parentId = value;
           break;
         }
-        case "due": {
+        case "in": {
+          if (inProject) {
+            return {
+              ok: false,
+              error: { message: "in specified more than once" },
+            };
+          }
+          inProject = value;
+          break;
+        }
+        case "id": {
+          if (id) {
+            return {
+              ok: false,
+              error: { message: "id provided more than once" },
+            };
+          }
+          id = value;
+          break;
+        }
+        case "due":
+        case "due_at": {
           const parsed = parseDate(value);
           if (parsed === null) {
             return { ok: false, error: { message: "Invalid due date" } };
@@ -119,6 +199,7 @@ export const parseCommand = (input: string): ParseResult => {
           scheduledFor = parsed;
           break;
         }
+        case "priority":
         case "pri": {
           const number = parseInt(value, 10);
           if (!Number.isFinite(number) || number < 0 || number > 5) {
@@ -127,12 +208,37 @@ export const parseCommand = (input: string): ParseResult => {
           priority = number;
           break;
         }
+        case "status": {
+          status = value;
+          break;
+        }
         case "tags": {
           tags = splitList(value);
           break;
         }
+        case "depends_on":
         case "dep": {
           dependsOn = splitList(value);
+          break;
+        }
+        case "assignees": {
+          assignees = splitList(value);
+          break;
+        }
+        case "notes": {
+          notes = value;
+          break;
+        }
+        case "estimate_mode": {
+          estimateMode = value === "rollup" ? "rollup" : "manual";
+          break;
+        }
+        case "estimate_minutes": {
+          const minutes = Number(value);
+          if (!Number.isFinite(minutes)) {
+            return { ok: false, error: { message: "estimate_minutes must be a number" } };
+          }
+          estimateMinutes = minutes;
           break;
         }
         default:
@@ -151,27 +257,43 @@ export const parseCommand = (input: string): ParseResult => {
   }
 
   const title = titleFromKey ?? titleParts.join(" ").trim();
-  if (!title) {
-    return { ok: false, error: { message: "Title is required" } };
-  }
-  if (rawCommand === "subtask" && !parentId) {
+  if (verb === "create") {
+    if (!title) {
+      return { ok: false, error: { message: "Title is required" } };
+    }
+    if (type === "subtask" && !parentId) {
+      return {
+        ok: false,
+        error: { message: "subtask requires parent:<id> or under:<id>" },
+      };
+    }
+  } else if (!id && !target) {
     return {
       ok: false,
-      error: { message: "subtask requires parent:<id> or under:<id>" },
+      error: { message: "Edit/delete requires an id or quoted title" },
     };
   }
 
   return {
     ok: true,
     value: {
+      verb: verb as ParsedCommand["verb"],
       type,
-      title,
+      title: title || undefined,
+      target,
+      id,
       parentId,
+      inProject,
       dueAt,
       scheduledFor,
       priority,
+      status,
       tags,
       dependsOn,
+      assignees,
+      notes,
+      estimateMode,
+      estimateMinutes,
     },
   };
 };
@@ -246,7 +368,11 @@ const parseDate = (value: string): number | null => {
 };
 
 const splitList = (value: string): string[] => {
-  const items = value
+  const trimmed =
+    value.startsWith("[") && value.endsWith("]")
+      ? value.slice(1, -1)
+      : value;
+  const items = trimmed
     .split(",")
     .map((item) => item.trim())
     .filter(Boolean);

@@ -5,6 +5,7 @@ import blockersKindTextSql from "./migrations/0002_blockers_kind_text.sql?raw";
 import runningTimersSql from "./migrations/0003_running_timers.sql?raw";
 import sortOrderSql from "./migrations/0004_sort_order.sql?raw";
 import dueNullableSql from "./migrations/0005_due_at_nullable.sql?raw";
+import { computeRollupTotals } from "./rollup";
 
 const ctx: DedicatedWorkerGlobalScope = self as DedicatedWorkerGlobalScope;
 
@@ -736,6 +737,27 @@ const runMigrations = (db: any) => {
           bind: [currentVersion],
         });
       }
+    }
+  }
+
+  const tableInfo = db.exec({
+    sql: "PRAGMA table_info(items);",
+    rowMode: "array",
+    returnValue: "resultRows",
+  }) as Array<[number, string, string, number, unknown, number]>;
+  const dueAtRow = tableInfo.find((row) => row[1] === "due_at");
+  if (dueAtRow && Number(dueAtRow[3]) === 1) {
+    db.exec(dueNullableSql);
+    currentVersion = Math.max(currentVersion, 5);
+    if (rows.length === 0) {
+      db.exec("INSERT INTO schema_version (version) VALUES (?);", {
+        bind: [currentVersion],
+      });
+      rows.push([currentVersion]);
+    } else {
+      db.exec("UPDATE schema_version SET version = ?;", {
+        bind: [currentVersion],
+      });
     }
   }
 
@@ -2113,6 +2135,55 @@ const handleRequest = async (message: RpcRequest): Promise<RpcResponse> => {
             bind: [itemId],
           }) as Array<[number | null]>;
           const actualMinutes = actualRows[0]?.[0] ? Number(actualRows[0][0]) : 0;
+          const treeRows = dbHandle.exec({
+            sql: `WITH RECURSIVE tree AS (
+              SELECT id, parent_id, estimate_mode, estimate_minutes, status, due_at FROM items WHERE id = ?
+              UNION ALL
+              SELECT i.id, i.parent_id, i.estimate_mode, i.estimate_minutes, i.status, i.due_at
+              FROM items i JOIN tree t ON i.parent_id = t.id
+            )
+            SELECT id, parent_id, estimate_mode, estimate_minutes, status, due_at FROM tree;`,
+            rowMode: "array",
+            returnValue: "resultRows",
+            bind: [itemId],
+          }) as Array<[string, string | null, string, number, string, number | null]>;
+          const treeIds = treeRows.map((row) => row[0]);
+          const treeScheduleMap = getScheduleSummaryMap(dbHandle, treeIds);
+          const treeBlockedMap = getBlockedStatusMap(dbHandle, treeIds);
+          const treeTimeMap = new Map<string, number>();
+          if (treeIds.length > 0) {
+            const placeholders = buildPlaceholders(treeIds.length);
+            const treeTimeRows = dbHandle.exec({
+              sql: `SELECT item_id, SUM(duration_minutes) FROM time_entries
+                WHERE item_id IN (${placeholders})
+                GROUP BY item_id;`,
+              rowMode: "array",
+              returnValue: "resultRows",
+              bind: treeIds,
+            }) as Array<[string, number]>;
+            for (const row of treeTimeRows) {
+              treeTimeMap.set(row[0], Number(row[1]));
+            }
+          }
+          const treeDueMetricsMap = new Map(
+            treeRows.map((row) => [
+              row[0],
+              computeDueMetrics(row[5], now, row[4]),
+            ])
+          );
+          const rollupMap = computeRollupTotals(
+            treeRows.map((row) => ({
+              id: row[0],
+              parent_id: row[1],
+              estimate_mode: row[2],
+              estimate_minutes: row[3],
+            })),
+            treeScheduleMap,
+            treeBlockedMap,
+            treeDueMetricsMap,
+            treeTimeMap
+          );
+          const rollupTotals = rollupMap.get(itemId);
           const timeEntryRows = dbHandle.exec({
             sql: "SELECT entry_id, start_at, end_at, duration_minutes, note, source FROM time_entries WHERE item_id = ? ORDER BY start_at DESC LIMIT 10;",
             rowMode: "array",
@@ -2133,7 +2204,13 @@ const handleRequest = async (message: RpcRequest): Promise<RpcResponse> => {
                   note: runningTimerRows[0][2],
                 }
               : null;
-          const remainingMinutes = Math.max(0, rows[0][8] - actualMinutes);
+          const rollupEstimate = rollupTotals?.totalEstimate ?? rows[0][8];
+          const rollupActual = rollupTotals?.totalActual ?? actualMinutes;
+          const rollupRemaining = Math.max(0, rollupEstimate - rollupActual);
+          const remainingMinutes =
+            rows[0][1] === "task" && rows[0][7] !== "rollup"
+              ? Math.max(0, rows[0][8] - actualMinutes)
+              : rollupRemaining;
           const scheduleRows = dbHandle.exec({
             sql: "SELECT COUNT(*), SUM(duration_minutes), MIN(start_at), MAX(start_at + duration_minutes * 60000) FROM scheduled_blocks WHERE item_id = ?;",
             rowMode: "array",
@@ -2194,8 +2271,13 @@ const handleRequest = async (message: RpcRequest): Promise<RpcResponse> => {
                 note: row[4],
                 source: row[5],
               })),
-              rollup_actual_minutes: actualMinutes,
-              rollup_remaining_minutes: remainingMinutes,
+              rollup_actual_minutes: rollupActual,
+              rollup_estimate_minutes: rollupEstimate,
+              rollup_remaining_minutes: rollupRemaining,
+              rollup_start_at: rollupTotals?.rollupStartAt ?? null,
+              rollup_end_at: rollupTotals?.rollupEndAt ?? null,
+              rollup_blocked_count: rollupTotals?.rollupBlockedCount ?? 0,
+              rollup_overdue_count: rollupTotals?.rollupOverdueCount ?? 0,
               health_auto: health,
             },
           };
@@ -2286,125 +2368,27 @@ const handleRequest = async (message: RpcRequest): Promise<RpcResponse> => {
             }
           }
 
-          const blockedMap = new Map<string, boolean>();
-          if (ids.length > 0) {
-            const placeholders = ids.map(() => "?").join(", ");
-            const blockedRows = dbHandle.exec({
-              sql: `SELECT id,
-                (
-                  EXISTS(SELECT 1 FROM blockers b WHERE b.item_id = items.id AND b.cleared_at IS NULL)
-                  OR EXISTS(
-                    SELECT 1 FROM dependencies d
-                    LEFT JOIN items di ON di.id = d.depends_on_id
-                    WHERE d.item_id = items.id AND (di.id IS NULL OR di.status != 'done')
-                  )
-                ) AS is_blocked
-                FROM items WHERE id IN (${placeholders});`,
-              rowMode: "array",
-              returnValue: "resultRows",
-              bind: ids,
-            }) as Array<[string, number]>;
-            for (const row of blockedRows) {
-              blockedMap.set(row[0], Boolean(row[1]));
-            }
-          }
-
-          const nodeMap = new Map(
-            rows.map((row) => [
-              row[0],
-              {
-                id: row[0],
-                type: row[1],
-                title: row[2],
-                parent_id: row[3],
-                status: row[4],
-                priority: row[5],
-                due_at: row[6],
-                estimate_mode: row[7],
-                estimate_minutes: row[8],
-                health: row[9],
-                health_mode: row[10],
-                notes: row[11],
-                children: [] as string[],
-                totalEstimate: 0,
-                totalActual: 0,
-                rollupStartAt: null as number | null,
-                rollupEndAt: null as number | null,
-                rollupBlockedCount: 0,
-                rollupOverdueCount: 0,
-              },
-            ])
+          const blockedMap = getBlockedStatusMap(dbHandle, ids);
+          const rollupMap = computeRollupTotals(
+            rows.map((row) => ({
+              id: row[0],
+              parent_id: row[3],
+              estimate_minutes: row[8],
+              estimate_mode: row[7],
+            })),
+            scheduleMap,
+            blockedMap,
+            dueMetricsMap,
+            timeMap
           );
-
-          for (const node of nodeMap.values()) {
-            if (node.parent_id && nodeMap.has(node.parent_id)) {
-              nodeMap.get(node.parent_id)!.children.push(node.id);
-            }
-          }
-
-          const computeTotals = (
-            id: string
-          ): {
-            estimate: number;
-            actual: number;
-            rollupStartAt: number | null;
-            rollupEndAt: number | null;
-            rollupBlockedCount: number;
-            rollupOverdueCount: number;
-          } => {
-            const node = nodeMap.get(id);
-            if (!node) {
-              return {
-                estimate: 0,
-                actual: 0,
-                rollupStartAt: null,
-                rollupEndAt: null,
-                rollupBlockedCount: 0,
-                rollupOverdueCount: 0,
-              };
-            }
-            let estimate = node.estimate_minutes;
-            let actual = timeMap.get(id) ?? 0;
-            let rollupStartAt = scheduleMap.get(id)?.start ?? null;
-            let rollupEndAt = scheduleMap.get(id)?.end ?? null;
-            let rollupBlockedCount = blockedMap.get(id) ? 1 : 0;
-            let rollupOverdueCount = dueMetricsMap.get(id)?.is_overdue ? 1 : 0;
-            for (const childId of node.children) {
-              const childTotals = computeTotals(childId);
-              estimate += childTotals.estimate;
-              actual += childTotals.actual;
-              rollupStartAt = minNullable(rollupStartAt, childTotals.rollupStartAt);
-              rollupEndAt = maxNullable(rollupEndAt, childTotals.rollupEndAt);
-              rollupBlockedCount += childTotals.rollupBlockedCount;
-              rollupOverdueCount += childTotals.rollupOverdueCount;
-            }
-            node.totalEstimate = estimate;
-            node.totalActual = actual;
-            node.rollupStartAt = rollupStartAt;
-            node.rollupEndAt = rollupEndAt;
-            node.rollupBlockedCount = rollupBlockedCount;
-            node.rollupOverdueCount = rollupOverdueCount;
-            return {
-              estimate,
-              actual,
-              rollupStartAt,
-              rollupEndAt,
-              rollupBlockedCount,
-              rollupOverdueCount,
-            };
-          };
-
-          computeTotals(projectId);
 
           result = {
             ok: true,
             result: rows.map((row) => {
-              const node = nodeMap.get(row[0]);
-              const totalEstimate = node ? node.totalEstimate : row[8];
-              const totalActual = node ? node.totalActual : timeMap.get(row[0]) ?? 0;
-              const rollupEstimate =
-                row[1] === "task" ? row[8] : Math.max(0, totalEstimate - row[8]);
-              const rollupActual = row[1] === "task" ? totalActual : totalActual;
+              const rollupTotals = rollupMap.get(row[0]);
+              const rollupEstimate = rollupTotals?.totalEstimate ?? row[8];
+              const rollupActual =
+                rollupTotals?.totalActual ?? (timeMap.get(row[0]) ?? 0);
               const rollupRemaining = Math.max(0, rollupEstimate - rollupActual);
               const dueMetrics = dueMetricsMap.get(row[0])!;
               const health = computeHealth(
@@ -2430,10 +2414,10 @@ const handleRequest = async (message: RpcRequest): Promise<RpcResponse> => {
                 rollup_estimate_minutes: rollupEstimate,
                 rollup_actual_minutes: rollupActual,
                 rollup_remaining_minutes: rollupRemaining,
-                rollup_start_at: node?.rollupStartAt ?? null,
-                rollup_end_at: node?.rollupEndAt ?? null,
-                rollup_blocked_count: node?.rollupBlockedCount ?? 0,
-                rollup_overdue_count: node?.rollupOverdueCount ?? 0,
+                rollup_start_at: rollupTotals?.rollupStartAt ?? null,
+                rollup_end_at: rollupTotals?.rollupEndAt ?? null,
+                rollup_blocked_count: rollupTotals?.rollupBlockedCount ?? 0,
+                rollup_overdue_count: rollupTotals?.rollupOverdueCount ?? 0,
                 days_until_due: dueMetrics.days_until_due,
                 days_overdue: dueMetrics.days_overdue,
                 is_overdue: dueMetrics.is_overdue,
@@ -2592,9 +2576,11 @@ const handleRequest = async (message: RpcRequest): Promise<RpcResponse> => {
                   UNION ALL
                   SELECT i.* FROM items i JOIN tree t ON i.parent_id = t.id
                 )
-                SELECT id, type, title, parent_id, status, priority, due_at,
-                  estimate_mode, estimate_minutes, health, health_mode, notes, updated_at, sort_order
-                FROM tree
+                SELECT * FROM (
+                  SELECT id, type, title, parent_id, status, priority, due_at,
+                    estimate_mode, estimate_minutes, health, health_mode, notes, updated_at, sort_order
+                  FROM tree
+                )
                 ORDER BY sort_order ASC,
                   CASE WHEN due_at IS NULL THEN 1 ELSE 0 END,
                   due_at ASC,
@@ -2605,9 +2591,11 @@ const handleRequest = async (message: RpcRequest): Promise<RpcResponse> => {
                     UNION ALL
                     SELECT i.* FROM items i JOIN tree t ON i.parent_id = t.id
                   )
-                  SELECT id, type, title, parent_id, status, priority, due_at,
-                    estimate_mode, estimate_minutes, health, health_mode, notes, updated_at, sort_order
-                  FROM tree
+                  SELECT * FROM (
+                    SELECT id, type, title, parent_id, status, priority, due_at,
+                      estimate_mode, estimate_minutes, health, health_mode, notes, updated_at, sort_order
+                    FROM tree
+                  )
                   ORDER BY sort_order ASC,
                     CASE WHEN due_at IS NULL THEN 1 ELSE 0 END,
                     due_at ASC,
@@ -2677,6 +2665,21 @@ const handleRequest = async (message: RpcRequest): Promise<RpcResponse> => {
               ? (settings.get("capacity_minutes_per_day") as number)
               : null;
           const now = Date.now();
+          const dueMetricsMap = new Map(
+            rows.map((row) => [row[0], computeDueMetrics(row[6], now, row[4])])
+          );
+          const rollupMap = computeRollupTotals(
+            rows.map((row) => ({
+              id: row[0],
+              parent_id: row[3],
+              estimate_mode: row[7],
+              estimate_minutes: row[8],
+            })),
+            scheduleMap,
+            blockedMap,
+            dueMetricsMap,
+            timeMap
+          );
           const includeCanceled =
             typeof args.includeCanceled === "boolean" ? args.includeCanceled : false;
           const includeDone =
@@ -2732,9 +2735,14 @@ const handleRequest = async (message: RpcRequest): Promise<RpcResponse> => {
               is_blocked: false,
             };
             const unmetDeps = unmetDepMap.get(row[0]) ?? { count: 0, ids: [] };
-            const dueMetrics = computeDueMetrics(row[6], now, row[4]);
+            const dueMetrics = dueMetricsMap.get(row[0])!;
+            const rollupTotals = rollupMap.get(row[0]);
             const actualMinutes = timeMap.get(row[0]) ?? 0;
-            const remainingMinutes = Math.max(0, row[8] - actualMinutes);
+            const rollupEstimate = rollupTotals?.totalEstimate ?? row[8];
+            const rollupActual =
+              rollupTotals?.totalActual ?? actualMinutes;
+            const rollupRemaining = Math.max(0, rollupEstimate - rollupActual);
+            const remainingMinutes = rollupRemaining;
             const healthAuto = computeHealth(
               dueMetrics.is_overdue,
               remainingMinutes,
@@ -2763,6 +2771,13 @@ const handleRequest = async (message: RpcRequest): Promise<RpcResponse> => {
               due_at: row[6],
               estimate_mode: row[7],
               estimate_minutes: row[8],
+              rollup_estimate_minutes: rollupEstimate,
+              rollup_actual_minutes: rollupActual,
+              rollup_remaining_minutes: rollupRemaining,
+              rollup_start_at: rollupTotals?.rollupStartAt ?? null,
+              rollup_end_at: rollupTotals?.rollupEndAt ?? null,
+              rollup_blocked_count: rollupTotals?.rollupBlockedCount ?? 0,
+              rollup_overdue_count: rollupTotals?.rollupOverdueCount ?? 0,
               notes: row[11],
               sort_order: row[13],
               health: row[9],
@@ -2849,19 +2864,33 @@ const handleRequest = async (message: RpcRequest): Promise<RpcResponse> => {
                   SELECT i.* FROM items i JOIN tree t ON i.parent_id = t.id
                 )
                 SELECT id, type, title, parent_id, status, priority, due_at,
-                  estimate_minutes, health, health_mode, notes
+                  estimate_mode, estimate_minutes, health, health_mode, notes
                 FROM tree
                 ORDER BY sort_order ASC, CASE WHEN due_at IS NULL THEN 1 ELSE 0 END, due_at ASC, title ASC;`
               : `SELECT id, type, title, parent_id, status, priority, due_at,
-                  estimate_minutes, health, health_mode, notes
+                  estimate_mode, estimate_minutes, health, health_mode, notes
                 FROM items
                 ORDER BY sort_order ASC, CASE WHEN due_at IS NULL THEN 1 ELSE 0 END, due_at ASC, title ASC;`,
             rowMode: "array",
             returnValue: "resultRows",
             bind: projectId ? [projectId] : undefined,
-          }) as Array<[string, string, string, string | null, string, number, number, number, string, string, string | null]>;
+          }) as Array<
+            [
+              string,
+              string,
+              string,
+              string | null,
+              string,
+              number,
+              number | null,
+              string,
+              number,
+              string,
+              string,
+              string | null
+            ]
+          >;
           const ids = rows.map((row) => row[0]);
-          const estimateMap = new Map(rows.map((row) => [row[0], row[7]]));
           const scheduleMap = getScheduleSummaryMap(dbHandle, ids);
           const blockedMap = getBlockedStatusMap(dbHandle, ids);
           const unmetDepMap = getUnmetDependencyMap(dbHandle, ids);
@@ -2889,80 +2918,18 @@ const handleRequest = async (message: RpcRequest): Promise<RpcResponse> => {
               timeMap.set(row[0], Number(row[1]));
             }
           }
-          const nodeMap = new Map(
-            rows.map((row) => [
-              row[0],
-              {
-                id: row[0],
-                parent_id: row[3],
-                children: [] as string[],
-                rollupStartAt: null as number | null,
-                rollupEndAt: null as number | null,
-                totalEstimate: 0,
-                totalActual: 0,
-                rollupBlockedCount: 0,
-                rollupOverdueCount: 0,
-              },
-            ])
+          const rollupMap = computeRollupTotals(
+            rows.map((row) => ({
+              id: row[0],
+              parent_id: row[3],
+              estimate_minutes: row[8],
+              estimate_mode: row[7],
+            })),
+            scheduleMap,
+            blockedMap,
+            dueMetricsMap,
+            timeMap
           );
-          for (const node of nodeMap.values()) {
-            if (node.parent_id && nodeMap.has(node.parent_id)) {
-              nodeMap.get(node.parent_id)!.children.push(node.id);
-            }
-          }
-          const computeSpan = (
-            id: string
-          ): {
-            start: number | null;
-            end: number | null;
-            estimate: number;
-            actual: number;
-            blockedCount: number;
-            overdueCount: number;
-          } => {
-            const node = nodeMap.get(id);
-            if (!node) {
-              return {
-                start: null,
-                end: null,
-                estimate: 0,
-                actual: 0,
-                blockedCount: 0,
-                overdueCount: 0,
-              };
-            }
-            let start = scheduleMap.get(id)?.start ?? null;
-            let end = scheduleMap.get(id)?.end ?? null;
-            let estimate = estimateMap.get(id) ?? 0;
-            let actual = timeMap.get(id) ?? 0;
-            let blockedCount = blockedMap.get(id)?.is_blocked ? 1 : 0;
-            let overdueCount = dueMetricsMap.get(id)?.is_overdue ? 1 : 0;
-            for (const childId of node.children) {
-              const childSpan = computeSpan(childId);
-              start = minNullable(start, childSpan.start);
-              end = maxNullable(end, childSpan.end);
-              estimate += childSpan.estimate;
-              actual += childSpan.actual;
-              blockedCount += childSpan.blockedCount;
-              overdueCount += childSpan.overdueCount;
-            }
-            node.rollupStartAt = start;
-            node.rollupEndAt = end;
-            node.totalEstimate = estimate;
-            node.totalActual = actual;
-            node.rollupBlockedCount = blockedCount;
-            node.rollupOverdueCount = overdueCount;
-            return { start, end, estimate, actual, blockedCount, overdueCount };
-          };
-          if (projectId) {
-            computeSpan(projectId);
-          } else {
-            for (const row of rows) {
-              if (!nodeMap.get(row[0])?.parent_id) {
-                computeSpan(row[0]);
-              }
-            }
-          }
           result = {
             ok: true,
             result: {
@@ -2974,22 +2941,19 @@ const handleRequest = async (message: RpcRequest): Promise<RpcResponse> => {
                     count: 0,
                     total: 0,
                   };
-                  const node = nodeMap.get(row[0]);
-                const blocked = blockedMap.get(row[0]) ?? {
-                  hasBlocker: false,
-                  hasUnmetDep: false,
-                  is_blocked: false,
-                };
-                const unmetDeps = unmetDepMap.get(row[0]) ?? { count: 0, ids: [] };
-                const rollupEstimate =
-                  row[1] === "task"
-                    ? row[7]
-                    : Math.max(0, (node?.totalEstimate ?? row[7]) - row[7]);
+                  const rollupTotals = rollupMap.get(row[0]);
+                  const blocked = blockedMap.get(row[0]) ?? {
+                    hasBlocker: false,
+                    hasUnmetDep: false,
+                    is_blocked: false,
+                  };
+                  const unmetDeps = unmetDepMap.get(row[0]) ?? { count: 0, ids: [] };
+                const rollupEstimate = rollupTotals?.totalEstimate ?? row[8];
                 const rollupActual =
-                  row[1] === "task" ? timeMap.get(row[0]) ?? 0 : node?.totalActual ?? 0;
+                  rollupTotals?.totalActual ?? (timeMap.get(row[0]) ?? 0);
                 const rollupRemaining = Math.max(0, rollupEstimate - rollupActual);
-                const rollupBlockedCount = node?.rollupBlockedCount ?? 0;
-                const rollupOverdueCount = node?.rollupOverdueCount ?? 0;
+                const rollupBlockedCount = rollupTotals?.rollupBlockedCount ?? 0;
+                const rollupOverdueCount = rollupTotals?.rollupOverdueCount ?? 0;
                 return {
                   id: row[0],
                   type: row[1],
@@ -3006,9 +2970,9 @@ const handleRequest = async (message: RpcRequest): Promise<RpcResponse> => {
                   },
                   due_at: row[6],
                   bar_start_at:
-                    row[1] === "task" ? schedule.start : node?.rollupStartAt ?? null,
+                    row[1] === "task" ? schedule.start : rollupTotals?.rollupStartAt ?? null,
                   bar_end_at:
-                    row[1] === "task" ? schedule.end : node?.rollupEndAt ?? null,
+                    row[1] === "task" ? schedule.end : rollupTotals?.rollupEndAt ?? null,
                   rollup:
                     row[1] === "task"
                       ? undefined
@@ -3018,8 +2982,8 @@ const handleRequest = async (message: RpcRequest): Promise<RpcResponse> => {
                           remaining_minutes: rollupRemaining,
                           overdue_count: rollupOverdueCount,
                           blocked_count: rollupBlockedCount,
-                          rollup_start_at: node?.rollupStartAt ?? null,
-                          rollup_end_at: node?.rollupEndAt ?? null,
+                          rollup_start_at: rollupTotals?.rollupStartAt ?? null,
+                          rollup_end_at: rollupTotals?.rollupEndAt ?? null,
                         },
                   schedule:
                     row[1] === "task"
@@ -3083,15 +3047,30 @@ const handleRequest = async (message: RpcRequest): Promise<RpcResponse> => {
                   SELECT i.* FROM items i JOIN tree t ON i.parent_id = t.id
                 )
                 SELECT id, type, title, parent_id, status, priority, due_at,
-                  estimate_minutes, health, health_mode, notes
+                  estimate_mode, estimate_minutes, health, health_mode, notes
                 FROM tree;`
               : `SELECT id, type, title, parent_id, status, priority, due_at,
-                  estimate_minutes, health, health_mode, notes
+                  estimate_mode, estimate_minutes, health, health_mode, notes
                 FROM items;`,
             rowMode: "array",
             returnValue: "resultRows",
             bind: projectId ? [projectId] : undefined,
-          }) as Array<[string, string, string, string | null, string, number, number, number, string, string, string | null]>;
+          }) as Array<
+            [
+              string,
+              string,
+              string,
+              string | null,
+              string,
+              number,
+              number | null,
+              string,
+              number,
+              string,
+              string,
+              string | null
+            ]
+          >;
           const itemIds = itemsRows.map((row) => row[0]);
           const scheduleMap = getScheduleSummaryMap(dbHandle, itemIds);
           const blockedStatusMap = getBlockedStatusMap(dbHandle, itemIds);
@@ -3125,6 +3104,21 @@ const handleRequest = async (message: RpcRequest): Promise<RpcResponse> => {
               ? (settings.get("capacity_minutes_per_day") as number)
               : null;
           const now = Date.now();
+          const dueMetricsMap = new Map(
+            itemsRows.map((row) => [row[0], computeDueMetrics(row[6], now, row[4])])
+          );
+          const rollupMap = computeRollupTotals(
+            itemsRows.map((row) => ({
+              id: row[0],
+              parent_id: row[3],
+              estimate_minutes: row[8],
+              estimate_mode: row[7],
+            })),
+            scheduleMap,
+            blockedStatusMap,
+            dueMetricsMap,
+            timeMap
+          );
 
           const listTraits = (row: typeof itemsRows[number]) => {
             const schedule = scheduleMap.get(row[0]) ?? {
@@ -3139,9 +3133,17 @@ const handleRequest = async (message: RpcRequest): Promise<RpcResponse> => {
               is_blocked: false,
             };
             const unmetDeps = unmetDepMap.get(row[0]) ?? { count: 0, ids: [] };
-            const dueMetrics = computeDueMetrics(row[6], now, row[4]);
+            const dueMetrics = dueMetricsMap.get(row[0])!;
+            const rollupTotals = rollupMap.get(row[0]);
             const actualMinutes = timeMap.get(row[0]) ?? 0;
-            const remainingMinutes = Math.max(0, row[7] - actualMinutes);
+            const rollupEstimate = rollupTotals?.totalEstimate ?? row[8];
+            const rollupActual =
+              rollupTotals?.totalActual ?? actualMinutes;
+            const rollupRemaining = Math.max(0, rollupEstimate - rollupActual);
+            const remainingMinutes =
+              row[7] === "rollup"
+                ? rollupRemaining
+                : Math.max(0, row[8] - actualMinutes);
             const dependents = dependentsMap.get(row[0]) ?? 0;
             const sequenceRank = computeSequenceRank({
               is_overdue: dueMetrics.is_overdue,
@@ -3160,10 +3162,18 @@ const handleRequest = async (message: RpcRequest): Promise<RpcResponse> => {
               status: row[4],
               priority: row[5],
               due_at: row[6],
-              estimate_minutes: row[7],
-              notes: row[10],
-              health: row[8],
-              health_mode: row[9],
+              estimate_minutes: row[8],
+              estimate_mode: row[7],
+              rollup_estimate_minutes: rollupEstimate,
+              rollup_actual_minutes: rollupActual,
+              rollup_remaining_minutes: rollupRemaining,
+              rollup_start_at: rollupTotals?.rollupStartAt ?? null,
+              rollup_end_at: rollupTotals?.rollupEndAt ?? null,
+              rollup_blocked_count: rollupTotals?.rollupBlockedCount ?? 0,
+              rollup_overdue_count: rollupTotals?.rollupOverdueCount ?? 0,
+              notes: row[11],
+              health: row[9],
+              health_mode: row[10],
               schedule: {
                 has_blocks: schedule.count > 0,
                 scheduled_minutes_total: schedule.total,
@@ -3278,17 +3288,32 @@ const handleRequest = async (message: RpcRequest): Promise<RpcResponse> => {
                   SELECT i.* FROM items i JOIN tree t ON i.parent_id = t.id
                 )
                 SELECT id, type, title, parent_id, status, priority, due_at,
-                  estimate_minutes, health, health_mode, notes
+                  estimate_mode, estimate_minutes, health, health_mode, notes
                 FROM tree
                 ORDER BY sort_order ASC, CASE WHEN due_at IS NULL THEN 1 ELSE 0 END, due_at ASC, title ASC;`
               : `SELECT id, type, title, parent_id, status, priority, due_at,
-                  estimate_minutes, health, health_mode, notes
+                  estimate_mode, estimate_minutes, health, health_mode, notes
                 FROM items
                 ORDER BY sort_order ASC, CASE WHEN due_at IS NULL THEN 1 ELSE 0 END, due_at ASC, title ASC;`,
             rowMode: "array",
             returnValue: "resultRows",
             bind: projectId ? [projectId] : undefined,
-          }) as Array<[string, string, string, string | null, string, number, number, number, string, string, string | null]>;
+          }) as Array<
+            [
+              string,
+              string,
+              string,
+              string | null,
+              string,
+              number,
+              number | null,
+              string,
+              number,
+              string,
+              string,
+              string | null
+            ]
+          >;
           const ids = rows.map((row) => row[0]);
           const blockedMap = getBlockedStatusMap(dbHandle, ids);
           const scheduleMap = getScheduleSummaryMap(dbHandle, ids);
@@ -3297,6 +3322,37 @@ const handleRequest = async (message: RpcRequest): Promise<RpcResponse> => {
           const unmetDepMap = getUnmetDependencyMap(dbHandle, ids);
           const activeBlockerIdsMap = getActiveBlockerIdsMap(dbHandle, ids);
           const activeBlockerCountMap = getActiveBlockerCountMap(dbHandle, ids);
+          const timeMap = new Map<string, number>();
+          if (ids.length > 0) {
+            const placeholders = buildPlaceholders(ids.length);
+            const timeRows = dbHandle.exec({
+              sql: `SELECT item_id, SUM(duration_minutes) FROM time_entries
+                WHERE item_id IN (${placeholders})
+                GROUP BY item_id;`,
+              rowMode: "array",
+              returnValue: "resultRows",
+              bind: ids,
+            }) as Array<[string, number]>;
+            for (const row of timeRows) {
+              timeMap.set(row[0], Number(row[1]));
+            }
+          }
+          const now = Date.now();
+          const dueMetricsMap = new Map(
+            rows.map((row) => [row[0], computeDueMetrics(row[6], now, row[4])])
+          );
+          const rollupMap = computeRollupTotals(
+            rows.map((row) => ({
+              id: row[0],
+              parent_id: row[3],
+              estimate_minutes: row[8],
+              estimate_mode: row[7],
+            })),
+            scheduleMap,
+            blockedMap,
+            dueMetricsMap,
+            timeMap
+          );
           const { depthMap, projectMap } = buildHierarchyMaps(
             rows.map((row) => [row[0], row[1], row[3]]),
             projectId
@@ -3329,6 +3385,11 @@ const handleRequest = async (message: RpcRequest): Promise<RpcResponse> => {
             };
             const unmetDeps = unmetDepMap.get(row[0]) ?? { count: 0, ids: [] };
             const blockerIds = activeBlockerIdsMap.get(row[0]) ?? [];
+            const rollupTotals = rollupMap.get(row[0]);
+            const rollupEstimate = rollupTotals?.totalEstimate ?? row[8];
+            const rollupActual =
+              rollupTotals?.totalActual ?? (timeMap.get(row[0]) ?? 0);
+            const rollupRemaining = Math.max(0, rollupEstimate - rollupActual);
             const entry = {
               id: row[0],
               type: row[1],
@@ -3339,10 +3400,17 @@ const handleRequest = async (message: RpcRequest): Promise<RpcResponse> => {
               status: row[4],
               priority: row[5],
               due_at: row[6],
-              estimate_minutes: row[7],
-              notes: row[10],
-              health: row[8],
-              health_mode: row[9],
+              estimate_minutes: row[8],
+              rollup_estimate_minutes: rollupEstimate,
+              rollup_actual_minutes: rollupActual,
+              rollup_remaining_minutes: rollupRemaining,
+              rollup_start_at: rollupTotals?.rollupStartAt ?? null,
+              rollup_end_at: rollupTotals?.rollupEndAt ?? null,
+              rollup_blocked_count: rollupTotals?.rollupBlockedCount ?? 0,
+              rollup_overdue_count: rollupTotals?.rollupOverdueCount ?? 0,
+              notes: row[11],
+              health: row[9],
+              health_mode: row[10],
               schedule: {
                 has_blocks: schedule.count > 0,
                 scheduled_minutes_total: schedule.total,
@@ -3409,15 +3477,30 @@ const handleRequest = async (message: RpcRequest): Promise<RpcResponse> => {
                   SELECT i.* FROM items i JOIN tree t ON i.parent_id = t.id
                 )
                 SELECT id, type, title, parent_id, status, priority, due_at,
-                  estimate_minutes, health, health_mode, notes
+                  estimate_mode, estimate_minutes, health, health_mode, notes
                 FROM tree;`
               : `SELECT id, type, title, parent_id, status, priority, due_at,
-                  estimate_minutes, health, health_mode, notes
+                  estimate_mode, estimate_minutes, health, health_mode, notes
                 FROM items;`,
             rowMode: "array",
             returnValue: "resultRows",
             bind: projectId ? [projectId] : undefined,
-          }) as Array<[string, string, string, string | null, string, number, number, number, string, string, string | null]>;
+          }) as Array<
+            [
+              string,
+              string,
+              string,
+              string | null,
+              string,
+              number,
+              number | null,
+              string,
+              number,
+              string,
+              string,
+              string | null
+            ]
+          >;
           const ids = rows.map((row) => row[0]);
           const scheduleMap = getScheduleSummaryMap(dbHandle, ids);
           const blockedMap = getBlockedStatusMap(dbHandle, ids);
@@ -3428,6 +3511,37 @@ const handleRequest = async (message: RpcRequest): Promise<RpcResponse> => {
           const { depthMap, projectMap } = buildHierarchyMaps(
             rows.map((row) => [row[0], row[1], row[3]]),
             projectId
+          );
+          const timeMap = new Map<string, number>();
+          if (ids.length > 0) {
+            const placeholders = buildPlaceholders(ids.length);
+            const timeRows = dbHandle.exec({
+              sql: `SELECT item_id, SUM(duration_minutes) FROM time_entries
+                WHERE item_id IN (${placeholders})
+                GROUP BY item_id;`,
+              rowMode: "array",
+              returnValue: "resultRows",
+              bind: ids,
+            }) as Array<[string, number]>;
+            for (const row of timeRows) {
+              timeMap.set(row[0], Number(row[1]));
+            }
+          }
+          const now = Date.now();
+          const dueMetricsMap = new Map(
+            rows.map((row) => [row[0], computeDueMetrics(row[6], now, row[4])])
+          );
+          const rollupMap = computeRollupTotals(
+            rows.map((row) => ({
+              id: row[0],
+              parent_id: row[3],
+              estimate_minutes: row[8],
+              estimate_mode: row[7],
+            })),
+            scheduleMap,
+            blockedMap,
+            dueMetricsMap,
+            timeMap
           );
           const groups = new Map<string, Array<Record<string, unknown>>>();
           const unassigned: Array<Record<string, unknown>> = [];
@@ -3450,6 +3564,11 @@ const handleRequest = async (message: RpcRequest): Promise<RpcResponse> => {
               is_blocked: false,
             };
             const unmetDeps = unmetDepMap.get(row[0]) ?? { count: 0, ids: [] };
+            const rollupTotals = rollupMap.get(row[0]);
+            const rollupEstimate = rollupTotals?.totalEstimate ?? row[8];
+            const rollupActual =
+              rollupTotals?.totalActual ?? (timeMap.get(row[0]) ?? 0);
+            const rollupRemaining = Math.max(0, rollupEstimate - rollupActual);
             const item = {
               id: row[0],
               type: row[1],
@@ -3460,10 +3579,17 @@ const handleRequest = async (message: RpcRequest): Promise<RpcResponse> => {
               status: row[4],
               priority: row[5],
               due_at: row[6],
-              estimate_minutes: row[7],
-              notes: row[10],
-              health: row[8],
-              health_mode: row[9],
+              estimate_minutes: row[8],
+              rollup_estimate_minutes: rollupEstimate,
+              rollup_actual_minutes: rollupActual,
+              rollup_remaining_minutes: rollupRemaining,
+              rollup_start_at: rollupTotals?.rollupStartAt ?? null,
+              rollup_end_at: rollupTotals?.rollupEndAt ?? null,
+              rollup_blocked_count: rollupTotals?.rollupBlockedCount ?? 0,
+              rollup_overdue_count: rollupTotals?.rollupOverdueCount ?? 0,
+              notes: row[11],
+              health: row[9],
+              health_mode: row[10],
               schedule: {
                 has_blocks: schedule.count > 0,
                 scheduled_minutes_total: schedule.total,

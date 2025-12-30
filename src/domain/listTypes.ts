@@ -1,0 +1,40 @@
+export type ListItem = {
+  id: string;
+  type: "project" | "milestone" | "task";
+  title: string;
+  parent_id: string | null;
+  depth: number;
+  project_id: string;
+  sort_order: number;
+  due_at: number | null;
+  estimate_mode?: string;
+  status: string;
+  priority: number;
+  estimate_minutes: number;
+  rollup_estimate_minutes?: number;
+  rollup_actual_minutes?: number;
+  rollup_remaining_minutes?: number;
+  rollup_start_at?: number | null;
+  rollup_end_at?: number | null;
+  rollup_blocked_count?: number;
+  rollup_overdue_count?: number;
+  schedule: {
+    has_blocks: boolean;
+    scheduled_minutes_total: number;
+    schedule_start_at: number | null;
+    schedule_end_at: number | null;
+  };
+  depends_on: string[];
+  notes: string | null;
+  blocked: {
+    is_blocked: boolean;
+    blocked_by_deps: boolean;
+    blocked_by_blockers: boolean;
+    active_blocker_count: number;
+    unmet_dependency_count: number;
+  };
+  assignees: { id: string; name: string | null }[];
+  tags: { id: string; name: string }[];
+  health: string;
+  health_mode?: string;
+};

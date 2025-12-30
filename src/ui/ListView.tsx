@@ -566,6 +566,9 @@ const ListView: FC<ListViewProps> = ({
   const [collapsedMilestones, setCollapsedMilestones] = useState<Set<string>>(
     () => new Set()
   );
+  const [collapsedTasks, setCollapsedTasks] = useState<Set<string>>(
+    () => new Set()
+  );
   const [collapsedUngrouped, setCollapsedUngrouped] = useState(false);
 
   useEffect(() => {
@@ -574,6 +577,13 @@ const ListView: FC<ListViewProps> = ({
       return new Set(Array.from(prev).filter((id) => milestoneIds.has(id)));
     });
   }, [milestones]);
+
+  useEffect(() => {
+    setCollapsedTasks((prev) => {
+      const taskIds = new Set(tasks.map((task) => task.id));
+      return new Set(Array.from(prev).filter((id) => taskIds.has(id)));
+    });
+  }, [tasks]);
 
   const handleDelete = async (item: ListItem) => {
     if (!confirm(`Delete ${item.title}? This removes all descendants.`)) {
@@ -941,6 +951,9 @@ const ListView: FC<ListViewProps> = ({
 
     return (
       <div className="cell-editing dependency-editor">
+        <div className="dependency-hint">
+          Lag (min) adds a delay between predecessor and successor.
+        </div>
         <div className="dependency-section">
           <div className="dependency-section-title">Depends on</div>
           {incoming.length === 0 ? (
@@ -1437,24 +1450,48 @@ const ListView: FC<ListViewProps> = ({
     }
   };
 
+  const isDescendant = useCallback(
+    (itemId: string, potentialParentId: string | null) => {
+      if (!potentialParentId) {
+        return false;
+      }
+      if (potentialParentId === itemId) {
+        return true;
+      }
+      const stack = [...(taskChildren.get(itemId) ?? [])];
+      while (stack.length > 0) {
+        const next = stack.pop();
+        if (!next) {
+          continue;
+        }
+        if (next.id === potentialParentId) {
+          return true;
+        }
+        const children = taskChildren.get(next.id) ?? [];
+        for (const child of children) {
+          stack.push(child);
+        }
+      }
+      return false;
+    },
+    [taskChildren]
+  );
+
   const canMoveTaskToParent = useCallback(
     (itemId: string, targetParentId: string | null) => {
       const item = itemById.get(itemId);
       if (!item || item.type !== "task") {
         return false;
       }
-      const parentType = item.parent_id
-        ? parentTypeMap.get(item.parent_id)
-        : null;
-      if (parentType === "task") {
+      if (item.parent_id === targetParentId) {
         return false;
       }
-      if (item.parent_id === targetParentId) {
+      if (isDescendant(itemId, targetParentId)) {
         return false;
       }
       return true;
     },
-    [itemById, parentTypeMap]
+    [isDescendant, itemById]
   );
 
   const handleMoveToParent = async (
@@ -1476,13 +1513,33 @@ const ListView: FC<ListViewProps> = ({
     targetParentId: string,
     position: "top" | "bottom"
   ) => {
-    const siblings = tasksUnderMilestone.get(targetParentId) ?? [];
+    const siblings = taskChildren.get(targetParentId) ?? [];
     const sortOrders = siblings.map((task) => task.sort_order);
     const minSort = sortOrders.length > 0 ? Math.min(...sortOrders) : 0;
     const maxSort = sortOrders.length > 0 ? Math.max(...sortOrders) : 0;
-    const nextSort =
-      position === "top" ? minSort - 1 : maxSort + 1;
+    const nextSort = position === "top" ? minSort - 1 : maxSort + 1;
 
+    setError(null);
+    try {
+      await updateItemFields(itemId, {
+        parent_id: targetParentId,
+        sort_order: nextSort,
+      });
+      onRefresh();
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Unknown error";
+      setError(message);
+    }
+  };
+
+  const handleMoveToParentAppend = async (
+    itemId: string,
+    targetParentId: string
+  ) => {
+    const siblings = taskChildren.get(targetParentId) ?? [];
+    const sortOrders = siblings.map((task) => task.sort_order);
+    const maxSort = sortOrders.length > 0 ? Math.max(...sortOrders) : 0;
+    const nextSort = maxSort + 1;
     setError(null);
     try {
       await updateItemFields(itemId, {
@@ -1536,10 +1593,17 @@ const ListView: FC<ListViewProps> = ({
     if (dragging.groupKey === groupKey) {
       return true;
     }
-    if (groupKey === "milestones" || groupKey.startsWith("task:")) {
+    const targetItem = itemById.get(itemId);
+    if (!targetItem) {
       return false;
     }
-    const targetParentId = itemById.get(itemId)?.parent_id ?? null;
+    if (
+      targetItem.type === "task" &&
+      canMoveTaskToParent(dragging.itemId, targetItem.id)
+    ) {
+      return true;
+    }
+    const targetParentId = targetItem.parent_id ?? null;
     return canMoveTaskToParent(dragging.itemId, targetParentId);
   };
 
@@ -1552,6 +1616,18 @@ const ListView: FC<ListViewProps> = ({
     event.preventDefault();
     const rect = (event.currentTarget as HTMLElement).getBoundingClientRect();
     const midpoint = rect.top + rect.height / 2;
+    const upperZone = rect.top + rect.height * 0.25;
+    const lowerZone = rect.top + rect.height * 0.75;
+    const targetItem = itemById.get(itemId);
+    const canNestInto =
+      dragging &&
+      targetItem?.type === "task" &&
+      dragging.groupKey !== groupKey &&
+      canMoveTaskToParent(dragging.itemId, itemId);
+    if (canNestInto && event.clientY > upperZone && event.clientY < lowerZone) {
+      setDragOver({ itemId, groupKey, position: "into" });
+      return;
+    }
     const position = event.clientY < midpoint ? "before" : "after";
     setDragOver({ itemId, groupKey, position });
   };
@@ -1686,6 +1762,14 @@ const ListView: FC<ListViewProps> = ({
   const handleDropOnRow = (itemId: string, groupKey: string) => (
     event: DragEvent
   ) => {
+    if (dragOver?.position === "into") {
+      event.preventDefault();
+      if (dragging && canMoveTaskToParent(dragging.itemId, itemId)) {
+        void handleMoveToParentAppend(dragging.itemId, itemId);
+      }
+      setDragOver(null);
+      return;
+    }
     if (dragOver?.position === "after") {
       handleDropAfter(itemId, groupKey)(event);
       return;
@@ -1704,7 +1788,6 @@ const ListView: FC<ListViewProps> = ({
     const allowDrop =
       dragging.groupKey === groupKey ||
       (groupKey !== "milestones" &&
-        !groupKey.startsWith("task:") &&
         canMoveTaskToParent(dragging.itemId, parentId));
     if (!allowDrop) {
       return;
@@ -1808,6 +1891,32 @@ const ListView: FC<ListViewProps> = ({
                       const children = taskChildren.get(item.id) ?? [];
                       const groupKey = "ungrouped";
                       const actions = undefined;
+                      const isTaskCollapsed = collapsedTasks.has(item.id);
+                      const taskDragHandle = (
+                        <span className="cell-title-controls">
+                          {renderDragHandle(item.id, groupKey)}
+                          {children.length > 0 ? (
+                            <button
+                              type="button"
+                              className="group-toggle"
+                              onClick={(event) => {
+                                event.stopPropagation();
+                                setCollapsedTasks((prev) => {
+                                  const next = new Set(prev);
+                                  if (next.has(item.id)) {
+                                    next.delete(item.id);
+                                  } else {
+                                    next.add(item.id);
+                                  }
+                                  return next;
+                                });
+                              }}
+                            >
+                              {isTaskCollapsed ? "▶" : "▼"}
+                            </button>
+                          ) : null}
+                        </span>
+                      );
                       return (
                         <Fragment key={item.id}>
                             <ContextMenu.Root>
@@ -1816,9 +1925,11 @@ const ListView: FC<ListViewProps> = ({
                                   className={
                                     dragOver?.itemId === item.id &&
                                     dragOver.groupKey === groupKey
-                                      ? dragOver.position === "after"
-                                        ? "drag-over-bottom"
-                                        : "drag-over-top"
+                                      ? dragOver.position === "into"
+                                        ? "drag-over-into"
+                                        : dragOver.position === "after"
+                                          ? "drag-over-bottom"
+                                          : "drag-over-top"
                                       : undefined
                                   }
                                   onDragOver={handleDragOverRow(item.id, groupKey)}
@@ -1830,7 +1941,7 @@ const ListView: FC<ListViewProps> = ({
                                           item,
                                           column,
                                           item.depth * 16,
-                                          renderDragHandle(item.id, groupKey),
+                                          taskDragHandle,
                                           actions
                                         )}
                                       </td>
@@ -1860,68 +1971,114 @@ const ListView: FC<ListViewProps> = ({
                                 </ContextMenu.Content>
                               </ContextMenu.Portal>
                             </ContextMenu.Root>
-                          {children.map((child) => {
-                            const childGroupKey = `task:${item.id}`;
-                            const childActions = undefined;
-                            return (
-                              <ContextMenu.Root key={child.id}>
-                                <ContextMenu.Trigger asChild>
-                                  <tr
-                                    className={
-                                      dragOver?.itemId === child.id &&
-                                      dragOver.groupKey === childGroupKey
-                                        ? dragOver.position === "after"
-                                          ? "drag-over-bottom"
-                                          : "drag-over-top"
-                                        : undefined
-                                    }
-                                    onDragOver={handleDragOverRow(
-                                      child.id,
-                                      childGroupKey
-                                    )}
-                                    onDrop={handleDropOnRow(
-                                      child.id,
-                                      childGroupKey
-                                    )}
-                                  >
-                                    {columns.map((column) => (
-                                      <td key={`${child.id}-${column.key}`}>
-                                        {renderCell(
-                                          child,
-                                          column,
-                                          child.depth * 16,
-                                          renderDragHandle(child.id, childGroupKey),
-                                          childActions
+                          {isTaskCollapsed ? null : (
+                            <>
+                              {children.map((child) => {
+                                const childGroupKey = `task:${item.id}`;
+                                const childActions = undefined;
+                                return (
+                                  <ContextMenu.Root key={child.id}>
+                                    <ContextMenu.Trigger asChild>
+                                      <tr
+                                        className={
+                                          dragOver?.itemId === child.id &&
+                                          dragOver.groupKey === childGroupKey
+                                            ? dragOver.position === "into"
+                                              ? "drag-over-into"
+                                              : dragOver.position === "after"
+                                                ? "drag-over-bottom"
+                                                : "drag-over-top"
+                                            : undefined
+                                        }
+                                        onDragOver={handleDragOverRow(
+                                          child.id,
+                                          childGroupKey
                                         )}
-                                      </td>
-                                    ))}
-                                  </tr>
-                                </ContextMenu.Trigger>
-                                <ContextMenu.Portal>
-                                  <ContextMenu.Content className="context-menu-content">
-                                    <ContextMenu.Item
-                                      className="context-menu-item"
-                                      onSelect={() => handleDelete(child)}
+                                        onDrop={handleDropOnRow(
+                                          child.id,
+                                          childGroupKey
+                                        )}
+                                      >
+                                        {columns.map((column) => (
+                                          <td key={`${child.id}-${column.key}`}>
+                                            {renderCell(
+                                              child,
+                                              column,
+                                              child.depth * 16,
+                                              renderDragHandle(child.id, childGroupKey),
+                                              childActions
+                                            )}
+                                          </td>
+                                        ))}
+                                      </tr>
+                                    </ContextMenu.Trigger>
+                                    <ContextMenu.Portal>
+                                      <ContextMenu.Content className="context-menu-content">
+                                        <ContextMenu.Item
+                                          className="context-menu-item"
+                                          onSelect={() => handleDelete(child)}
+                                        >
+                                          Delete task
+                                        </ContextMenu.Item>
+                                        <ContextMenu.Item
+                                          className="context-menu-item"
+                                          onSelect={() =>
+                                            handleDuplicateTask(child)
+                                          }
+                                        >
+                                          Duplicate task
+                                        </ContextMenu.Item>
+                                        <ContextMenu.Item
+                                          className="context-menu-item"
+                                          disabled
+                                        >
+                                          Move to…
+                                        </ContextMenu.Item>
+                                      </ContextMenu.Content>
+                                    </ContextMenu.Portal>
+                                  </ContextMenu.Root>
+                                );
+                              })}
+                              <tr className="add-row">
+                                <td colSpan={columns.length}>
+                                  {inlineAdd?.groupKey === `subtask:${item.id}` ? (
+                                    <input
+                                      className="add-row-input"
+                                      value={inlineTitle}
+                                      onChange={(event) =>
+                                        setInlineTitle(event.target.value)
+                                      }
+                                      onKeyDown={(event) => {
+                                        if (event.key === "Enter") {
+                                          event.preventDefault();
+                                          void handleInlineCommit();
+                                        }
+                                        if (event.key === "Escape") {
+                                          event.preventDefault();
+                                          handleInlineCancel();
+                                        }
+                                      }}
+                                      placeholder="New subtask title"
+                                      autoFocus
+                                    />
+                                  ) : (
+                                    <button
+                                      type="button"
+                                      className="add-row-button"
+                                      onClick={() =>
+                                        startInlineAdd(
+                                          `subtask:${item.id}`,
+                                          item.id
+                                        )
+                                      }
                                     >
-                                      Delete task
-                                    </ContextMenu.Item>
-                                    <ContextMenu.Item
-                                      className="context-menu-item"
-                                      onSelect={() => handleDuplicateTask(child)}
-                                    >
-                                      Duplicate task
-                                    </ContextMenu.Item>
-                                    <ContextMenu.Item
-                                      className="context-menu-item"
-                                      disabled
-                                    >
-                                      Move to…
-                                    </ContextMenu.Item>
-                                  </ContextMenu.Content>
-                                </ContextMenu.Portal>
-                              </ContextMenu.Root>
-                            );
-                          })}
+                                      Add subtask…
+                                    </button>
+                                  )}
+                                </td>
+                              </tr>
+                            </>
+                          )}
                         </Fragment>
                       );
                     })}
@@ -2058,6 +2215,32 @@ const ListView: FC<ListViewProps> = ({
                         : milestoneTasks.map((item) => {
                             const children = taskChildren.get(item.id) ?? [];
                             const actions = undefined;
+                            const isTaskCollapsed = collapsedTasks.has(item.id);
+                            const taskDragHandle = (
+                              <span className="cell-title-controls">
+                                {renderDragHandle(item.id, groupKey)}
+                                {children.length > 0 ? (
+                                  <button
+                                    type="button"
+                                    className="group-toggle"
+                                    onClick={(event) => {
+                                      event.stopPropagation();
+                                      setCollapsedTasks((prev) => {
+                                        const next = new Set(prev);
+                                        if (next.has(item.id)) {
+                                          next.delete(item.id);
+                                        } else {
+                                          next.add(item.id);
+                                        }
+                                        return next;
+                                      });
+                                    }}
+                                  >
+                                    {isTaskCollapsed ? "▶" : "▼"}
+                                  </button>
+                                ) : null}
+                              </span>
+                            );
                             return (
                               <Fragment key={item.id}>
                                 <ContextMenu.Root>
@@ -2066,9 +2249,11 @@ const ListView: FC<ListViewProps> = ({
                                       className={
                                         dragOver?.itemId === item.id &&
                                         dragOver.groupKey === groupKey
-                                          ? dragOver.position === "after"
-                                            ? "drag-over-bottom"
-                                            : "drag-over-top"
+                                          ? dragOver.position === "into"
+                                            ? "drag-over-into"
+                                            : dragOver.position === "after"
+                                              ? "drag-over-bottom"
+                                              : "drag-over-top"
                                           : undefined
                                       }
                                       onDragOver={handleDragOverRow(item.id, groupKey)}
@@ -2080,7 +2265,7 @@ const ListView: FC<ListViewProps> = ({
                                             item,
                                             column,
                                             item.depth * 16,
-                                            renderDragHandle(item.id, groupKey),
+                                            taskDragHandle,
                                             actions
                                           )}
                                         </td>
@@ -2110,70 +2295,117 @@ const ListView: FC<ListViewProps> = ({
                                     </ContextMenu.Content>
                                   </ContextMenu.Portal>
                                 </ContextMenu.Root>
-                                {children.map((child) => {
-                                  const childGroupKey = `task:${item.id}`;
-                                  const childActions = undefined;
-                                  return (
-                                    <ContextMenu.Root key={child.id}>
-                                      <ContextMenu.Trigger asChild>
-                                        <tr
-                                          className={
-                                            dragOver?.itemId === child.id &&
-                                            dragOver.groupKey === childGroupKey
-                                              ? dragOver.position === "after"
-                                                ? "drag-over-bottom"
-                                                : "drag-over-top"
-                                              : undefined
-                                          }
-                                          onDragOver={handleDragOverRow(
-                                            child.id,
-                                            childGroupKey
-                                          )}
-                                          onDrop={handleDropOnRow(
-                                            child.id,
-                                            childGroupKey
-                                          )}
-                                        >
-                                    {columns.map((column) => (
-                                      <td key={`${child.id}-${column.key}`}>
-                                        {renderCell(
-                                          child,
-                                          column,
-                                          child.depth * 16,
-                                          renderDragHandle(child.id, childGroupKey),
-                                          childActions
-                                        )}
-                                      </td>
-                                    ))}
-                                        </tr>
-                                      </ContextMenu.Trigger>
-                                      <ContextMenu.Portal>
-                                        <ContextMenu.Content className="context-menu-content">
-                                          <ContextMenu.Item
-                                            className="context-menu-item"
-                                            onSelect={() => handleDelete(child)}
-                                          >
-                                            Delete task
-                                          </ContextMenu.Item>
-                                          <ContextMenu.Item
-                                            className="context-menu-item"
-                                            onSelect={() =>
-                                              handleDuplicateTask(child)
+                                {isTaskCollapsed ? null : (
+                                  <>
+                                    {children.map((child) => {
+                                      const childGroupKey = `task:${item.id}`;
+                                      const childActions = undefined;
+                                      return (
+                                        <ContextMenu.Root key={child.id}>
+                                          <ContextMenu.Trigger asChild>
+                                            <tr
+                                              className={
+                                                dragOver?.itemId === child.id &&
+                                                dragOver.groupKey === childGroupKey
+                                                  ? dragOver.position === "into"
+                                                    ? "drag-over-into"
+                                                    : dragOver.position === "after"
+                                                      ? "drag-over-bottom"
+                                                      : "drag-over-top"
+                                                  : undefined
+                                              }
+                                              onDragOver={handleDragOverRow(
+                                                child.id,
+                                                childGroupKey
+                                              )}
+                                              onDrop={handleDropOnRow(
+                                                child.id,
+                                                childGroupKey
+                                              )}
+                                            >
+                                              {columns.map((column) => (
+                                                <td key={`${child.id}-${column.key}`}>
+                                                  {renderCell(
+                                                    child,
+                                                    column,
+                                                    child.depth * 16,
+                                                    renderDragHandle(
+                                                      child.id,
+                                                      childGroupKey
+                                                    ),
+                                                    childActions
+                                                  )}
+                                                </td>
+                                              ))}
+                                            </tr>
+                                          </ContextMenu.Trigger>
+                                          <ContextMenu.Portal>
+                                            <ContextMenu.Content className="context-menu-content">
+                                              <ContextMenu.Item
+                                                className="context-menu-item"
+                                                onSelect={() => handleDelete(child)}
+                                              >
+                                                Delete task
+                                              </ContextMenu.Item>
+                                              <ContextMenu.Item
+                                                className="context-menu-item"
+                                                onSelect={() =>
+                                                  handleDuplicateTask(child)
+                                                }
+                                              >
+                                                Duplicate task
+                                              </ContextMenu.Item>
+                                              <ContextMenu.Item
+                                                className="context-menu-item"
+                                                disabled
+                                              >
+                                                Move to…
+                                              </ContextMenu.Item>
+                                            </ContextMenu.Content>
+                                          </ContextMenu.Portal>
+                                        </ContextMenu.Root>
+                                      );
+                                    })}
+                                    <tr className="add-row">
+                                      <td colSpan={columns.length}>
+                                        {inlineAdd?.groupKey === `subtask:${item.id}` ? (
+                                          <input
+                                            className="add-row-input"
+                                            value={inlineTitle}
+                                            onChange={(event) =>
+                                              setInlineTitle(event.target.value)
+                                            }
+                                            onKeyDown={(event) => {
+                                              if (event.key === "Enter") {
+                                                event.preventDefault();
+                                                void handleInlineCommit();
+                                              }
+                                              if (event.key === "Escape") {
+                                                event.preventDefault();
+                                                handleInlineCancel();
+                                              }
+                                            }}
+                                            placeholder="New subtask title"
+                                            autoFocus
+                                          />
+                                        ) : (
+                                          <button
+                                            type="button"
+                                            className="add-row-button"
+                                            onClick={() =>
+                                              startInlineAdd(
+                                                `subtask:${item.id}`,
+                                                item.id
+                                              )
                                             }
                                           >
-                                            Duplicate task
-                                          </ContextMenu.Item>
-                                          <ContextMenu.Item
-                                            className="context-menu-item"
-                                            disabled
-                                          >
-                                            Move to…
-                                          </ContextMenu.Item>
-                                        </ContextMenu.Content>
-                                      </ContextMenu.Portal>
-                                    </ContextMenu.Root>
-                                  );
-                                })}
+                                            Add subtask…
+                                          </button>
+                                        )}
+                                      </td>
+                                    </tr>
+                                  </>
+                                )}
                               </Fragment>
                             );
                           })}

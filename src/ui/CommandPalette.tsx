@@ -13,7 +13,6 @@ type CommandPaletteProps = {
   onCreated: () => void;
 };
 
-const DEFAULT_SCHEDULE_MINUTES = 60;
 
 const CommandPalette: FC<CommandPaletteProps> = ({
   open,
@@ -460,10 +459,27 @@ const CommandPalette: FC<CommandPaletteProps> = ({
           }
         }
         if (value.scheduledFor) {
+          let durationMinutes = value.estimateMinutes ?? null;
+          if (!durationMinutes || durationMinutes <= 0) {
+            const scopeId = projectScopeId ?? selectedProjectId ?? null;
+            const data = await query<{
+              items: Array<{ id: string; estimate_minutes: number }>;
+            }>("listItems", {
+              projectId: scopeId ?? undefined,
+              includeDone: true,
+              includeCanceled: true,
+            });
+            const current = data.items.find((item) => item.id === targetId);
+            durationMinutes = current?.estimate_minutes ?? null;
+          }
+          if (!durationMinutes || durationMinutes <= 0) {
+            setSubmitError("Est Dur must be greater than 0 to schedule.");
+            return;
+          }
           await mutate("scheduled_block.create", {
             item_id: targetId,
             start_at: value.scheduledFor,
-            duration_minutes: DEFAULT_SCHEDULE_MINUTES,
+            duration_minutes: Math.round(durationMinutes),
             locked: 0,
             source: "manual",
           });
@@ -565,10 +581,15 @@ const CommandPalette: FC<CommandPaletteProps> = ({
         }
       }
       if (value.scheduledFor) {
+        const durationMinutes = value.estimateMinutes ?? 0;
+        if (durationMinutes <= 0) {
+          setSubmitError("Est Dur must be greater than 0 to schedule.");
+          return;
+        }
         await mutate("scheduled_block.create", {
           item_id: itemId,
           start_at: value.scheduledFor,
-          duration_minutes: DEFAULT_SCHEDULE_MINUTES,
+          duration_minutes: Math.round(durationMinutes),
           locked: 0,
           source: "manual",
         });
@@ -659,7 +680,9 @@ const CommandPalette: FC<CommandPaletteProps> = ({
                 <div>
                   <strong>Scheduled:</strong>{" "}
                   {new Date(parseResult.value.scheduledFor).toLocaleString()}
-                  <span> ({DEFAULT_SCHEDULE_MINUTES} min)</span>
+                  {parseResult.value.estimateMinutes
+                    ? ` (${parseResult.value.estimateMinutes} min)`
+                    : ""}
                 </div>
               ) : null}
             </div>

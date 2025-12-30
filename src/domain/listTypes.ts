@@ -74,6 +74,13 @@ export type ItemGanttModel = {
   status: string;
   completed_on: number | null;
   due_at: number | null;
+  rollup_estimate_minutes?: number;
+  rollup_actual_minutes?: number;
+  rollup_remaining_minutes?: number;
+  rollup_start_at?: number | null;
+  rollup_end_at?: number | null;
+  rollup_blocked_count?: number;
+  rollup_overdue_count?: number;
   estimate_mode?: string;
   estimate_minutes: number;
   actual_minutes: number | null;

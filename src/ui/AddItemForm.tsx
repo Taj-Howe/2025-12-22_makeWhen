@@ -91,7 +91,6 @@ const AddItemForm: FC<AddItemFormProps> = ({
   );
   const [estimateMinutes, setEstimateMinutes] = useState("0");
   const [scheduledFor, setScheduledFor] = useState("");
-  const [scheduledMinutes, setScheduledMinutes] = useState("60");
   const [status, setStatus] = useState("backlog");
   const [priority, setPriority] = useState("0");
   const [healthMode, setHealthMode] = useState<"auto" | "manual">("auto");
@@ -123,14 +122,51 @@ const AddItemForm: FC<AddItemFormProps> = ({
     return items.filter((item) => item.project_id === selectedProjectId);
   }, [items, selectedProjectId]);
 
+  const childMap = useMemo(() => {
+    const map = new Map<string, string[]>();
+    for (const item of projectItems) {
+      if (!item.parent_id) {
+        continue;
+      }
+      const list = map.get(item.parent_id) ?? [];
+      list.push(item.id);
+      map.set(item.parent_id, list);
+    }
+    return map;
+  }, [projectItems]);
+
+  const descendantIds = useMemo(() => {
+    if (mode !== "edit" || !selectedItemId) {
+      return new Set<string>();
+    }
+    const visited = new Set<string>();
+    const stack = [selectedItemId];
+    while (stack.length > 0) {
+      const current = stack.pop();
+      if (!current || visited.has(current)) {
+        continue;
+      }
+      visited.add(current);
+      const children = childMap.get(current) ?? [];
+      for (const child of children) {
+        if (!visited.has(child)) {
+          stack.push(child);
+        }
+      }
+    }
+    return visited;
+  }, [childMap, mode, selectedItemId]);
+
   const taskParentOptions = useMemo(() => {
     if (!selectedProjectId) {
       return [];
     }
     return projectItems.filter(
-      (item) => item.type === "milestone" || item.type === "task"
+      (item) =>
+        (item.type === "milestone" || item.type === "task") &&
+        !descendantIds.has(item.id)
     );
-  }, [projectItems, selectedProjectId]);
+  }, [descendantIds, projectItems, selectedProjectId]);
 
   const editableItems = useMemo(
     () => projectItems.filter((item) => item.type !== "project"),
@@ -271,7 +307,6 @@ const AddItemForm: FC<AddItemFormProps> = ({
     setEstimateMinutes("0");
     setEstimateMode("manual");
     setScheduledFor("");
-    setScheduledMinutes("60");
     setPriority("0");
     setStatus("backlog");
     setHealthMode("auto");
@@ -312,11 +347,8 @@ const AddItemForm: FC<AddItemFormProps> = ({
         return "Estimate must be 0 or greater.";
       }
     }
-    if (scheduledFor) {
-      const scheduledValue = Number(scheduledMinutes);
-      if (!Number.isFinite(scheduledValue) || scheduledValue <= 0) {
-        return "Scheduled minutes must be greater than 0.";
-      }
+    if (scheduledFor && estimate <= 0) {
+      return "Est Dur must be greater than 0 to schedule.";
     }
     if (type === "milestone" && !selectedProjectId) {
       return "Select a project before adding a milestone.";
@@ -377,10 +409,7 @@ const AddItemForm: FC<AddItemFormProps> = ({
         if (itemId) {
           if (scheduledFor) {
             const startAt = new Date(scheduledFor).getTime();
-            const durationMinutes = Math.max(
-              1,
-              Math.round(Number(scheduledMinutes))
-            );
+            const durationMinutes = Math.round(estimate);
             await mutate("scheduled_block.create", {
               item_id: itemId,
               start_at: startAt,
@@ -425,10 +454,7 @@ const AddItemForm: FC<AddItemFormProps> = ({
         });
         if (scheduledFor) {
           const startAt = new Date(scheduledFor).getTime();
-          const durationMinutes = Math.max(
-            1,
-            Math.round(Number(scheduledMinutes))
-          );
+          const durationMinutes = Math.round(estimate);
           await mutate("scheduled_block.create", {
             item_id: selectedItemId,
             start_at: startAt,
@@ -658,22 +684,12 @@ const AddItemForm: FC<AddItemFormProps> = ({
 
       <div className="form-row">
         <label>
-          Scheduled for
+          Start time
           <input
             type="datetime-local"
             value={scheduledFor}
             onChange={(event) => setScheduledFor(event.target.value)}
             placeholder="Optional"
-          />
-        </label>
-        <label>
-          Duration (minutes)
-          <input
-            type="number"
-            min={1}
-            value={scheduledMinutes}
-            onChange={(event) => setScheduledMinutes(event.target.value)}
-            disabled={!scheduledFor}
           />
         </label>
       </div>

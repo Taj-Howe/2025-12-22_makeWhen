@@ -3444,6 +3444,30 @@ const handleRequest = async (message: RpcRequest): Promise<RpcResponse> => {
             timeMap.set(row[0], Number(row[1]));
           }
 
+          const blockedRawMap = getBlockedStatusMap(dbHandle, uniqueBaseIds);
+          const blockedMap = new Map(
+            Array.from(blockedRawMap.entries()).map(([id, summary]) => [
+              id,
+              { is_blocked: summary.is_blocked },
+            ])
+          );
+          const now = Date.now();
+          const dueMetricsMap = new Map(
+            rows.map((row) => [row[0], computeDueMetrics(row[6], now, row[4])])
+          );
+          const rollupMap = computeRollupTotals(
+            rows.map((row) => ({
+              id: row[0],
+              parent_id: row[3],
+              estimate_mode: row[7],
+              estimate_minutes: row[8],
+            })),
+            scheduleSummaryMap,
+            blockedMap,
+            dueMetricsMap,
+            timeMap
+          );
+
           const depRows = dbHandle.exec({
             sql: `SELECT item_id, depends_on_id, type, lag_minutes FROM dependencies
               WHERE item_id IN (${buildPlaceholders(uniqueBaseIds.length)})
@@ -3572,6 +3596,7 @@ const handleRequest = async (message: RpcRequest): Promise<RpcResponse> => {
               row[6],
               scheduleSummary.end
             );
+            const rollupTotals = rollupMap.get(id);
             const depsIn = depsInMap.get(id) ?? [];
             const depsOut = depsOutMap.get(id) ?? [];
             const blockedBy = depsIn.map((dep) => {
@@ -3622,6 +3647,16 @@ const handleRequest = async (message: RpcRequest): Promise<RpcResponse> => {
               status: row[4],
               completed_on: null,
               due_at: row[6],
+              rollup_estimate_minutes: rollupTotals?.totalEstimate ?? row[8],
+              rollup_actual_minutes: rollupTotals?.totalActual ?? (timeMap.get(id) ?? 0),
+              rollup_remaining_minutes:
+                rollupTotals
+                  ? Math.max(0, rollupTotals.totalEstimate - rollupTotals.totalActual)
+                  : Math.max(0, (row[8] ?? 0) - (timeMap.get(id) ?? 0)),
+              rollup_start_at: rollupTotals?.rollupStartAt ?? null,
+              rollup_end_at: rollupTotals?.rollupEndAt ?? null,
+              rollup_blocked_count: rollupTotals?.rollupBlockedCount ?? 0,
+              rollup_overdue_count: rollupTotals?.rollupOverdueCount ?? 0,
               estimate_mode: row[7],
               estimate_minutes: row[8],
               actual_minutes: timeMap.get(id) ?? null,

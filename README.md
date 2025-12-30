@@ -10,7 +10,7 @@ If Codex (or any agent) loses context, **this README is the source of truth** fo
 
 - Everything is an **Item**: `project | milestone | task`
 - Every Item has:
-  - `due_at` (a **marker**, no duration)
+  - `due_at` (a **marker**, no duration; optional)
   - `estimate` (effort; required at creation)
 - Actual “work scheduling” happens via **ScheduledBlocks**:
   - time spans that are draggable/resizable on a calendar
@@ -34,10 +34,11 @@ If Codex (or any agent) loses context, **this README is the source of truth** fo
   - runs in a transaction
   - writes to an append-only **audit log**
 
-### 3) Due date + estimate linked at creation
-- Creating any Item requires both `due_at` and `estimate`:
+### 3) Estimates required; due date optional
+- Creating any Item requires an estimate:
   - tasks default to manual estimate
   - projects/milestones default to rollup estimate mode
+- `due_at` is optional for all item types
 
 ### 4) Scheduling is blocks, not a single “scheduled_for” field
 - Items can have zero or many ScheduledBlocks
@@ -73,19 +74,23 @@ Writable fields (stored):
 - `id`, `type`, `title`, `parent_id`
 - `status`: `backlog | ready | in_progress | blocked | review | done | canceled`
 - `priority` (0–5)
-- `due_at` (required)
+- `due_at` (optional)
 - `estimate_mode`: `manual | rollup` (required)
 - `estimate_minutes` (required; may be 0)
 - `health`: `on_track | at_risk | behind | ahead | unknown`
 - `health_mode`: `auto | manual`
 - `notes` (text for v1)
 - tags + assignees (tables)
+- `sort_order` (manual ordering within siblings)
 
 Computed (derived on read or via rollup table later):
 - `is_blocked` (deps unmet OR active blockers)
 - `days_until_due`, `days_overdue`, `is_overdue`
 - rollups (for parents): estimate/actual/remaining, rollup start/end, overdue count, blocked count
 - `sequence_rank` (deterministic ordering)
+- `project_id` (derived from parent chain)
+- `depth` (derived from parent chain)
+- dependency projections like "blocked_by" / "blocking" (computed from edges)
 
 ### ScheduledBlock
 - `block_id`, `item_id`
@@ -108,11 +113,13 @@ Tables:
 - `blockers`
 - `scheduled_blocks`
 - `time_entries`
+- `running_timers`
 - `audit_log`
 - `settings` (e.g., `capacity_minutes_per_day`, theme tokens, user css)
 
 Indexes:
 - `items(parent_id)`, `items(status)`, `items(due_at)`
+- `items(title COLLATE NOCASE)` (autocomplete search)
 - `scheduled_blocks(start_at)`, `scheduled_blocks(item_id)`
 - `dependencies(item_id)`, `dependencies(depends_on_id)`
 - `blockers(item_id, cleared_at)`
@@ -122,7 +129,7 @@ Indexes:
 
 ## Operation contract (writes)
 
-All writes happen via these operations (v1 minimum):
+All writes happen via these operations (current):
 - `create_item`
 - `update_item_fields`
 - `set_status`
@@ -130,18 +137,22 @@ All writes happen via these operations (v1 minimum):
 - `add_blocker` / `clear_blocker`
 - `create_block` / `move_block` / `resize_block` / `delete_block`
 - `add_time_entry`
-- `set_health_mode` / `set_health` (manual override)
-- `archive_item` (preferred over delete)
-
-Additional operations implemented (current):
+- `start_timer` / `stop_timer`
+- `delete_item` (cascades to descendants + related rows)
+- `reorder_item` / `move_item` (manual ordering + cross-parent move)
+- `set_item_tags` / `set_item_assignees`
 - `set_setting` (writes to `settings`)
 - `export_data` / `import_data` (JSON backup/restore, audited)
 
+Not implemented yet:
+- `set_health_mode` / `set_health`
+- `archive_item`
+
 Operation envelope (RPC):
-- `op_id`, `op_name`, `actor` (`user|ai|system`), `ts`, `args`
+- `op_id`, `op_name`, `actor_type` (`user|ai|system`), `actor_id?`, `ts`, `args`
 
 Operation results:
-- `ok`, `data`, `warnings`, `invalidate` (list of query keys to refetch)
+- `ok`, `result`, `error`, `warnings`, `invalidate` (list of query keys to refetch)
 
 Audit log:
 - append-only row per operation with payload + result
@@ -153,11 +164,17 @@ Audit log:
 v1 minimum:
 - `getItemDetails({itemId})`
 - `getProjectTree({projectId})`
-- `listKanban({projectId?, assigneeId?, tag?, status?, health?})`
+- `listItems({projectId?, ...})` (primary list)
+- `listKanban({projectId?})` (legacy)
 - `listCalendarBlocks({startAt, endAt, assigneeId?})`
+- `listGantt({projectId?, startAt?, endAt?})`
+- `listExecution({startAt, endAt, projectId?})`
+- `listBlocked({projectId?, assigneeId?})`
+- `listByUser({projectId?})`
 - `listOverdue()`
 - `listDueSoon({days})`
-- `searchItems({text})`
+- `searchItems({q, limit?, scopeId?})` (autocomplete)
+- `get_running_timer()`
 
 UI must not contain raw SQL.
 
@@ -167,18 +184,15 @@ Additional queries implemented (current):
 ---
 
 ## Multi-tab policy (v1)
-Because OPFS + SQLite has concurrency realities:
-- **Single active tab policy for v1**
-- Elect leader via BroadcastChannel
-- Non-leader tabs show read-only banner and “Take over” control
+Planned but not implemented yet:
+- Single active tab policy via BroadcastChannel
 
 ---
 
 ## Theming / user CSS (v1)
 - Theme API = CSS variables applied on `.app-root`
-- Safe mode: tokens only
-- Advanced: user CSS scoped under `.app-root` with a reset button
-- Theme config stored in `settings`
+- Radix Themes base styles + semantic token layer
+- Theme picker (light/dark/amber) persisted to localStorage
 
 ---
 
@@ -187,7 +201,7 @@ Because OPFS + SQLite has concurrency realities:
 - Worker initializes
 - DB persists after refresh
 - Smoke test (manual):
-  1) create project + task (due + estimate required)
+  1) create project + task (estimate required; due optional)
   2) create two scheduled blocks on different days
   3) refresh page → data still present
   4) add dependency + blocker → blocked state reflected
@@ -196,29 +210,23 @@ Because OPFS + SQLite has concurrency realities:
 
 ---
 
-## Current implementation status (Prompt 11)
+## Current implementation status (current)
 
 Implemented:
 - Vite + React + TypeScript SPA with a dedicated DB worker
 - Typed RPC with `ping`, `dbInfo`, `listTables`, `listAudit`, `mutate`, `query`
 - SQLite-WASM initialized in worker with OPFS SAH pool, migration runner, and schema versioning
-- Core tables and indexes from schema
-- Operations: item create/update/status, blockers, dependencies with cycle detection, scheduled block CRUD, time entries, settings
+- Core tables + migrations: blockers kind/text, running timers, sort_order, due_at nullable, title search index
+- Operations: item create/update/status, dependencies with cycle detection, blockers, scheduled block CRUD, time entries, timers, tags/assignees, delete/reorder/move, settings, export/import
 - Audit log for every mutation
-- Queries: kanban list, calendar blocks, item details, project tree rollups, due/overdue lists, settings
-- UI: kanban board, weekly calendar grid with drag/resize blocks, due pins, item details panel, project dashboard rollups, settings panel
-- Theming: CSS variables on `.app-root`, scoped user CSS injection with reset
-- Backup: export/import full JSON dataset (wipe-and-restore, transactional)
-
-Partially implemented (missing filters/features):
-- `listKanban` currently supports `projectId` only (no assignee/tag/status/health filters yet)
-- `listCalendarBlocks` currently supports date range only (no assignee filter yet)
+- Queries: listItems (primary list), item details, project tree rollups, listExecution, listBlocked, listByUser, listGantt, calendar blocks, due/overdue, autocomplete search
+- UI: project sidebar + list view with milestone grouping + ungrouped, drag/drop between groups, inline editing, command palette (create/edit/delete), right-side create sheet
+- Autocomplete: worker-backed search for dependencies and command palette
+- Theming: Radix Themes base + semantic tokens, theme picker (localStorage)
 
 Not implemented yet:
-- `set_health_mode` / `set_health`
-- `archive_item`
-- `searchItems`
 - Multi-tab leader election/read-only policy
+- Archive item and explicit health override operations
 
 ---
 

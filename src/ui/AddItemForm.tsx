@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState, type FC, type FormEvent } from "react";
 import { mutate, query } from "../rpc/clientSingleton";
 import { UNGROUPED_PROJECT_ID } from "./constants";
 import { toDateTimeLocal } from "../domain/formatters";
+import { ItemAutocomplete } from "./ItemAutocomplete";
 
 type ItemType = "project" | "milestone" | "task";
 
@@ -99,7 +100,6 @@ const AddItemForm: FC<AddItemFormProps> = ({
   const [tagsInput, setTagsInput] = useState("");
   const [tagChips, setTagChips] = useState<string[]>([]);
   const [assigneesInput, setAssigneesInput] = useState("");
-  const [depsInput, setDepsInput] = useState("");
   const [depChips, setDepChips] = useState<string[]>([]);
   const [blockerKind, setBlockerKind] = useState("general");
   const [blockerText, setBlockerText] = useState("");
@@ -160,24 +160,13 @@ const AddItemForm: FC<AddItemFormProps> = ({
       .slice(0, 6);
   }, [tagChips, tagSuggestions, tagsInput]);
 
-  const dependencyOptions = useMemo(() => {
-    return projectItems.filter((item) => item.type !== "project");
-  }, [projectItems]);
-
-  const filteredDepSuggestions = useMemo(() => {
-    const input = depsInput.trim().toLowerCase();
-    if (!input) {
-      return [];
+  const dependencyExcludeIds = useMemo(() => {
+    const exclude = new Set(depChips);
+    if (mode === "edit" && selectedItemId) {
+      exclude.add(selectedItemId);
     }
-    return dependencyOptions
-      .filter((item) => {
-        if (depChips.includes(item.id)) {
-          return false;
-        }
-        return item.title.toLowerCase().includes(input);
-      })
-      .slice(0, 6);
-  }, [depChips, dependencyOptions, depsInput]);
+    return Array.from(exclude);
+  }, [depChips, mode, selectedItemId]);
 
   useEffect(() => {
     if (mode === "edit" && selectedItemId) {
@@ -202,7 +191,6 @@ const AddItemForm: FC<AddItemFormProps> = ({
           setNotes(data.notes ?? "");
           setBlockers(data.blockers);
           setCurrentDeps(data.dependencies ?? []);
-          setDepsInput("");
           setDepChips(data.dependencies ?? []);
           const fromList = items.find((item) => item.id === data.id);
           if (fromList) {
@@ -393,7 +381,7 @@ const AddItemForm: FC<AddItemFormProps> = ({
               1,
               Math.round(Number(scheduledMinutes))
             );
-            await mutate("create_block", {
+            await mutate("scheduled_block.create", {
               item_id: itemId,
               start_at: startAt,
               duration_minutes: durationMinutes,
@@ -441,7 +429,7 @@ const AddItemForm: FC<AddItemFormProps> = ({
             1,
             Math.round(Number(scheduledMinutes))
           );
-          await mutate("create_block", {
+          await mutate("scheduled_block.create", {
             item_id: selectedItemId,
             start_at: startAt,
             duration_minutes: durationMinutes,
@@ -480,6 +468,29 @@ const AddItemForm: FC<AddItemFormProps> = ({
       const message = err instanceof Error ? err.message : "Unknown error";
       setError(message);
     }
+  };
+
+  const handleDependencySelect = async (dependencyId: string) => {
+    if (depChips.includes(dependencyId)) {
+      return;
+    }
+    if (mode === "edit" && selectedItemId) {
+      try {
+        await mutate("add_dependency", {
+          item_id: selectedItemId,
+          depends_on_id: dependencyId,
+        });
+        setCurrentDeps((prev) =>
+          prev.includes(dependencyId) ? prev : [...prev, dependencyId]
+        );
+        onRefresh();
+      } catch (err) {
+        const message = err instanceof Error ? err.message : "Unknown error";
+        setError(message);
+        return;
+      }
+    }
+    setDepChips((prev) => [...prev, dependencyId]);
   };
 
   const handleAddBlocker = async () => {
@@ -832,51 +843,40 @@ const AddItemForm: FC<AddItemFormProps> = ({
                   key={depId}
                   type="button"
                   className="chip"
-                  onClick={() =>
-                    setDepChips((prev) => prev.filter((entry) => entry !== depId))
-                  }
+                  onClick={async () => {
+                    setDepChips((prev) =>
+                      prev.filter((entry) => entry !== depId)
+                    );
+                    if (mode === "edit" && selectedItemId) {
+                      try {
+                        await mutate("remove_dependency", {
+                          item_id: selectedItemId,
+                          depends_on_id: depId,
+                        });
+                        setCurrentDeps((prev) =>
+                          prev.filter((entry) => entry !== depId)
+                        );
+                        onRefresh();
+                      } catch (err) {
+                        const message =
+                          err instanceof Error ? err.message : "Unknown error";
+                        setError(message);
+                      }
+                    }
+                  }}
                 >
                   {depId.slice(0, 8)} ×
                 </button>
               ))}
             </div>
-            <input
-              value={depsInput}
-              onChange={(event) => setDepsInput(event.target.value)}
-              onKeyDown={(event) => {
-                if (event.key === "Enter") {
-                  event.preventDefault();
-                  const input = depsInput.trim();
-                  const match = dependencyOptions.find(
-                    (item) => item.id === input
-                  );
-                  if (match && !depChips.includes(match.id)) {
-                    setDepChips((prev) => [...prev, match.id]);
-                  }
-                  setDepsInput("");
-                }
+            <ItemAutocomplete
+              placeholder="Search items"
+              scopeId={selectedProjectId}
+              excludeIds={dependencyExcludeIds}
+              onSelect={(item) => {
+                void handleDependencySelect(item.id);
               }}
-              placeholder="Search tasks"
             />
-            {filteredDepSuggestions.length > 0 ? (
-              <div className="chip-suggestions">
-                {filteredDepSuggestions.map((item) => (
-                  <button
-                    key={item.id}
-                    type="button"
-                    className="chip-suggestion"
-                    onClick={() => {
-                      setDepChips((prev) =>
-                        prev.includes(item.id) ? prev : [...prev, item.id]
-                      );
-                      setDepsInput("");
-                    }}
-                  >
-                    {item.title} ({item.id.slice(0, 6)})
-                  </button>
-                ))}
-              </div>
-            ) : null}
           </div>
         </label>
       </div>

@@ -38,3 +38,49 @@ export type ListItem = {
   health: string;
   health_mode?: string;
 };
+
+export type DependencyType = "FS" | "SS" | "FF" | "SF";
+
+export type ScheduledBlockLite = {
+  block_id: string;
+  item_id: string;
+  start_at: number;
+  duration_minutes: number;
+  end_at_derived: number;
+  kind?: string;
+};
+
+export type DependencyEdgeLite = {
+  edge_id: string;
+  type: DependencyType;
+  lag_minutes: number;
+  successor_id?: string;
+  predecessor_id?: string;
+};
+
+export type DependencyProjectionLite = {
+  item_id: string;
+  title: string;
+  type: DependencyType;
+  lag_minutes: number;
+  status: "satisfied" | "violated" | "unknown";
+};
+
+export type ItemGanttModel = {
+  id: string;
+  title: string;
+  item_type: "project" | "milestone" | "task";
+  parent_id: string | null;
+  status: string;
+  completed_on: number | null;
+  due_at: number | null;
+  estimate_mode?: string;
+  estimate_minutes: number;
+  actual_minutes: number | null;
+  scheduled_blocks: ScheduledBlockLite[];
+  dependencies_out: DependencyEdgeLite[];
+  dependencies_in: DependencyEdgeLite[];
+  blocked_by: DependencyProjectionLite[];
+  blocking: DependencyProjectionLite[];
+  slack_minutes: number | null;
+};

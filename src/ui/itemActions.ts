@@ -20,7 +20,7 @@ export const createBlock = (args: {
   start_at: number;
   duration_minutes: number;
   source?: string;
-}) => mutate("create_block", args);
+}) => mutate("scheduled_block.create", args);
 
 export const setItemTags = (itemId: string, tags: string[]) =>
   mutate("set_item_tags", { item_id: itemId, tags });
@@ -30,6 +30,22 @@ export const addDependency = (itemId: string, dependsOnId: string) =>
 
 export const removeDependency = (itemId: string, dependsOnId: string) =>
   mutate("remove_dependency", { item_id: itemId, depends_on_id: dependsOnId });
+
+export const createDependencyEdge = (args: {
+  predecessor_id: string;
+  successor_id: string;
+  type?: string;
+  lag_minutes?: number;
+}) => mutate("dependency.create", args);
+
+export const updateDependencyEdge = (args: {
+  edge_id: string;
+  type?: string;
+  lag_minutes?: number;
+}) => mutate("dependency.update", args);
+
+export const deleteDependencyEdge = (args: { edge_id: string }) =>
+  mutate("dependency.delete", args);
 
 export const duplicateTaskFromItem = (item: ListItem) =>
   mutate("create_item", {

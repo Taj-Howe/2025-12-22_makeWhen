@@ -5,6 +5,13 @@ import blockersKindTextSql from "./migrations/0002_blockers_kind_text.sql?raw";
 import runningTimersSql from "./migrations/0003_running_timers.sql?raw";
 import sortOrderSql from "./migrations/0004_sort_order.sql?raw";
 import dueNullableSql from "./migrations/0005_due_at_nullable.sql?raw";
+import titleSearchSql from "./migrations/0006_title_search.sql?raw";
+import dependenciesTypeLagSql from "./migrations/0007_dependencies_type_lag.sql?raw";
+import {
+  computeSlackMinutes,
+  deriveEndAtFromDuration,
+  evaluateDependencyStatus,
+} from "./scheduleMath";
 import { computeRollupTotals } from "./rollup";
 
 const ctx: DedicatedWorkerGlobalScope = self as DedicatedWorkerGlobalScope;
@@ -65,6 +72,8 @@ const dbState: DbState = {
 
 let initPromise: Promise<void> | null = null;
 let dbHandle: any = null;
+let scheduledBlocksSchema: { hasDuration: boolean; hasEndAt: boolean } | null =
+  null;
 
 const migrations = [
   {
@@ -87,6 +96,14 @@ const migrations = [
     version: 5,
     sql: dueNullableSql,
   },
+  {
+    version: 6,
+    sql: titleSearchSql,
+  },
+  {
+    version: 7,
+    sql: dependenciesTypeLagSql,
+  },
 ];
 
 const ensureString = (value: unknown, name: string) => {
@@ -108,6 +125,44 @@ const ensureInteger = (value: unknown, name: string) => {
     throw new Error(`${name} must be an integer`);
   }
   return value;
+};
+
+const resolveDurationMinutes = (
+  startAt: number,
+  durationArg: unknown,
+  endAtArg: unknown
+) => {
+  if (durationArg !== undefined && durationArg !== null) {
+    return ensurePositiveInteger(durationArg, "duration_minutes");
+  }
+  if (endAtArg !== undefined && endAtArg !== null) {
+    const endAt = ensureInteger(endAtArg, "end_at");
+    const minutes = Math.ceil((endAt - startAt) / 60000);
+    if (!Number.isFinite(minutes) || minutes <= 0) {
+      throw new Error("end_at must be after start_at");
+    }
+    return minutes;
+  }
+  throw new Error("duration_minutes is required");
+};
+
+const ensureDependencyType = (value: unknown, name: string) => {
+  if (typeof value !== "string") {
+    throw new Error(`${name} must be a string`);
+  }
+  const normalized = value.trim().toUpperCase();
+  if (!["FS", "SS", "FF", "SF"].includes(normalized)) {
+    throw new Error(`${name} must be FS, SS, FF, or SF`);
+  }
+  return normalized;
+};
+
+const parseEdgeId = (edgeId: string) => {
+  const parts = edgeId.split("->");
+  if (parts.length !== 2 || !parts[0] || !parts[1]) {
+    throw new Error("edge_id must be in successor->predecessor format");
+  }
+  return { successorId: parts[0], predecessorId: parts[1] };
 };
 
 const minNullable = (a: number | null, b: number | null) => {
@@ -167,6 +222,9 @@ const ensureOptionalNumber = (value: unknown, name: string) => {
 
 const buildPlaceholders = (count: number) =>
   count > 0 ? Array.from({ length: count }, () => "?").join(", ") : "";
+
+const escapeLike = (value: string) =>
+  value.replace(/[\\%_]/g, (match) => `\\${match}`);
 
 const getScheduleSummaryMap = (db: any, ids: string[]) => {
   const map = new Map<
@@ -504,10 +562,10 @@ const exportData = (db: any) => {
   >;
 
   const dependencyRows = db.exec({
-    sql: "SELECT item_id, depends_on_id FROM dependencies;",
+    sql: "SELECT item_id, depends_on_id, type, lag_minutes FROM dependencies;",
     rowMode: "array",
     returnValue: "resultRows",
-  }) as Array<[string, string]>;
+  }) as Array<[string, string, string, number]>;
 
   const blockerRows = db.exec({
     sql: "SELECT blocker_id, item_id, kind, text, created_at, cleared_at FROM blockers;",
@@ -571,6 +629,8 @@ const exportData = (db: any) => {
     dependencies: dependencyRows.map((row) => ({
       item_id: row[0],
       depends_on_id: row[1],
+      type: row[2],
+      lag_minutes: row[3],
     })),
     blockers: blockerRows.map((row) => ({
       blocker_id: row[0],
@@ -764,6 +824,49 @@ const runMigrations = (db: any) => {
   return currentVersion;
 };
 
+const loadScheduledBlocksSchema = (db: any) => {
+  const rows = db.exec({
+    sql: "PRAGMA table_info(scheduled_blocks);",
+    rowMode: "array",
+    returnValue: "resultRows",
+  }) as Array<[number, string, string, number, unknown, number]>;
+  const names = new Set(rows.map((row) => row[1]));
+  scheduledBlocksSchema = {
+    hasDuration: names.has("duration_minutes"),
+    hasEndAt: names.has("end_at"),
+  };
+  return scheduledBlocksSchema;
+};
+
+const ensureScheduledBlocksDurationColumn = (db: any) => {
+  const schema = loadScheduledBlocksSchema(db);
+  if (!schema.hasDuration && schema.hasEndAt) {
+    db.exec(
+      "ALTER TABLE scheduled_blocks ADD COLUMN duration_minutes INTEGER NOT NULL DEFAULT 0;"
+    );
+    db.exec(
+      `UPDATE scheduled_blocks
+        SET duration_minutes = CASE
+          WHEN end_at IS NOT NULL AND end_at > start_at THEN CAST((end_at - start_at + 59999) / 60000 AS INTEGER)
+          ELSE 0
+        END;`
+    );
+    scheduledBlocksSchema = { hasDuration: true, hasEndAt: true };
+    return scheduledBlocksSchema;
+  }
+  if (schema.hasDuration && schema.hasEndAt) {
+    db.exec(
+      `UPDATE scheduled_blocks
+        SET duration_minutes = CASE
+          WHEN end_at IS NOT NULL AND end_at > start_at THEN CAST((end_at - start_at + 59999) / 60000 AS INTEGER)
+          ELSE duration_minutes
+        END
+        WHERE duration_minutes IS NULL OR duration_minutes <= 0;`
+    );
+  }
+  return scheduledBlocksSchema;
+};
+
 const initDb = async () => {
   if (initPromise) {
     return initPromise;
@@ -781,6 +884,7 @@ const initDb = async () => {
       const db = new poolUtil.OpfsSAHPoolDb(DB_FILENAME);
       dbHandle = db;
       const schemaVersion = runMigrations(db);
+      ensureScheduledBlocksDurationColumn(db);
 
       dbState.info = {
         ok: true,
@@ -997,12 +1101,112 @@ const handleMutate = (envelope: MutateEnvelope): MutateResult => {
           };
           break;
         }
+        case "scheduled_block.create": {
+          const itemId = ensureString(args.item_id, "item_id");
+          const startAt = ensureInteger(args.start_at, "start_at");
+          const durationMinutes = resolveDurationMinutes(
+            startAt,
+            args.duration_minutes,
+            args.end_at
+          );
+          const blockId = crypto.randomUUID();
+          const locked = typeof args.locked === "number" ? args.locked : 0;
+          const source = typeof args.source === "string" ? args.source : "manual";
+          dbHandle.exec(
+            "INSERT INTO scheduled_blocks (block_id, item_id, start_at, duration_minutes, locked, source) VALUES (?, ?, ?, ?, ?, ?);",
+            {
+              bind: [blockId, itemId, startAt, durationMinutes, locked, source],
+            }
+          );
+          result = {
+            ok: true,
+            result: { block_id: blockId },
+            invalidate: ["blocks", `item:${itemId}`],
+          };
+          break;
+        }
+        case "scheduled_block.update": {
+          const blockId = ensureString(args.block_id, "block_id");
+          const currentRows = dbHandle.exec({
+            sql: "SELECT item_id, start_at, duration_minutes FROM scheduled_blocks WHERE block_id = ?;",
+            rowMode: "array",
+            returnValue: "resultRows",
+            bind: [blockId],
+          }) as Array<[string, number, number]>;
+          if (currentRows.length === 0) {
+            result = { ok: false, error: "scheduled block not found" };
+            break;
+          }
+          const current = currentRows[0];
+          const nextStartAt =
+            args.start_at === undefined || args.start_at === null
+              ? current[1]
+              : ensureInteger(args.start_at, "start_at");
+          let nextDuration = current[2];
+          if (args.duration_minutes !== undefined && args.duration_minutes !== null) {
+            nextDuration = ensurePositiveInteger(
+              args.duration_minutes,
+              "duration_minutes"
+            );
+          } else if (args.end_at !== undefined && args.end_at !== null) {
+            nextDuration = resolveDurationMinutes(
+              nextStartAt,
+              undefined,
+              args.end_at
+            );
+          } else if (
+            args.start_at !== undefined &&
+            args.start_at !== null &&
+            args.end_at !== undefined &&
+            args.end_at !== null
+          ) {
+            nextDuration = resolveDurationMinutes(
+              nextStartAt,
+              undefined,
+              args.end_at
+            );
+          }
+          dbHandle.exec(
+            "UPDATE scheduled_blocks SET start_at = ?, duration_minutes = ? WHERE block_id = ?;",
+            { bind: [nextStartAt, nextDuration, blockId] }
+          );
+          result = {
+            ok: true,
+            result: { block_id: blockId, item_id: current[0] },
+            invalidate: ["blocks", `item:${current[0]}`],
+          };
+          break;
+        }
+        case "scheduled_block.delete": {
+          const blockId = ensureString(args.block_id, "block_id");
+          const rows = dbHandle.exec({
+            sql: "SELECT item_id FROM scheduled_blocks WHERE block_id = ?;",
+            rowMode: "array",
+            returnValue: "resultRows",
+            bind: [blockId],
+          }) as Array<[string]>;
+          const itemId = rows[0]?.[0] ?? null;
+          if (!itemId) {
+            result = { ok: false, error: "scheduled block not found" };
+            break;
+          }
+          dbHandle.exec("DELETE FROM scheduled_blocks WHERE block_id = ?;", {
+            bind: [blockId],
+          });
+          result = {
+            ok: true,
+            result: { block_id: blockId },
+            invalidate: ["blocks", `item:${itemId}`],
+          };
+          break;
+        }
         case "create_block": {
           const itemId = ensureString(args.item_id, "item_id");
           const startAt = ensureInteger(args.start_at, "start_at");
-          const durationMinutes = ensurePositiveInteger(
+          const durationMinutes = resolveDurationMinutes(
+            startAt,
             args.duration_minutes,
-            "duration_minutes"
+            args.end_at
           );
           const blockId = crypto.randomUUID();
           const locked = typeof args.locked === "number" ? args.locked : 0;
@@ -1440,12 +1644,25 @@ const handleMutate = (envelope: MutateEnvelope): MutateResult => {
                 throw new Error(`dependencies[${index}] must be an object`);
               }
               const dep = value as Record<string, unknown>;
+              const typeRaw =
+                dep.type === undefined
+                  ? "FS"
+                  : ensureDependencyType(dep.type, `dependencies[${index}].type`);
+              const lagMinutes =
+                dep.lag_minutes === undefined
+                  ? 0
+                  : ensureNonNegativeInteger(
+                      dep.lag_minutes,
+                      `dependencies[${index}].lag_minutes`
+                    );
               return {
                 item_id: ensureString(dep.item_id, `dependencies[${index}].item_id`),
                 depends_on_id: ensureString(
                   dep.depends_on_id,
                   `dependencies[${index}].depends_on_id`
                 ),
+                type: typeRaw,
+                lag_minutes: lagMinutes,
               };
             }
           );
@@ -1668,8 +1885,10 @@ const handleMutate = (envelope: MutateEnvelope): MutateResult => {
 
           for (const dep of dependencies) {
             dbHandle.exec(
-              "INSERT INTO dependencies (item_id, depends_on_id) VALUES (?, ?);",
-              { bind: [dep.item_id, dep.depends_on_id] }
+              "INSERT INTO dependencies (item_id, depends_on_id, type, lag_minutes) VALUES (?, ?, ?, ?);",
+              {
+                bind: [dep.item_id, dep.depends_on_id, dep.type, dep.lag_minutes],
+              }
             );
           }
 
@@ -1774,6 +1993,153 @@ const handleMutate = (envelope: MutateEnvelope): MutateResult => {
               "time_entries",
               "running_timers",
               "settings",
+            ],
+          };
+          break;
+        }
+        case "dependency.create": {
+          const predecessorId = ensureString(
+            args.predecessor_id,
+            "predecessor_id"
+          );
+          const successorId = ensureString(
+            args.successor_id,
+            "successor_id"
+          );
+          if (predecessorId === successorId) {
+            result = { ok: false, error: "cannot depend on itself" };
+            break;
+          }
+          if (hasDependencyCycle(dbHandle, successorId, predecessorId)) {
+            result = { ok: false, error: "dependency cycle detected" };
+            break;
+          }
+          const type =
+            args.type === undefined
+              ? "FS"
+              : ensureDependencyType(args.type, "type");
+          const lagMinutes =
+            args.lag_minutes === undefined
+              ? 0
+              : ensureNonNegativeInteger(args.lag_minutes, "lag_minutes");
+          const existing = dbHandle.exec({
+            sql: "SELECT 1 FROM dependencies WHERE item_id = ? AND depends_on_id = ? LIMIT 1;",
+            rowMode: "array",
+            returnValue: "resultRows",
+            bind: [successorId, predecessorId],
+          }) as Array<[number]>;
+          if (existing.length > 0) {
+            result = { ok: false, error: "dependency already exists" };
+            break;
+          }
+          dbHandle.exec(
+            "INSERT INTO dependencies (item_id, depends_on_id, type, lag_minutes) VALUES (?, ?, ?, ?);",
+            {
+              bind: [successorId, predecessorId, type, lagMinutes],
+            }
+          );
+          result = {
+            ok: true,
+            result: {
+              edge_id: `${successorId}->${predecessorId}`,
+              predecessor_id: predecessorId,
+              successor_id: successorId,
+              type,
+              lag_minutes: lagMinutes,
+            },
+            invalidate: [
+              "items",
+              `item:${successorId}`,
+              `item:${predecessorId}`,
+              "dependencies",
+            ],
+          };
+          break;
+        }
+        case "dependency.update": {
+          const edgeId = ensureString(args.edge_id, "edge_id");
+          const { successorId, predecessorId } = parseEdgeId(edgeId);
+          const rows = dbHandle.exec({
+            sql: "SELECT type, lag_minutes FROM dependencies WHERE item_id = ? AND depends_on_id = ?;",
+            rowMode: "array",
+            returnValue: "resultRows",
+            bind: [successorId, predecessorId],
+          }) as Array<[string, number]>;
+          if (rows.length === 0) {
+            result = { ok: false, error: "dependency not found" };
+            break;
+          }
+          const nextType =
+            args.type === undefined
+              ? null
+              : ensureDependencyType(args.type, "type");
+          const nextLag =
+            args.lag_minutes === undefined
+              ? null
+              : ensureNonNegativeInteger(args.lag_minutes, "lag_minutes");
+          if (nextType === null && nextLag === null) {
+            result = { ok: false, error: "no dependency updates provided" };
+            break;
+          }
+          const currentType = rows[0][0];
+          const currentLag = Number(rows[0][1]);
+          const updatedType = nextType ?? currentType;
+          const updatedLag = nextLag ?? currentLag;
+          dbHandle.exec(
+            "UPDATE dependencies SET type = ?, lag_minutes = ? WHERE item_id = ? AND depends_on_id = ?;",
+            {
+              bind: [updatedType, updatedLag, successorId, predecessorId],
+            }
+          );
+          result = {
+            ok: true,
+            result: {
+              edge_id: edgeId,
+              predecessor_id: predecessorId,
+              successor_id: successorId,
+              type: updatedType,
+              lag_minutes: updatedLag,
+            },
+            invalidate: [
+              "items",
+              `item:${successorId}`,
+              `item:${predecessorId}`,
+              "dependencies",
+            ],
+          };
+          break;
+        }
+        case "dependency.delete": {
+          const edgeId = ensureString(args.edge_id, "edge_id");
+          const { successorId, predecessorId } = parseEdgeId(edgeId);
+          const rows = dbHandle.exec({
+            sql: "SELECT 1 FROM dependencies WHERE item_id = ? AND depends_on_id = ? LIMIT 1;",
+            rowMode: "array",
+            returnValue: "resultRows",
+            bind: [successorId, predecessorId],
+          }) as Array<[number]>;
+          if (rows.length === 0) {
+            result = { ok: false, error: "dependency not found" };
+            break;
+          }
+          dbHandle.exec(
+            "DELETE FROM dependencies WHERE item_id = ? AND depends_on_id = ?;",
+            {
+              bind: [successorId, predecessorId],
+            }
+          );
+          result = {
+            ok: true,
+            result: {
+              edge_id: edgeId,
+              predecessor_id: predecessorId,
+              successor_id: successorId,
+            },
+            invalidate: [
+              "items",
+              `item:${successorId}`,
+              `item:${predecessorId}`,
+              "dependencies",
             ],
           };
           break;
@@ -2849,6 +3215,572 @@ const handleRequest = async (message: RpcRequest): Promise<RpcResponse> => {
             ok: true,
             result: {
               items: sliced,
+            },
+          };
+          break;
+        }
+        case "list_view_complete": {
+          const scopeProjectId =
+            typeof args.scopeProjectId === "string" ? args.scopeProjectId : null;
+          const scopeParentId =
+            typeof args.scopeParentId === "string" ? args.scopeParentId : null;
+          const includeUngrouped =
+            typeof args.includeUngrouped === "boolean"
+              ? args.includeUngrouped
+              : false;
+          const includeCompleted =
+            typeof args.includeCompleted === "boolean"
+              ? args.includeCompleted
+              : true;
+
+          const fetchTree = (rootId: string) =>
+            dbHandle.exec({
+              sql: `WITH RECURSIVE tree AS (
+                SELECT * FROM items WHERE id = ?
+                UNION ALL
+                SELECT i.* FROM items i JOIN tree t ON i.parent_id = t.id
+              )
+              SELECT id, type, title, parent_id, status, priority, due_at,
+                estimate_mode, estimate_minutes, notes, created_at, updated_at, sort_order
+              FROM tree
+              ORDER BY sort_order ASC,
+                CASE WHEN due_at IS NULL THEN 1 ELSE 0 END,
+                due_at ASC,
+                title ASC;`,
+              rowMode: "array",
+              returnValue: "resultRows",
+              bind: [rootId],
+            }) as Array<
+              [
+                string,
+                string,
+                string,
+                string | null,
+                string,
+                number,
+                number | null,
+                string,
+                number,
+                string | null,
+                number,
+                number,
+                number
+              ]
+            >;
+
+          const fetchUngrouped = () =>
+            dbHandle.exec({
+              sql: `WITH RECURSIVE tree AS (
+                SELECT * FROM items WHERE parent_id IS NULL AND type = 'task'
+                UNION ALL
+                SELECT i.* FROM items i JOIN tree t ON i.parent_id = t.id
+              )
+              SELECT id, type, title, parent_id, status, priority, due_at,
+                estimate_mode, estimate_minutes, notes, created_at, updated_at, sort_order
+              FROM tree
+              ORDER BY sort_order ASC,
+                CASE WHEN due_at IS NULL THEN 1 ELSE 0 END,
+                due_at ASC,
+                title ASC;`,
+              rowMode: "array",
+              returnValue: "resultRows",
+            }) as Array<
+              [
+                string,
+                string,
+                string,
+                string | null,
+                string,
+                number,
+                number | null,
+                string,
+                number,
+                string | null,
+                number,
+                number,
+                number
+              ]
+            >;
+
+          const fetchAll = () =>
+            dbHandle.exec({
+              sql: `SELECT id, type, title, parent_id, status, priority, due_at,
+                estimate_mode, estimate_minutes, notes, created_at, updated_at, sort_order
+              FROM items
+              ORDER BY sort_order ASC,
+                CASE WHEN due_at IS NULL THEN 1 ELSE 0 END,
+                due_at ASC,
+                title ASC;`,
+              rowMode: "array",
+              returnValue: "resultRows",
+            }) as Array<
+              [
+                string,
+                string,
+                string,
+                string | null,
+                string,
+                number,
+                number | null,
+                string,
+                number,
+                string | null,
+                number,
+                number,
+                number
+              ]
+            >;
+
+          let rows: Array<
+            [
+              string,
+              string,
+              string,
+              string | null,
+              string,
+              number,
+              number | null,
+              string,
+              number,
+              string | null,
+              number,
+              number,
+              number
+            ]
+          > = [];
+
+          if (scopeProjectId === UNGROUPED_PROJECT_ID) {
+            rows = fetchUngrouped();
+          } else if (scopeParentId) {
+            rows = fetchTree(scopeParentId);
+          } else if (scopeProjectId) {
+            rows = fetchTree(scopeProjectId);
+          } else if (includeUngrouped) {
+            rows = fetchUngrouped();
+          } else {
+            rows = fetchAll();
+          }
+
+          if (
+            includeUngrouped &&
+            scopeProjectId &&
+            scopeProjectId !== UNGROUPED_PROJECT_ID
+          ) {
+            const extraRows = fetchUngrouped();
+            const rowMap = new Map(rows.map((row) => [row[0], row]));
+            for (const row of extraRows) {
+              if (!rowMap.has(row[0])) {
+                rows.push(row);
+              }
+            }
+          }
+
+          if (!includeCompleted) {
+            rows = rows.filter((row) => row[4] !== "done" && row[4] !== "canceled");
+          }
+
+          const baseIds = rows.map((row) => row[0]);
+          const uniqueBaseIds = Array.from(new Set(baseIds));
+
+          if (uniqueBaseIds.length === 0) {
+            result = { ok: true, result: [] };
+            break;
+          }
+
+          const scheduleRows = dbHandle.exec({
+            sql: `SELECT block_id, item_id, start_at, duration_minutes
+              FROM scheduled_blocks
+              WHERE item_id IN (${buildPlaceholders(uniqueBaseIds.length)});`,
+            rowMode: "array",
+            returnValue: "resultRows",
+            bind: uniqueBaseIds,
+          }) as Array<[string, string, number, number]>;
+
+          const blocksMap = new Map<
+            string,
+            Array<{
+              block_id: string;
+              item_id: string;
+              start_at: number;
+              duration_minutes: number;
+              end_at_derived: number;
+            }>
+          >();
+          const scheduleSummaryMap = new Map<
+            string,
+            { start: number | null; end: number | null }
+          >();
+          for (const row of scheduleRows) {
+            const endAt =
+              deriveEndAtFromDuration(row[2], row[3]) ?? row[2];
+            const list = blocksMap.get(row[1]) ?? [];
+            list.push({
+              block_id: row[0],
+              item_id: row[1],
+              start_at: row[2],
+              duration_minutes: row[3],
+              end_at_derived: endAt,
+            });
+            blocksMap.set(row[1], list);
+            const summary = scheduleSummaryMap.get(row[1]) ?? {
+              start: null,
+              end: null,
+            };
+            summary.start = minNullable(summary.start, row[2]);
+            summary.end = maxNullable(summary.end, endAt);
+            scheduleSummaryMap.set(row[1], summary);
+          }
+
+          const timeRows = dbHandle.exec({
+            sql: `SELECT item_id, SUM(duration_minutes) FROM time_entries
+              WHERE item_id IN (${buildPlaceholders(uniqueBaseIds.length)})
+              GROUP BY item_id;`,
+            rowMode: "array",
+            returnValue: "resultRows",
+            bind: uniqueBaseIds,
+          }) as Array<[string, number]>;
+          const timeMap = new Map<string, number>();
+          for (const row of timeRows) {
+            timeMap.set(row[0], Number(row[1]));
+          }
+
+          const depRows = dbHandle.exec({
+            sql: `SELECT item_id, depends_on_id, type, lag_minutes FROM dependencies
+              WHERE item_id IN (${buildPlaceholders(uniqueBaseIds.length)})
+                OR depends_on_id IN (${buildPlaceholders(uniqueBaseIds.length)});`,
+            rowMode: "array",
+            returnValue: "resultRows",
+            bind: [...uniqueBaseIds, ...uniqueBaseIds],
+          }) as Array<[string, string, string, number]>;
+
+          const allEdgeIds = new Set<string>();
+          for (const row of depRows) {
+            allEdgeIds.add(row[0]);
+            allEdgeIds.add(row[1]);
+          }
+          const edgeIds = Array.from(allEdgeIds);
+
+          const metaMap = new Map<
+            string,
+            {
+              id: string;
+              title: string;
+              type: string;
+              status: string;
+              parent_id: string | null;
+              due_at: number | null;
+              updated_at: number;
+            }
+          >();
+          for (const row of rows) {
+            metaMap.set(row[0], {
+              id: row[0],
+              title: row[2],
+              type: row[1],
+              status: row[4],
+              parent_id: row[3],
+              due_at: row[6],
+              updated_at: row[11],
+            });
+          }
+
+          const missingIds = edgeIds.filter((id) => !metaMap.has(id));
+          if (missingIds.length > 0) {
+            const metaRows = dbHandle.exec({
+              sql: `SELECT id, title, type, status, parent_id, due_at, updated_at
+                FROM items WHERE id IN (${buildPlaceholders(missingIds.length)});`,
+              rowMode: "array",
+              returnValue: "resultRows",
+              bind: missingIds,
+            }) as Array<
+              [string, string, string, string, string | null, number | null, number]
+            >;
+            for (const row of metaRows) {
+              metaMap.set(row[0], {
+                id: row[0],
+                title: row[1],
+                type: row[2],
+                status: row[3],
+                parent_id: row[4],
+                due_at: row[5],
+                updated_at: row[6],
+              });
+            }
+          }
+
+          if (edgeIds.length > 0) {
+            const edgeScheduleRows = dbHandle.exec({
+              sql: `SELECT item_id, MIN(start_at), MAX(start_at + duration_minutes * 60000)
+                FROM scheduled_blocks
+                WHERE item_id IN (${buildPlaceholders(edgeIds.length)})
+                GROUP BY item_id;`,
+              rowMode: "array",
+              returnValue: "resultRows",
+              bind: edgeIds,
+            }) as Array<[string, number | null, number | null]>;
+            for (const row of edgeScheduleRows) {
+              scheduleSummaryMap.set(row[0], {
+                start: row[1] !== null ? Number(row[1]) : null,
+                end: row[2] !== null ? Number(row[2]) : null,
+              });
+            }
+          }
+
+          const depsInMap = new Map<
+            string,
+            Array<{ edge_id: string; predecessor_id: string; type: string; lag_minutes: number }>
+          >();
+          const depsOutMap = new Map<
+            string,
+            Array<{ edge_id: string; successor_id: string; type: string; lag_minutes: number }>
+          >();
+          const baseSet = new Set(uniqueBaseIds);
+          for (const row of depRows) {
+            const edgeId = `${row[0]}->${row[1]}`;
+            const type = row[2] ? String(row[2]).toUpperCase() : "FS";
+            const lag = Number.isFinite(row[3]) ? Number(row[3]) : 0;
+            if (baseSet.has(row[0])) {
+              const list = depsInMap.get(row[0]) ?? [];
+              list.push({
+                edge_id: edgeId,
+                predecessor_id: row[1],
+                type,
+                lag_minutes: lag,
+              });
+              depsInMap.set(row[0], list);
+            }
+            if (baseSet.has(row[1])) {
+              const list = depsOutMap.get(row[1]) ?? [];
+              list.push({
+                edge_id: edgeId,
+                successor_id: row[0],
+                type,
+                lag_minutes: lag,
+              });
+              depsOutMap.set(row[1], list);
+            }
+          }
+
+          const items = rows.map((row) => {
+            const id = row[0];
+            const blocks = blocksMap.get(id) ?? [];
+            const scheduleSummary = scheduleSummaryMap.get(id) ?? {
+              start: null,
+              end: null,
+            };
+            const slackMinutes = computeSlackMinutes(
+              row[6],
+              scheduleSummary.end
+            );
+            const depsIn = depsInMap.get(id) ?? [];
+            const depsOut = depsOutMap.get(id) ?? [];
+            const blockedBy = depsIn.map((dep) => {
+              const meta = metaMap.get(dep.predecessor_id);
+              const predecessorSummary = scheduleSummaryMap.get(
+                dep.predecessor_id
+              );
+              const successorSummary = scheduleSummary;
+              return {
+                item_id: dep.predecessor_id,
+                title: meta?.title ?? dep.predecessor_id,
+                type: dep.type,
+                lag_minutes: dep.lag_minutes,
+                status: evaluateDependencyStatus({
+                  predecessorStart: predecessorSummary?.start ?? null,
+                  predecessorEnd: predecessorSummary?.end ?? null,
+                  successorStart: successorSummary.start,
+                  successorEnd: successorSummary.end,
+                  type: dep.type,
+                  lagMinutes: dep.lag_minutes,
+                }),
+              };
+            });
+            const blocking = depsOut.map((dep) => {
+              const meta = metaMap.get(dep.successor_id);
+              const successorSummary = scheduleSummaryMap.get(dep.successor_id);
+              const predecessorSummary = scheduleSummary;
+              return {
+                item_id: dep.successor_id,
+                title: meta?.title ?? dep.successor_id,
+                type: dep.type,
+                lag_minutes: dep.lag_minutes,
+                status: evaluateDependencyStatus({
+                  predecessorStart: predecessorSummary.start,
+                  predecessorEnd: predecessorSummary.end,
+                  successorStart: successorSummary?.start ?? null,
+                  successorEnd: successorSummary?.end ?? null,
+                  type: dep.type,
+                  lagMinutes: dep.lag_minutes,
+                }),
+              };
+            });
+            return {
+              id,
+              title: row[2],
+              item_type: row[1],
+              parent_id: row[3],
+              status: row[4],
+              completed_on: null,
+              due_at: row[6],
+              estimate_mode: row[7],
+              estimate_minutes: row[8],
+              actual_minutes: timeMap.get(id) ?? null,
+              scheduled_blocks: blocks,
+              dependencies_out: depsOut,
+              dependencies_in: depsIn,
+              blocked_by: blockedBy,
+              blocking,
+              slack_minutes: slackMinutes,
+            };
+          });
+
+          result = { ok: true, result: items };
+          break;
+        }
+        case "searchItems": {
+          const rawQuery = typeof args.q === "string" ? args.q : "";
+          const normalized = rawQuery.trim().toLowerCase();
+          if (!normalized) {
+            result = { ok: true, result: { items: [] } };
+            break;
+          }
+          const requestedLimit =
+            typeof args.limit === "number" ? Math.floor(args.limit) : 12;
+          const limit = Math.min(Math.max(requestedLimit, 1), 50);
+          const fetchLimit = Math.min(limit * 4, 200);
+          const scopeId = typeof args.scopeId === "string" ? args.scopeId : null;
+          const escaped = escapeLike(normalized);
+          const likePattern = `%${escaped}%`;
+          const prefixPattern = `${escaped}%`;
+          const prefixRows = dbHandle.exec({
+            sql: `SELECT id, title, type, parent_id, status, due_at, updated_at
+              FROM items
+              WHERE type != 'project'
+                AND title LIKE ? ESCAPE '\\' COLLATE NOCASE
+              ORDER BY LENGTH(title) ASC, updated_at DESC
+              LIMIT ?;`,
+            rowMode: "array",
+            returnValue: "resultRows",
+            bind: [prefixPattern, fetchLimit],
+          }) as Array<
+            [
+              string,
+              string,
+              string,
+              string | null,
+              string,
+              number | null,
+              number
+            ]
+          >;
+
+          let rows = prefixRows;
+          if (rows.length < fetchLimit) {
+            const remaining = fetchLimit - rows.length;
+            const excludeIds = rows.map((row) => row[0]);
+            const excludeClause =
+              excludeIds.length > 0
+                ? `AND id NOT IN (${buildPlaceholders(excludeIds.length)})`
+                : "";
+            const substringRows = dbHandle.exec({
+              sql: `SELECT id, title, type, parent_id, status, due_at, updated_at
+                FROM items
+                WHERE type != 'project'
+                  AND title LIKE ? ESCAPE '\\' COLLATE NOCASE
+                  ${excludeClause}
+                ORDER BY LENGTH(title) ASC, updated_at DESC
+                LIMIT ?;`,
+              rowMode: "array",
+              returnValue: "resultRows",
+              bind:
+                excludeIds.length > 0
+                  ? [likePattern, ...excludeIds, remaining]
+                  : [likePattern, remaining],
+            }) as Array<
+              [
+                string,
+                string,
+                string,
+                string | null,
+                string,
+                number | null,
+                number
+              ]
+            >;
+            rows = rows.concat(substringRows);
+          }
+
+          if (rows.length === 0) {
+            result = { ok: true, result: { items: [] } };
+            break;
+          }
+
+          const hierarchyRows = dbHandle.exec({
+            sql: "SELECT id, type, parent_id FROM items;",
+            rowMode: "array",
+            returnValue: "resultRows",
+          }) as Array<[string, string, string | null]>;
+          const { projectMap } = buildHierarchyMaps(hierarchyRows, null);
+          let scopeProjectId: string | null = null;
+          let scopeUngrouped = false;
+          if (scopeId) {
+            if (scopeId === UNGROUPED_PROJECT_ID) {
+              scopeUngrouped = true;
+            } else if (projectMap.has(scopeId)) {
+              scopeProjectId = projectMap.get(scopeId) ?? null;
+            }
+          }
+
+          const mapped = rows.map((row) => {
+            const projectId = projectMap.get(row[0]) ?? row[0];
+            const sameProject = scopeUngrouped
+              ? row[3] === null
+              : scopeProjectId
+                ? projectId === scopeProjectId
+                : false;
+            const titleLower = row[1].toLowerCase();
+            const matchRank = titleLower.startsWith(normalized) ? 0 : 1;
+            return {
+              id: row[0],
+              title: row[1],
+              item_type: row[2],
+              parent_id: row[3],
+              due_at: row[5],
+              completed_at: row[4] === "done" ? row[6] : null,
+              _matchRank: matchRank,
+              _sameProject: sameProject,
+              _titleLength: row[1].length,
+              _updatedAt: row[6],
+            };
+          });
+
+          mapped.sort((a, b) => {
+            if (a._matchRank !== b._matchRank) {
+              return a._matchRank - b._matchRank;
+            }
+            if ((scopeProjectId || scopeUngrouped) && a._sameProject !== b._sameProject) {
+              return a._sameProject ? -1 : 1;
+            }
+            if (a._titleLength !== b._titleLength) {
+              return a._titleLength - b._titleLength;
+            }
+            if (a._updatedAt !== b._updatedAt) {
+              return b._updatedAt - a._updatedAt;
+            }
+            return a.title.localeCompare(b.title);
+          });
+
+          result = {
+            ok: true,
+            result: {
+              items: mapped.slice(0, limit).map((item) => ({
+                id: item.id,
+                title: item.title,
+                item_type: item.item_type,
+                parent_id: item.parent_id,
+                due_at: item.due_at,
+                completed_at: item.completed_at,
+              })),
             },
           };
           break;

@@ -11,7 +11,12 @@ import {
 import * as ContextMenu from "@radix-ui/react-context-menu";
 import { query, mutate } from "../rpc/clientSingleton";
 import { UNGROUPED_PROJECT_ID } from "./constants";
-import type { ListItem } from "../domain/listTypes";
+import type {
+  DependencyProjectionLite,
+  ItemGanttModel,
+  ListItem,
+  ScheduledBlockLite,
+} from "../domain/listTypes";
 import { buildListViewModel } from "../domain/listViewModel";
 import {
   formatDate,
@@ -22,23 +27,35 @@ import {
   truncate,
 } from "../domain/formatters";
 import {
-  addDependency,
-  createBlock,
+  createDependencyEdge,
   createItem,
   deleteItem,
+  deleteDependencyEdge,
   duplicateTaskFromItem,
-  removeDependency,
   setItemTags,
   setStatus,
+  updateDependencyEdge,
   updateItemFields,
 } from "./itemActions";
+import { ItemAutocomplete } from "./ItemAutocomplete";
+
+type ListViewItem = ListItem & {
+  completed_on: number | null;
+  actual_minutes: number | null;
+  scheduled_blocks: ScheduledBlockLite[];
+  dependencies_out: ItemGanttModel["dependencies_out"];
+  dependencies_in: ItemGanttModel["dependencies_in"];
+  blocked_by: DependencyProjectionLite[];
+  blocking: DependencyProjectionLite[];
+  slack_minutes: number | null;
+};
 
 type Column = {
   key: string;
   label: string;
   minWidth: number;
   render: (
-    item: ListItem,
+    item: ListViewItem,
     indent: number,
     dragHandle: ReactNode | null,
     actions?: ReactNode
@@ -56,7 +73,7 @@ const ListView: FC<ListViewProps> = ({
   refreshToken,
   onRefresh,
 }) => {
-  const [items, setItems] = useState<ListItem[]>([]);
+  const [items, setItems] = useState<ListViewItem[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [dragging, setDragging] = useState<{
@@ -78,12 +95,13 @@ const ListView: FC<ListViewProps> = ({
     field: string;
   } | null>(null);
   const [editValue, setEditValue] = useState("");
+  const [editingBlockId, setEditingBlockId] = useState<string | null>(null);
   const [milestoneDrop, setMilestoneDrop] = useState<{
     milestoneId: string;
     position: "top" | "bottom";
   } | null>(null);
 
-  const getLastVisibleId = (groupItems: ListItem[]) => {
+  const getLastVisibleId = (groupItems: ListViewItem[]) => {
     if (groupItems.length === 0) {
       return undefined;
     }
@@ -103,14 +121,38 @@ const ListView: FC<ListViewProps> = ({
     }
     setLoading(true);
     setError(null);
-    const data = await query<{ items: ListItem[] }>("listItems", {
-      projectId: selectedProjectId,
-      includeDone: true,
-      includeCanceled: true,
-      orderBy: "due_at",
-      orderDir: "asc",
+    const [listData, completeData] = await Promise.all([
+      query<{ items: ListItem[] }>("listItems", {
+        projectId: selectedProjectId,
+        includeDone: true,
+        includeCanceled: true,
+        orderBy: "due_at",
+        orderDir: "asc",
+      }),
+      query<ItemGanttModel[]>("list_view_complete", {
+        scopeProjectId: selectedProjectId,
+        includeUngrouped: false,
+        includeCompleted: true,
+      }),
+    ]);
+    const completeMap = new Map(
+      completeData.map((item) => [item.id, item])
+    );
+    const merged = listData.items.map((item) => {
+      const extra = completeMap.get(item.id);
+      return {
+        ...item,
+        completed_on: extra?.completed_on ?? null,
+        actual_minutes: extra?.actual_minutes ?? null,
+        scheduled_blocks: extra?.scheduled_blocks ?? [],
+        dependencies_out: extra?.dependencies_out ?? [],
+        dependencies_in: extra?.dependencies_in ?? [],
+        blocked_by: extra?.blocked_by ?? [],
+        blocking: extra?.blocking ?? [],
+        slack_minutes: extra?.slack_minutes ?? null,
+      };
     });
-    setItems(data.items);
+    setItems(merged);
     setLoading(false);
   }, [selectedProjectId]);
 
@@ -163,7 +205,7 @@ const ListView: FC<ListViewProps> = ({
   } = viewModel;
 
   const handleToggleTaskDone = useCallback(
-    async (item: ListItem, checked: boolean) => {
+    async (item: ListViewItem, checked: boolean) => {
       setError(null);
       try {
         const nextStatus = checked ? "done" : "ready";
@@ -214,6 +256,93 @@ const ListView: FC<ListViewProps> = ({
     [getAllTasksUnderMilestone, itemById, parentTypeMap]
   );
 
+  const formatSlackMinutes = (value: number | null) => {
+    if (value === null || !Number.isFinite(value)) {
+      return "";
+    }
+    const rounded = Math.round(value);
+    const abs = Math.abs(rounded);
+    const hours = Math.floor(abs / 60);
+    const minutes = abs % 60;
+    const parts = [];
+    if (hours > 0) {
+      parts.push(`${hours}h`);
+    }
+    parts.push(`${minutes}m`);
+    return `${rounded >= 0 ? "+" : "-"}${parts.join(" ")}`;
+  };
+
+  const formatBlocksSummary = (blocks: ScheduledBlockLite[]) => {
+    if (!blocks.length) {
+      return "—";
+    }
+    const start = Math.min(...blocks.map((block) => block.start_at));
+    const end = Math.max(...blocks.map((block) => block.end_at_derived));
+    const preview = blocks
+      .slice()
+      .sort((a, b) => a.start_at - b.start_at)
+      .slice(0, 3)
+      .map(
+        (block) =>
+          `${formatDate(block.start_at)} (${formatEstimateMinutes(
+            block.duration_minutes
+          )})`
+      )
+      .join(", ");
+    const more = blocks.length > 3 ? ", ..." : "";
+    return `${blocks.length} | ${formatDate(start)} -> ${formatDate(
+      end
+    )}${preview ? ` | ${preview}${more}` : ""}`;
+  };
+
+  const formatDependencyList = (deps: DependencyProjectionLite[]) => {
+    if (!deps.length) {
+      return "—";
+    }
+    return deps
+      .map((dep) => {
+        const lag = dep.lag_minutes ? `+${dep.lag_minutes}m` : "";
+        return `${dep.title} [${dep.type}${lag} ${dep.status}]`;
+      })
+      .join("; ");
+  };
+
+  const formatDependencySummary = (item: ListViewItem) => {
+    const incoming = item.dependencies_in ?? [];
+    const outgoing = item.dependencies_out ?? [];
+    if (incoming.length === 0 && outgoing.length === 0) {
+      return "—";
+    }
+    const blockedByMap = new Map(
+      item.blocked_by.map((dep) => [dep.item_id, dep])
+    );
+    const blockingMap = new Map(
+      item.blocking.map((dep) => [dep.item_id, dep])
+    );
+    const parts: string[] = [];
+    for (const dep of incoming) {
+      const predecessorId = dep.predecessor_id ?? "";
+      const title = itemById.get(predecessorId)?.title ?? predecessorId;
+      const lag =
+        dep.lag_minutes && dep.lag_minutes > 0
+          ? `+${dep.lag_minutes}m`
+          : "0m";
+      const status = blockedByMap.get(predecessorId)?.status ?? "unknown";
+      parts.push(`in:${title} (${dep.type} ${lag}, ${status})`);
+    }
+    for (const dep of outgoing) {
+      const successorId = dep.successor_id ?? "";
+      const title = itemById.get(successorId)?.title ?? successorId;
+      const lag =
+        dep.lag_minutes && dep.lag_minutes > 0
+          ? `+${dep.lag_minutes}m`
+          : "0m";
+      const status = blockingMap.get(successorId)?.status ?? "unknown";
+      parts.push(`out:${title} (${dep.type} ${lag}, ${status})`);
+    }
+    return parts.join("; ");
+  };
+
   const columns = useMemo<Column[]>(
     () => [
       {
@@ -221,7 +350,7 @@ const ListView: FC<ListViewProps> = ({
         label: "Title",
         minWidth: 220,
         render: (
-          item: ListItem,
+          item: ListViewItem,
           indent: number,
           dragHandle: ReactNode,
           actions?: ReactNode
@@ -252,7 +381,7 @@ const ListView: FC<ListViewProps> = ({
         key: "assignees",
         label: "Assignees",
         minWidth: 160,
-        render: (item: ListItem) =>
+        render: (item: ListViewItem) =>
           item.assignees.length > 0
             ? item.assignees.map((assignee) => assignee.id).join(", ")
             : "unassigned",
@@ -261,7 +390,7 @@ const ListView: FC<ListViewProps> = ({
         key: "status",
         label: "Status",
         minWidth: 120,
-        render: (item: ListItem) => (
+        render: (item: ListViewItem) => (
           <span className="status-badge">{item.status || "—"}</span>
         ),
       },
@@ -269,37 +398,72 @@ const ListView: FC<ListViewProps> = ({
         key: "priority",
         label: "Priority",
         minWidth: 90,
-        render: (item: ListItem) =>
+        render: (item: ListViewItem) =>
           Number.isFinite(item.priority) ? item.priority : 0,
       },
       {
         key: "due_at",
-        label: "Due At",
+        label: "Due",
         minWidth: 160,
-        render: (item: ListItem) => formatDate(item.due_at),
+        render: (item: ListViewItem) => formatDate(item.due_at),
       },
       {
-        key: "scheduled_for",
-        label: "Scheduled For",
+        key: "completed_on",
+        label: "Completed On",
         minWidth: 170,
-        render: (item: ListItem) =>
-          item.schedule?.schedule_start_at
-            ? formatDate(item.schedule.schedule_start_at)
-            : "—",
+        render: (item: ListViewItem) =>
+          item.completed_on ? formatDate(item.completed_on) : "",
+      },
+      {
+        key: "slack_minutes",
+        label: "Slack",
+        minWidth: 140,
+        render: (item: ListViewItem) => {
+          const value = item.slack_minutes;
+          const formatted = formatSlackMinutes(value);
+          if (!formatted) {
+            return "";
+          }
+          return (
+            <span className={value !== null && value < 0 ? "slack-negative" : ""}>
+              {formatted}
+            </span>
+          );
+        },
+      },
+      {
+        key: "start_time",
+        label: "Start Time",
+        minWidth: 170,
+        render: (item: ListViewItem) => {
+          if (item.scheduled_blocks.length === 0) {
+            return "—";
+          }
+          const earliest = Math.min(
+            ...item.scheduled_blocks.map((block) => block.start_at)
+          );
+          return Number.isFinite(earliest) ? formatDate(earliest) : "—";
+        },
+      },
+      {
+        key: "scheduled_blocks",
+        label: "Scheduled Blocks",
+        minWidth: 240,
+        render: (item: ListViewItem) => formatBlocksSummary(item.scheduled_blocks),
       },
       {
         key: "estimate_mode",
         label: "Estimate Mode",
         minWidth: 140,
-        render: (item: ListItem) =>
+        render: (item: ListViewItem) =>
           item.estimate_mode ??
           (item.type === "task" ? "manual" : "rollup"),
       },
       {
         key: "estimate_minutes",
-        label: "Estimate (min)",
+        label: "Est Dur",
         minWidth: 140,
-        render: (item: ListItem) => {
+        render: (item: ListViewItem) => {
           const mode =
             item.estimate_mode ?? (item.type === "task" ? "manual" : "rollup");
           const estimate =
@@ -310,19 +474,37 @@ const ListView: FC<ListViewProps> = ({
         },
       },
       {
-        key: "depends_on",
-        label: "Depends On",
+        key: "actual_minutes",
+        label: "Actual",
+        minWidth: 120,
+        render: (item: ListViewItem) =>
+          item.actual_minutes === null
+            ? "—"
+            : formatEstimateMinutes(item.actual_minutes),
+      },
+      {
+        key: "dependencies",
+        label: "Dependencies",
         minWidth: 160,
-        render: (item: ListItem) =>
-          item.depends_on.length > 0
-            ? item.depends_on.map((id) => shortId(id)).join(", ")
-            : "[]",
+        render: (item: ListViewItem) => formatDependencySummary(item),
+      },
+      {
+        key: "blocked_by",
+        label: "Blocked By",
+        minWidth: 220,
+        render: (item: ListViewItem) => formatDependencyList(item.blocked_by),
+      },
+      {
+        key: "blocking",
+        label: "Blocking",
+        minWidth: 220,
+        render: (item: ListViewItem) => formatDependencyList(item.blocking),
       },
       {
         key: "blockers",
         label: "Blockers",
         minWidth: 120,
-        render: (item: ListItem) => {
+        render: (item: ListViewItem) => {
           // TODO: listItems does not include blocker objects yet; show active count.
           const count = item.blocked?.active_blocker_count ?? 0;
           return count > 0 ? String(count) : "0";
@@ -332,7 +514,7 @@ const ListView: FC<ListViewProps> = ({
         key: "tags",
         label: "Tags",
         minWidth: 160,
-        render: (item: ListItem) =>
+        render: (item: ListViewItem) =>
           item.tags.length > 0
             ? item.tags.map((tag) => tag.name).join(", ")
             : "[]",
@@ -341,19 +523,19 @@ const ListView: FC<ListViewProps> = ({
         key: "notes",
         label: "Notes",
         minWidth: 200,
-        render: (item: ListItem) => truncate(item.notes, 60),
+        render: (item: ListViewItem) => truncate(item.notes, 60),
       },
       {
         key: "health",
         label: "Health",
         minWidth: 160,
-        render: (item: ListItem) => item.health ?? "unknown",
+        render: (item: ListViewItem) => item.health ?? "unknown",
       },
       {
         key: "id",
         label: "ID",
         minWidth: 120,
-        render: (item: ListItem) => (
+        render: (item: ListViewItem) => (
           <span className="cell-id">{shortId(item.id)}</span>
         ),
       },
@@ -361,7 +543,7 @@ const ListView: FC<ListViewProps> = ({
         key: "delete",
         label: "",
         minWidth: 80,
-        render: (item: ListItem) => (
+        render: (item: ListViewItem) => (
           <button
             type="button"
             className="button button-ghost"
@@ -372,7 +554,13 @@ const ListView: FC<ListViewProps> = ({
         ),
       },
     ],
-    [handleToggleTaskDone]
+    [
+      handleToggleTaskDone,
+      formatBlocksSummary,
+      formatDependencyList,
+      formatDependencySummary,
+      formatSlackMinutes,
+    ]
   );
 
   const [collapsedMilestones, setCollapsedMilestones] = useState<Set<string>>(
@@ -483,6 +671,61 @@ const ListView: FC<ListViewProps> = ({
     setInlineTitle("");
   };
 
+  const handleCreateDependencyEdge = useCallback(
+    async (
+      predecessorId: string,
+      successorId: string,
+      type: "FS" | "SS" | "FF" | "SF" = "FS",
+      lagMinutes = 0
+    ) => {
+      if (predecessorId === successorId) {
+        return;
+      }
+      setError(null);
+      try {
+        await createDependencyEdge({
+          predecessor_id: predecessorId,
+          successor_id: successorId,
+          type,
+          lag_minutes: lagMinutes,
+        });
+        onRefresh();
+      } catch (err) {
+        const message = err instanceof Error ? err.message : "Unknown error";
+        setError(message);
+      }
+    },
+    [onRefresh]
+  );
+
+  const handleUpdateDependencyEdge = useCallback(
+    async (edgeId: string, updates: { type?: string; lag_minutes?: number }) => {
+      setError(null);
+      try {
+        await updateDependencyEdge({ edge_id: edgeId, ...updates });
+        onRefresh();
+      } catch (err) {
+        const message = err instanceof Error ? err.message : "Unknown error";
+        setError(message);
+      }
+    },
+    [onRefresh]
+  );
+
+  const handleDeleteDependencyEdge = useCallback(
+    async (edgeId: string) => {
+      setError(null);
+      try {
+        await deleteDependencyEdge({ edge_id: edgeId });
+        onRefresh();
+      } catch (err) {
+        const message = err instanceof Error ? err.message : "Unknown error";
+        setError(message);
+      }
+    },
+    [onRefresh]
+  );
+
   const startEdit = (itemId: string, field: string, value: string) => {
     setEditing({ itemId, field });
     setEditValue(value);
@@ -491,6 +734,71 @@ const ListView: FC<ListViewProps> = ({
   const cancelEdit = () => {
     setEditing(null);
     setEditValue("");
+    setEditingBlockId(null);
+  };
+
+  const getPrimaryBlock = (item: ListViewItem) => {
+    if (item.scheduled_blocks.length === 0) {
+      return null;
+    }
+    return item.scheduled_blocks.reduce((earliest, block) =>
+      block.start_at < earliest.start_at ? block : earliest
+    );
+  };
+
+  const startStartTimeEdit = (item: ListViewItem) => {
+    const primary = getPrimaryBlock(item);
+    setEditing({ itemId: item.id, field: "start_time" });
+    setEditingBlockId(primary?.block_id ?? null);
+    setEditValue(toDateTimeLocal(primary?.start_at ?? null));
+  };
+
+  const commitStartTimeEdit = async () => {
+    if (!editing || editing.field !== "start_time") {
+      return;
+    }
+    const item = itemById.get(editing.itemId);
+    if (!item) {
+      cancelEdit();
+      return;
+    }
+    const startAt = new Date(editValue).getTime();
+    const estimateSource =
+      item.estimate_mode === "rollup"
+        ? item.rollup_estimate_minutes ?? item.estimate_minutes
+        : item.estimate_minutes;
+    const durationMinutes = Math.floor(Number(estimateSource));
+    if (!editValue || !Number.isFinite(startAt)) {
+      setError("Start time is required.");
+      return;
+    }
+    if (!Number.isFinite(durationMinutes) || durationMinutes <= 0) {
+      setError("Est Dur must be greater than 0 to schedule.");
+      return;
+    }
+    setError(null);
+    try {
+      if (editingBlockId) {
+        await mutate("scheduled_block.update", {
+          block_id: editingBlockId,
+          start_at: startAt,
+          duration_minutes: durationMinutes,
+        });
+      } else {
+        await mutate("scheduled_block.create", {
+          item_id: item.id,
+          start_at: startAt,
+          duration_minutes: durationMinutes,
+          source: "manual",
+        });
+      }
+      onRefresh();
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Unknown error";
+      setError(message);
+    } finally {
+      cancelEdit();
+    }
   };
 
   const commitEdit = async () => {
@@ -539,21 +847,6 @@ const ListView: FC<ListViewProps> = ({
           }
           break;
         }
-        case "scheduled_for": {
-          if (!value) {
-            break;
-          }
-          const startAt = new Date(value).getTime();
-          if (Number.isFinite(startAt)) {
-            await createBlock({
-              item_id: item.id,
-              start_at: startAt,
-              duration_minutes: 60,
-              source: "manual",
-            });
-          }
-          break;
-        }
         case "tags": {
           const tags = value
             ? value
@@ -562,26 +855,6 @@ const ListView: FC<ListViewProps> = ({
                 .filter(Boolean)
             : [];
           await setItemTags(item.id, tags);
-          break;
-        }
-        case "depends_on": {
-          const desired = new Set(
-            value
-              .split(",")
-              .map((entry) => entry.trim())
-              .filter(Boolean)
-          );
-          const existing = new Set(item.depends_on ?? []);
-          for (const depId of desired) {
-            if (!existing.has(depId)) {
-              await addDependency(item.id, depId);
-            }
-          }
-          for (const depId of existing) {
-            if (!desired.has(depId)) {
-              await removeDependency(item.id, depId);
-            }
-          }
           break;
         }
         case "notes":
@@ -625,7 +898,7 @@ const ListView: FC<ListViewProps> = ({
   };
 
   const renderEditableCell = (
-    item: ListItem,
+    item: ListViewItem,
     field: string,
     display: ReactNode,
     editor: ReactNode,
@@ -649,8 +922,176 @@ const ListView: FC<ListViewProps> = ({
     );
   };
 
+  // Edges are truth; Blocked By/Blocking are projections; Dependencies is the editor.
+  const renderDependenciesEditor = (item: ListViewItem) => {
+    const incoming = item.dependencies_in ?? [];
+    const outgoing = item.dependencies_out ?? [];
+    const incomingIds = incoming
+      .map((dep) => dep.predecessor_id)
+      .filter(Boolean) as string[];
+    const outgoingIds = outgoing
+      .map((dep) => dep.successor_id)
+      .filter(Boolean) as string[];
+    const blockedByMap = new Map(
+      item.blocked_by.map((dep) => [dep.item_id, dep])
+    );
+    const blockingMap = new Map(
+      item.blocking.map((dep) => [dep.item_id, dep])
+    );
+
+    return (
+      <div className="cell-editing dependency-editor">
+        <div className="dependency-section">
+          <div className="dependency-section-title">Depends on</div>
+          {incoming.length === 0 ? (
+            <div className="dependency-empty">No dependencies</div>
+          ) : (
+            incoming.map((dep) => {
+              const predecessorId = dep.predecessor_id ?? "";
+              const edgeId = dep.edge_id;
+              const title = itemById.get(predecessorId)?.title ?? predecessorId;
+              const lagValue = dep.lag_minutes ?? 0;
+              const status =
+                blockedByMap.get(predecessorId)?.status ?? "unknown";
+              return (
+                <div key={edgeId} className="dependency-row">
+                  <span className="dependency-title">{title}</span>
+                <select
+                  value={dep.type}
+                  onChange={(event) =>
+                    void handleUpdateDependencyEdge(edgeId, {
+                      type: event.target.value,
+                    })
+                  }
+                >
+                  <option value="FS">FS</option>
+                  <option value="SS">SS</option>
+                  <option value="FF">FF</option>
+                  <option value="SF">SF</option>
+                </select>
+                <span className="dependency-label">Lag (min)</span>
+                <input
+                  key={`${edgeId}-${lagValue}`}
+                  type="number"
+                  min={0}
+                  placeholder="Lag (min)"
+                  aria-label="Lag minutes"
+                    defaultValue={lagValue}
+                    onBlur={(event) => {
+                      const next = Number(event.currentTarget.value);
+                      if (!Number.isFinite(next) || next < 0) {
+                        return;
+                      }
+                      if (next !== lagValue) {
+                        void handleUpdateDependencyEdge(edgeId, {
+                          lag_minutes: Math.floor(next),
+                        });
+                      }
+                    }}
+                  />
+                  <span className="dependency-status">{status}</span>
+                  <button
+                    type="button"
+                    className="button button-ghost"
+                    onClick={() => void handleDeleteDependencyEdge(edgeId)}
+                  >
+                    Remove
+                  </button>
+                </div>
+              );
+            })
+          )}
+          <ItemAutocomplete
+            scopeId={selectedProjectId}
+            excludeIds={[item.id, ...incomingIds]}
+            placeholder="Add predecessor"
+            onSelect={(dependency) =>
+              void handleCreateDependencyEdge(dependency.id, item.id)
+            }
+            autoFocus
+          />
+        </div>
+        <div className="dependency-section">
+          <div className="dependency-section-title">Blocking</div>
+          {outgoing.length === 0 ? (
+            <div className="dependency-empty">No dependents</div>
+          ) : (
+            outgoing.map((dep) => {
+              const successorId = dep.successor_id ?? "";
+              const edgeId = dep.edge_id;
+              const title = itemById.get(successorId)?.title ?? successorId;
+              const lagValue = dep.lag_minutes ?? 0;
+              const status = blockingMap.get(successorId)?.status ?? "unknown";
+              return (
+                <div key={edgeId} className="dependency-row">
+                  <span className="dependency-title">{title}</span>
+                <select
+                  value={dep.type}
+                  onChange={(event) =>
+                    void handleUpdateDependencyEdge(edgeId, {
+                      type: event.target.value,
+                    })
+                  }
+                >
+                  <option value="FS">FS</option>
+                  <option value="SS">SS</option>
+                  <option value="FF">FF</option>
+                  <option value="SF">SF</option>
+                </select>
+                <span className="dependency-label">Lag (min)</span>
+                <input
+                  key={`${edgeId}-${lagValue}`}
+                  type="number"
+                  min={0}
+                  placeholder="Lag (min)"
+                  aria-label="Lag minutes"
+                    defaultValue={lagValue}
+                    onBlur={(event) => {
+                      const next = Number(event.currentTarget.value);
+                      if (!Number.isFinite(next) || next < 0) {
+                        return;
+                      }
+                      if (next !== lagValue) {
+                        void handleUpdateDependencyEdge(edgeId, {
+                          lag_minutes: Math.floor(next),
+                        });
+                      }
+                    }}
+                  />
+                  <span className="dependency-status">{status}</span>
+                  <button
+                    type="button"
+                    className="button button-ghost"
+                    onClick={() => void handleDeleteDependencyEdge(edgeId)}
+                  >
+                    Remove
+                  </button>
+                </div>
+              );
+            })
+          )}
+          <ItemAutocomplete
+            scopeId={selectedProjectId}
+            excludeIds={[item.id, ...outgoingIds]}
+            placeholder="Add successor"
+            onSelect={(dependency) =>
+              void handleCreateDependencyEdge(item.id, dependency.id)
+            }
+          />
+        </div>
+        <button
+          type="button"
+          className="button button-ghost"
+          onClick={cancelEdit}
+        >
+          Done
+        </button>
+      </div>
+    );
+  };
+
   const renderCell = (
-    item: ListItem,
+    item: ListViewItem,
     column: Column,
     indent: number,
     dragHandle: ReactNode | null,
@@ -834,29 +1275,45 @@ const ListView: FC<ListViewProps> = ({
         toDateTimeLocal(item.due_at ?? null)
       );
     }
-    if (column.key === "scheduled_for") {
-      return renderEditableCell(
-        item,
-        "scheduled_for",
-        column.render(item, 0, null),
-        <input
-          type="datetime-local"
-          value={editValue}
-          onChange={(event) => setEditValue(event.target.value)}
-          onBlur={() => void commitEdit()}
-          onKeyDown={(event) => {
-            if (event.key === "Enter") {
-              event.preventDefault();
-              void commitEdit();
-            }
-            if (event.key === "Escape") {
-              event.preventDefault();
-              cancelEdit();
-            }
+    if (column.key === "start_time") {
+      const isEditing =
+        editing?.itemId === item.id && editing.field === "start_time";
+      if (isEditing) {
+        return (
+          <div className="cell-editing dependency-editor">
+            <div className="dependency-row">
+              <input
+                type="datetime-local"
+                value={editValue}
+                onChange={(event) => setEditValue(event.target.value)}
+                onBlur={() => void commitStartTimeEdit()}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter") {
+                    event.preventDefault();
+                    void commitStartTimeEdit();
+                  }
+                  if (event.key === "Escape") {
+                    event.preventDefault();
+                    cancelEdit();
+                  }
+                }}
+                autoFocus
+              />
+            </div>
+          </div>
+        );
+      }
+      return (
+        <button
+          type="button"
+          className="cell-button"
+          onClick={(event) => {
+            event.stopPropagation();
+            startStartTimeEdit(item);
           }}
-          autoFocus
-        />,
-        toDateTimeLocal(item.schedule?.schedule_start_at ?? null)
+        >
+          {column.render(item, 0, null)}
+        </button>
       );
     }
     if (column.key === "tags") {
@@ -883,28 +1340,23 @@ const ListView: FC<ListViewProps> = ({
         (item.tags ?? []).map((tag) => tag.name).join(", ")
       );
     }
-    if (column.key === "depends_on") {
-      return renderEditableCell(
-        item,
-        "depends_on",
-        column.render(item, 0, null),
-        <input
-          value={editValue}
-          onChange={(event) => setEditValue(event.target.value)}
-          onBlur={() => void commitEdit()}
-          onKeyDown={(event) => {
-            if (event.key === "Enter") {
-              event.preventDefault();
-              void commitEdit();
-            }
-            if (event.key === "Escape") {
-              event.preventDefault();
-              cancelEdit();
-            }
+    if (column.key === "dependencies") {
+      const isEditing =
+        editing?.itemId === item.id && editing.field === "dependencies";
+      if (isEditing) {
+        return renderDependenciesEditor(item);
+      }
+      return (
+        <button
+          type="button"
+          className="cell-button"
+          onClick={(event) => {
+            event.stopPropagation();
+            startEdit(item.id, "dependencies", "");
           }}
-          autoFocus
-        />,
-        (item.depends_on ?? []).join(", ")
+        >
+          {column.render(item, 0, null)}
+        </button>
       );
     }
     if (column.key === "notes") {

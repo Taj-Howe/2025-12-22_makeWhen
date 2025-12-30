@@ -649,6 +649,109 @@ button:focus-visible {
   background: var(--color-panel-2);
 }
 
+.autocomplete {
+  position: relative;
+}
+
+.autocomplete-input {
+  width: 100%;
+}
+
+.autocomplete-list {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  right: 0;
+  z-index: 20;
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  background: var(--color-panel);
+  display: grid;
+  gap: 2px;
+  padding: 6px;
+  max-height: 220px;
+  overflow-y: auto;
+}
+
+.autocomplete-option {
+  text-align: left;
+  padding: 6px 8px;
+  border-radius: 6px;
+  border: 1px solid transparent;
+  background: transparent;
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  color: var(--color-text);
+}
+
+.autocomplete-option.is-active,
+.autocomplete-option:hover {
+  border-color: var(--color-border);
+  background: var(--color-panel-2);
+}
+
+.autocomplete-meta {
+  color: var(--color-text-muted);
+  font-size: 12px;
+}
+
+.dependency-editor {
+  display: grid;
+  gap: 6px;
+}
+
+.dependency-section {
+  display: grid;
+  gap: 6px;
+  padding-top: 6px;
+  border-top: 1px solid var(--color-border);
+}
+
+.dependency-section:first-child {
+  padding-top: 0;
+  border-top: none;
+}
+
+.dependency-section-title {
+  font-size: 12px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--color-text-muted);
+}
+
+.dependency-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 0;
+}
+
+.dependency-title {
+  font-weight: 600;
+}
+
+.dependency-label {
+  font-size: 12px;
+  color: var(--color-text-muted);
+}
+
+.dependency-status {
+  font-size: 12px;
+  color: var(--color-text-muted);
+}
+
+.dependency-empty {
+  font-size: 12px;
+  color: var(--color-text-muted);
+}
+
+.slack-negative {
+  color: var(--color-danger);
+  font-weight: 600;
+}
+
 @media (max-width: 800px) {
   .layout {
     grid-template-columns: 1fr;

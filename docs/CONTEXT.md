@@ -36,3 +36,9 @@
 4) add dependency + blocker → blocked state reflected
 5) move/resize a block → persists after refresh
 6) audit log shows operations
+
+## Dev note: dependencies + projections
+- Dependencies are edges in `dependencies` only. Do not add blocked_by/blocking fields to `items`.
+- "Blocked By" and "Blocking" are projections computed in worker queries from edges.
+- Autocomplete must reuse the worker query (searchItems) so UI never scans or infers data.
+- This structure lets future AI scheduling read edges, compute projections, and write only ops.

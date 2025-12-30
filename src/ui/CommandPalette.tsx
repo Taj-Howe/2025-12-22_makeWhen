@@ -1,9 +1,10 @@
-import type { FC } from "react";
+import type { FC, KeyboardEvent } from "react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import * as Dialog from "@radix-ui/react-dialog";
 import { parseCommand } from "../cli/parseCommand";
 import { mutate, query } from "../rpc/clientSingleton";
 import { UNGROUPED_PROJECT_ID } from "./constants";
+import type { ItemLite } from "./ItemAutocomplete";
 
 type CommandPaletteProps = {
   open: boolean;
@@ -22,7 +23,19 @@ const CommandPalette: FC<CommandPaletteProps> = ({
 }) => {
   const [inputValue, setInputValue] = useState("");
   const [submitError, setSubmitError] = useState<string | null>(null);
+  const [autoItems, setAutoItems] = useState<ItemLite[]>([]);
+  const [autoOpen, setAutoOpen] = useState(false);
+  const [autoIndex, setAutoIndex] = useState(-1);
+  const [autoToken, setAutoToken] = useState<{
+    key: string;
+    valueStart: number;
+    valueEnd: number;
+    rawValue: string;
+  } | null>(null);
+  const [autoScopeId, setAutoScopeId] = useState<string | null>(null);
   const inputRef = useRef<HTMLInputElement | null>(null);
+  const autoRequestId = useRef(0);
+  const autoTimeoutId = useRef<number | null>(null);
 
   useEffect(() => {
     if (open) {
@@ -58,6 +71,14 @@ const CommandPalette: FC<CommandPaletteProps> = ({
     return { kind: "general" as const };
   }, [inputValue]);
 
+  const inProjectToken = useMemo(() => {
+    const match = inputValue.match(/(?:^|\s)in:("([^"]+)"|[^\s]+)/i);
+    if (!match) {
+      return null;
+    }
+    return match[2] ?? match[1] ?? null;
+  }, [inputValue]);
+
   const resolveTargetId = async (
     type: string,
     target: string,
@@ -89,6 +110,38 @@ const CommandPalette: FC<CommandPaletteProps> = ({
     return matches[0].id;
   };
 
+  const resolveItemId = async (
+    target: string,
+    projectId: string | null,
+    allowProject = false
+  ) => {
+    const data = await query<{ items: Array<{ id: string; title: string; type: string }> }>(
+      "listItems",
+      {
+        projectId: projectId ?? undefined,
+        includeDone: true,
+        includeCanceled: true,
+      }
+    );
+    const items = allowProject
+      ? data.items
+      : data.items.filter((item) => item.type !== "project");
+    const byId = items.find((item) => item.id === target);
+    if (byId) {
+      return byId.id;
+    }
+    const matches = items.filter(
+      (item) => item.title.toLowerCase() === target.toLowerCase()
+    );
+    if (matches.length === 0) {
+      throw new Error(`No item found for "${target}"`);
+    }
+    if (matches.length > 1) {
+      throw new Error(`Multiple items named "${target}"`);
+    }
+    return matches[0].id;
+  };
+
   const resolveProjectId = async (target: string) => {
     const data = await query<{ items: Array<{ id: string; title: string; type: string }> }>(
       "listItems",
@@ -113,6 +166,151 @@ const CommandPalette: FC<CommandPaletteProps> = ({
       throw new Error(`Multiple projects named "${target}"`);
     }
     return matches[0].id;
+  };
+
+  useEffect(() => {
+    if (!inProjectToken) {
+      setAutoScopeId(null);
+      return;
+    }
+    let cancelled = false;
+    resolveProjectId(inProjectToken)
+      .then((projectId) => {
+        if (!cancelled) {
+          setAutoScopeId(projectId);
+        }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setAutoScopeId(null);
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [inProjectToken]);
+
+  useEffect(() => {
+    const trimmed = inputValue.trim();
+    if (!trimmed) {
+      setAutoItems([]);
+      setAutoOpen(false);
+      setAutoIndex(-1);
+      setAutoToken(null);
+      return;
+    }
+    const match = /(^|\s)(under|parent|dep|depends_on):([^\s]*)$/i.exec(
+      inputValue
+    );
+    if (!match) {
+      setAutoItems([]);
+      setAutoOpen(false);
+      setAutoIndex(-1);
+      setAutoToken(null);
+      return;
+    }
+    const key = match[2].toLowerCase();
+    const valueStart = match.index + match[1].length + key.length + 1;
+    const valueEnd = inputValue.length;
+    const rawValue = inputValue.slice(valueStart, valueEnd);
+    setAutoToken({ key, valueStart, valueEnd, rawValue });
+    const segments = rawValue.split(",");
+    const lastSegment = segments[segments.length - 1]?.trim() ?? "";
+    const queryText = lastSegment.replace(/^"|"$/g, "");
+    if (queryText.length < 1) {
+      setAutoItems([]);
+      setAutoOpen(false);
+      setAutoIndex(-1);
+      return;
+    }
+    setAutoOpen(true);
+    if (autoTimeoutId.current) {
+      window.clearTimeout(autoTimeoutId.current);
+    }
+    const requestId = ++autoRequestId.current;
+    autoTimeoutId.current = window.setTimeout(() => {
+      query<{ items: ItemLite[] }>("searchItems", {
+        q: queryText,
+        limit: 12,
+        scopeId: autoScopeId ?? selectedProjectId ?? undefined,
+      })
+        .then((data) => {
+          if (requestId !== autoRequestId.current) {
+            return;
+          }
+          setAutoItems(data.items ?? []);
+          setAutoIndex(data.items && data.items.length > 0 ? 0 : -1);
+        })
+        .catch(() => {
+          if (requestId !== autoRequestId.current) {
+            return;
+          }
+          setAutoItems([]);
+          setAutoIndex(-1);
+        });
+    }, 180);
+  }, [autoScopeId, inputValue, selectedProjectId]);
+
+  const formatTokenValue = (value: string) => {
+    const safe = value.replace(/"/g, "'");
+    if (/[,\s]/.test(safe)) {
+      return `"${safe}"`;
+    }
+    return safe;
+  };
+
+  const applyAutocompleteSelection = (item: ItemLite) => {
+    if (!autoToken) {
+      return;
+    }
+    const formatted = formatTokenValue(item.title);
+    const segments = autoToken.rawValue.split(",");
+    segments[segments.length - 1] = formatted;
+    const nextValue =
+      inputValue.slice(0, autoToken.valueStart) +
+      segments.join(",") +
+      inputValue.slice(autoToken.valueEnd);
+    setInputValue(nextValue);
+    setAutoItems([]);
+    setAutoOpen(false);
+    setAutoIndex(-1);
+    requestAnimationFrame(() => {
+      inputRef.current?.focus();
+      inputRef.current?.setSelectionRange(nextValue.length, nextValue.length);
+    });
+  };
+
+  const handleInputKeyDown = (event: KeyboardEvent<HTMLInputElement>) => {
+    if (autoOpen && autoItems.length > 0) {
+      if (event.key === "ArrowDown") {
+        event.preventDefault();
+        setAutoIndex((prev) => (prev + 1) % autoItems.length);
+        return;
+      }
+      if (event.key === "ArrowUp") {
+        event.preventDefault();
+        setAutoIndex((prev) => (prev - 1 + autoItems.length) % autoItems.length);
+        return;
+      }
+      if (event.key === "Enter") {
+        event.preventDefault();
+        const item = autoItems[autoIndex] ?? autoItems[0];
+        if (item) {
+          applyAutocompleteSelection(item);
+        }
+        return;
+      }
+      if (event.key === "Escape") {
+        event.preventDefault();
+        setAutoOpen(false);
+        setAutoIndex(-1);
+        return;
+      }
+    }
+    if (event.key === "Enter") {
+      event.preventDefault();
+      void handleSubmit();
+    }
   };
 
   const handleSubmit = async () => {
@@ -227,16 +425,23 @@ const CommandPalette: FC<CommandPaletteProps> = ({
           });
         }
         if (value.dependsOn) {
+          const scopeId = value.inProject
+            ? await resolveProjectId(value.inProject)
+            : selectedProjectId ?? null;
+          const resolvedDeps: string[] = [];
+          for (const depTarget of value.dependsOn) {
+            resolvedDeps.push(await resolveItemId(depTarget, scopeId, false));
+          }
           const data = await query<{
             items: Array<{ id: string; depends_on: string[] }>;
           }>("listItems", {
-            projectId: selectedProjectId ?? undefined,
+            projectId: scopeId ?? undefined,
             includeDone: true,
             includeCanceled: true,
           });
           const current = data.items.find((item) => item.id === targetId);
           const currentDeps = new Set(current?.depends_on ?? []);
-          const desiredDeps = new Set(value.dependsOn);
+          const desiredDeps = new Set(resolvedDeps);
           for (const depId of desiredDeps) {
             if (!currentDeps.has(depId)) {
               await mutate("add_dependency", {
@@ -255,7 +460,7 @@ const CommandPalette: FC<CommandPaletteProps> = ({
           }
         }
         if (value.scheduledFor) {
-          await mutate("create_block", {
+          await mutate("scheduled_block.create", {
             item_id: targetId,
             start_at: value.scheduledFor,
             duration_minutes: DEFAULT_SCHEDULE_MINUTES,
@@ -297,7 +502,18 @@ const CommandPalette: FC<CommandPaletteProps> = ({
     }
 
     if (value.parentId) {
-      createArgs.parent_id = value.parentId;
+      const scopeId = resolvedProjectId ?? targetProjectId ?? null;
+      try {
+        createArgs.parent_id = await resolveItemId(
+          value.parentId,
+          scopeId,
+          false
+        );
+      } catch (err) {
+        const message = err instanceof Error ? err.message : "Unknown error";
+        setSubmitError(message);
+        return;
+      }
     } else if (value.type === "milestone") {
       const projectParentId = resolvedProjectId ?? targetProjectId;
       if (!projectParentId) {
@@ -339,7 +555,9 @@ const CommandPalette: FC<CommandPaletteProps> = ({
         });
       }
       if (value.dependsOn && value.dependsOn.length > 0) {
-        for (const depId of value.dependsOn) {
+        const scopeId = resolvedProjectId ?? targetProjectId ?? null;
+        for (const depTarget of value.dependsOn) {
+          const depId = await resolveItemId(depTarget, scopeId, false);
           await mutate("add_dependency", {
             item_id: itemId,
             depends_on_id: depId,
@@ -347,7 +565,7 @@ const CommandPalette: FC<CommandPaletteProps> = ({
         }
       }
       if (value.scheduledFor) {
-        await mutate("create_block", {
+        await mutate("scheduled_block.create", {
           item_id: itemId,
           start_at: value.scheduledFor,
           duration_minutes: DEFAULT_SCHEDULE_MINUTES,
@@ -375,23 +593,43 @@ const CommandPalette: FC<CommandPaletteProps> = ({
             aria-label="Command palette"
           >
         <div className="palette-header">
-          <input
-            ref={inputRef}
-            className="palette-input"
-            type="text"
-            value={inputValue}
-            onChange={(event) => {
-              setInputValue(event.target.value);
-              setSubmitError(null);
-            }}
-            onKeyDown={(event) => {
-              if (event.key === "Enter") {
-                event.preventDefault();
-                handleSubmit();
-              }
-            }}
-            placeholder='task "Fix bug" due:2025-01-01 pri:3 tags:ui,bug'
-          />
+          <div className="autocomplete">
+            <input
+              ref={inputRef}
+              className="palette-input"
+              type="text"
+              value={inputValue}
+              onChange={(event) => {
+                setInputValue(event.target.value);
+                setSubmitError(null);
+              }}
+              onKeyDown={handleInputKeyDown}
+              placeholder='task "Fix bug" due:2025-01-01 pri:3 tags:ui,bug'
+            />
+            {autoOpen && autoItems.length > 0 ? (
+              <div className="autocomplete-list" role="listbox">
+                {autoItems.map((item, index) => (
+                  <button
+                    key={item.id}
+                    type="button"
+                    className={`autocomplete-option ${
+                      index === autoIndex ? "is-active" : ""
+                    }`}
+                    role="option"
+                    aria-selected={index === autoIndex}
+                    onMouseEnter={() => setAutoIndex(index)}
+                    onMouseDown={(event) => {
+                      event.preventDefault();
+                      applyAutocompleteSelection(item);
+                    }}
+                  >
+                    <span className="autocomplete-title">{item.title}</span>
+                    <span className="autocomplete-meta">{item.item_type}</span>
+                  </button>
+                ))}
+              </div>
+            ) : null}
+          </div>
           {submitError ? (
             <div className="palette-error">{submitError}</div>
           ) : null}

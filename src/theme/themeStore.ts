@@ -2,6 +2,7 @@ export type ThemeName = "light" | "dark" | "amber";
 
 const STORAGE_KEY = "makewhen.theme";
 const DEFAULT_THEME: ThemeName = "light";
+const listeners = new Set<(theme: ThemeName) => void>();
 
 export const loadTheme = (): ThemeName => {
   if (typeof window === "undefined") {
@@ -25,10 +26,18 @@ export const saveTheme = (theme: ThemeName) => {
 export const setTheme = (theme: ThemeName) => {
   applyTheme(theme);
   saveTheme(theme);
+  listeners.forEach((listener) => listener(theme));
 };
 
 export const initTheme = () => {
   const theme = loadTheme();
   applyTheme(theme);
   return theme;
+};
+
+export const subscribeTheme = (listener: (theme: ThemeName) => void) => {
+  listeners.add(listener);
+  return () => {
+    listeners.delete(listener);
+  };
 };

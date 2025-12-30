@@ -3,6 +3,7 @@ import {
   useCallback,
   useEffect,
   useMemo,
+  useRef,
   useState,
   type DragEvent,
   type FC,
@@ -74,6 +75,8 @@ const ListView: FC<ListViewProps> = ({
   onRefresh,
 }) => {
   const [items, setItems] = useState<ListViewItem[]>([]);
+  const [itemsProjectId, setItemsProjectId] = useState<string | null>(null);
+  const itemsCacheRef = useRef<Map<string, ListViewItem[]>>(new Map());
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [dragging, setDragging] = useState<{
@@ -115,12 +118,8 @@ const ListView: FC<ListViewProps> = ({
 
   const loadItems = useCallback(async () => {
     if (!selectedProjectId) {
-      setItems([]);
-      setError(null);
-      return;
+      return [];
     }
-    setLoading(true);
-    setError(null);
     const [listData, completeData] = await Promise.all([
       query<{ items: ListItem[] }>("listItems", {
         projectId: selectedProjectId,
@@ -152,20 +151,37 @@ const ListView: FC<ListViewProps> = ({
         slack_minutes: extra?.slack_minutes ?? null,
       };
     });
-    setItems(merged);
-    setLoading(false);
+    return merged;
   }, [selectedProjectId]);
 
   useEffect(() => {
     if (!selectedProjectId) {
       setItems([]);
+      setItemsProjectId(null);
       setError(null);
+      setLoading(false);
       return;
     }
     let isMounted = true;
-    setLoading(true);
+    const cached = itemsCacheRef.current.get(selectedProjectId);
+    if (cached) {
+      setItems(cached);
+      setItemsProjectId(selectedProjectId);
+    } else {
+      setItems([]);
+      setItemsProjectId(selectedProjectId);
+    }
+    setLoading(!cached);
     setError(null);
     loadItems()
+      .then((merged) => {
+        if (!isMounted) {
+          return;
+        }
+        setItems(merged);
+        setItemsProjectId(selectedProjectId);
+        itemsCacheRef.current.set(selectedProjectId, merged);
+      })
       .catch((err) => {
         if (!isMounted) {
           return;
@@ -183,15 +199,23 @@ const ListView: FC<ListViewProps> = ({
     };
   }, [loadItems, refreshToken, selectedProjectId]);
 
+  const effectiveProjectId = itemsProjectId ?? selectedProjectId;
   const viewModel = useMemo(
     () =>
       buildListViewModel({
         items,
-        selectedProjectId,
+        selectedProjectId: effectiveProjectId,
         ungroupedProjectId: UNGROUPED_PROJECT_ID,
       }),
-    [items, selectedProjectId]
+    [effectiveProjectId, items]
   );
+
+  useEffect(() => {
+    if (!itemsProjectId) {
+      return;
+    }
+    itemsCacheRef.current.set(itemsProjectId, items);
+  }, [items, itemsProjectId]);
 
   const {
     parentTypeMap,
@@ -1830,6 +1854,8 @@ const ListView: FC<ListViewProps> = ({
     </span>
   );
 
+  const showLoading = loading && items.length === 0;
+
   if (!selectedProjectId) {
     return (
       <div className="list-view list-view-container">Select a project</div>
@@ -1838,7 +1864,7 @@ const ListView: FC<ListViewProps> = ({
 
   return (
     <div className="list-view list-view-container">
-      {loading ? <div className="list-empty">Loading…</div> : null}
+      {showLoading ? <div className="list-empty">Loading…</div> : null}
       {error ? <div className="error">{error}</div> : null}
       <div className="list-scroll">
         <table className="list-table list-table-wide">
@@ -1856,7 +1882,7 @@ const ListView: FC<ListViewProps> = ({
             </tr>
           </thead>
           <tbody>
-            {!loading && milestones.length === 0 && ungroupedTasks.length === 0 ? (
+            {!showLoading && milestones.length === 0 && ungroupedTasks.length === 0 ? (
               <tr>
                   <td colSpan={columns.length} className="list-empty">
                     No items yet

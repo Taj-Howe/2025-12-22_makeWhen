@@ -196,6 +196,7 @@ const ListView: FC<ListViewProps> = ({
   const {
     parentTypeMap,
     itemById,
+    tasks = [],
     milestones,
     taskChildren,
     tasksUnderMilestone,

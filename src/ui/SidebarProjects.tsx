@@ -22,6 +22,7 @@ type SidebarProjectsProps = {
   onSetProjectId: (projectId: string | null) => void;
   refreshToken: number;
   onAddProject: () => void;
+  onDeleteProject: (projectId: string, projectTitle: string) => void;
   users: UserLite[];
   usersError: string | null;
   selectedUserId: string | null;
@@ -35,6 +36,7 @@ const SidebarProjects: FC<SidebarProjectsProps> = ({
   onSetProjectId,
   refreshToken,
   onAddProject,
+  onDeleteProject,
   users,
   usersError,
   selectedUserId,
@@ -145,19 +147,34 @@ const SidebarProjects: FC<SidebarProjectsProps> = ({
             <div className="sidebar-empty">No projects yet</div>
           ) : (
             projects.map((project) => (
-              <button
-                key={project.id}
-                className={
-                  scope.kind === "project" &&
-                  project.id === selectedProjectId
-                    ? "sidebar-item is-active"
-                    : "sidebar-item"
-                }
-                type="button"
-                onClick={() => onSelect(project.id)}
-              >
-                {project.title}
-              </button>
+              <ContextMenu.Root key={project.id}>
+                <ContextMenu.Trigger asChild>
+                  <button
+                    className={
+                      scope.kind === "project" &&
+                      project.id === selectedProjectId
+                        ? "sidebar-item is-active"
+                        : "sidebar-item"
+                    }
+                    type="button"
+                    onClick={() => onSelect(project.id)}
+                  >
+                    {project.title}
+                  </button>
+                </ContextMenu.Trigger>
+                <ContextMenu.Portal>
+                  <ContextMenu.Content className="context-menu-content">
+                    <ContextMenu.Item
+                      className="context-menu-item"
+                      onSelect={() =>
+                        onDeleteProject(project.id, project.title)
+                      }
+                    >
+                      Delete project…
+                    </ContextMenu.Item>
+                  </ContextMenu.Content>
+                </ContextMenu.Portal>
+              </ContextMenu.Root>
             ))
           )}
         </div>

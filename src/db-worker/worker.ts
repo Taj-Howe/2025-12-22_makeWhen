@@ -4169,6 +4169,33 @@ const handleRequest = async (message: RpcRequest): Promise<RpcResponse> => {
               .map((row) => [row[0], row[3]])
           );
 
+          const limitArgs =
+            typeof args.limits === "object" && args.limits !== null
+              ? (args.limits as Record<string, unknown>)
+              : {};
+          const parseLimit = (value: unknown, fallback: number) => {
+            if (typeof value !== "number") {
+              return fallback;
+            }
+            const intValue = Math.floor(value);
+            if (!Number.isFinite(intValue) || intValue <= 0) {
+              return fallback;
+            }
+            return Math.min(intValue, 50);
+          };
+          const scheduledMax = parseLimit(limitArgs.scheduled_max, 12);
+          const actionableMax = parseLimit(limitArgs.actionable_max, 8);
+          const unscheduledMax = parseLimit(
+            limitArgs.unscheduled_max,
+            Math.max(actionableMax * 2, 16)
+          );
+          const nextUpHoursRaw = parseLimit(limitArgs.next_up_hours, 12);
+          const nextUpHours = Math.min(Math.max(nextUpHoursRaw, 1), 168);
+
+          const nowAt =
+            args.now_at !== undefined ? ensureTimeMs(args.now_at, "now_at") : Date.now();
+          const nextUpEnd = nowAt + nextUpHours * 60 * 60 * 1000;
+
           const blockRows = dbHandle.exec({
             sql: `SELECT block_id, item_id, start_at, duration_minutes
               FROM scheduled_blocks
@@ -4181,35 +4208,76 @@ const handleRequest = async (message: RpcRequest): Promise<RpcResponse> => {
             bind: [...itemIds, timeMax, timeMin],
           }) as Array<[string, string, number, number]>;
 
-          const blocksInWindow = new Set(blockRows.map((row) => row[1]));
-          const scheduled = blockRows.map((row) => {
+          const blocksInWindow = new Set<string>();
+          const blockInfoByItem = new Map<
+            string,
+            { hasActive: boolean; hasUpcoming: boolean }
+          >();
+
+          const scheduledCandidates = blockRows.map((row) => {
+            const endAt =
+              deriveEndAtFromDuration(row[2], row[3]) ?? row[2];
+            const active = row[2] <= nowAt && endAt > nowAt;
+            const upcoming = row[2] >= nowAt && row[2] < nextUpEnd;
+            const info = blockInfoByItem.get(row[1]) ?? {
+              hasActive: false,
+              hasUpcoming: false,
+            };
+            if (active) {
+              info.hasActive = true;
+            }
+            if (upcoming) {
+              info.hasUpcoming = true;
+            }
+            blockInfoByItem.set(row[1], info);
+            blocksInWindow.add(row[1]);
             const item = itemMap.get(row[1]);
             const assigneeId = (assigneesMap.get(row[1]) ?? [])[0] ?? null;
             const projectId = projectMap.get(row[1]) ?? row[1];
+            const bucket = active ? 0 : upcoming ? 1 : 2;
             return {
               block_id: row[0],
               item_id: row[1],
               title: item?.[1] ?? row[1],
               start_at: row[2],
               duration_minutes: row[3],
+              end_at: endAt,
               due_at: item?.[4] ?? null,
               status: item?.[2] ?? "unknown",
+              priority: item?.[3] ?? 0,
               project_id: projectId,
               project_title: projectTitleMap.get(projectId) ?? null,
               assignee_id: assigneeId,
               assignee_name: assigneeId
                 ? getUserDisplayName(assigneeId, userNameMap)
                 : null,
+              _bucket: bucket,
             };
           });
 
-          const now = Date.now();
+          scheduledCandidates.sort((a, b) => {
+            if (a._bucket !== b._bucket) {
+              return a._bucket - b._bucket;
+            }
+            if (a.start_at !== b.start_at) {
+              return a.start_at - b.start_at;
+            }
+            return a.title.localeCompare(b.title);
+          });
+
+          const scheduled = scheduledCandidates.slice(0, scheduledMax).map(
+            ({ _bucket, ...entry }) => entry
+          );
+
           const dueMetricsMap = new Map(
-            itemRows.map((row) => [row[0], computeDueMetrics(row[4], now, row[2])])
+            itemRows.map((row) => [row[0], computeDueMetrics(row[4], nowAt, row[2])])
           );
           const readyStatuses = new Set(["ready", "in_progress", "review"]);
-          const unscheduledReady = itemRows
+          const actionableCandidates = itemRows
             .filter((row) => {
+              if (row[2] === "done" || row[2] === "canceled") {
+                return false;
+              }
               if (!readyStatuses.has(row[2])) {
                 return false;
               }
@@ -4217,23 +4285,18 @@ const handleRequest = async (message: RpcRequest): Promise<RpcResponse> => {
               if (blocked?.is_blocked) {
                 return false;
               }
-              return !blocksInWindow.has(row[0]);
+              const info = blockInfoByItem.get(row[0]);
+              if (info?.hasActive || info?.hasUpcoming) {
+                return false;
+              }
+              return true;
             })
             .map((row) => {
-              const dueMetrics = dueMetricsMap.get(row[0]);
               const schedule = scheduleMap.get(row[0]);
               const slackMinutes = computeSlackMinutes(
                 row[4],
                 schedule?.end ?? null
               );
-              const dependents = dependentsMap.get(row[0]) ?? 0;
-              const sequenceRank = computeSequenceRank({
-                is_overdue: dueMetrics?.is_overdue ?? false,
-                is_blocked: false,
-                due_at: row[4],
-                priority: row[3],
-                dependents,
-              });
               const projectId = projectMap.get(row[0]) ?? row[0];
               const assigneeId = (assigneesMap.get(row[0]) ?? [])[0] ?? null;
               return {
@@ -4242,33 +4305,98 @@ const handleRequest = async (message: RpcRequest): Promise<RpcResponse> => {
                 due_at: row[4],
                 status: row[2],
                 priority: row[3],
-                sequence_rank: sequenceRank,
                 slack_minutes: slackMinutes,
+                planned_start_at: schedule?.start ?? null,
+                planned_end_at: schedule?.end ?? null,
                 project_id: projectId,
                 project_title: projectTitleMap.get(projectId) ?? null,
                 assignee_id: assigneeId,
                 assignee_name: assigneeId
                   ? getUserDisplayName(assigneeId, userNameMap)
                   : null,
+                _slackSort:
+                  slackMinutes === null ? Number.POSITIVE_INFINITY : slackMinutes,
+                _dueSort: row[4] ?? Number.POSITIVE_INFINITY,
+                _prioritySort: -row[3],
+                _plannedStartSort:
+                  schedule?.start ?? Number.POSITIVE_INFINITY,
+              };
+            });
+
+          const compareActionable = (
+            a: typeof actionableCandidates[number],
+            b: typeof actionableCandidates[number]
+          ) => {
+            if (a._slackSort !== b._slackSort) {
+              return a._slackSort - b._slackSort;
+            }
+            if (a._dueSort !== b._dueSort) {
+              return a._dueSort - b._dueSort;
+            }
+            if (a._prioritySort !== b._prioritySort) {
+              return a._prioritySort - b._prioritySort;
+            }
+            if (a._plannedStartSort !== b._plannedStartSort) {
+              return a._plannedStartSort - b._plannedStartSort;
+            }
+            return a.title.localeCompare(b.title);
+          };
+
+          actionableCandidates.sort(compareActionable);
+          const actionableNow = actionableCandidates
+            .slice(0, actionableMax)
+            .map(({ _slackSort, _dueSort, _prioritySort, _plannedStartSort, ...entry }) => entry);
+
+          const actionableNowIds = new Set(
+            actionableNow.map((entry) => entry.item_id)
+          );
+          const unscheduledCandidates = actionableCandidates.filter(
+            (entry) =>
+              !blocksInWindow.has(entry.item_id) &&
+              !actionableNowIds.has(entry.item_id)
+          );
+
+          const unscheduledReady = unscheduledCandidates
+            .map((entry) => {
+              const dueMetrics = dueMetricsMap.get(entry.item_id);
+              const dependents = dependentsMap.get(entry.item_id) ?? 0;
+              const sequenceRank = computeSequenceRank({
+                is_overdue: dueMetrics?.is_overdue ?? false,
+                is_blocked: false,
+                due_at: entry.due_at ?? null,
+                priority: entry.priority,
+                dependents,
+              });
+              return {
+                ...entry,
+                sequence_rank: sequenceRank,
               };
             })
             .sort((a, b) => {
               if (a.sequence_rank !== b.sequence_rank) {
                 return a.sequence_rank - b.sequence_rank;
               }
-              const aDue = a.due_at ?? Number.POSITIVE_INFINITY;
-              const bDue = b.due_at ?? Number.POSITIVE_INFINITY;
-              if (aDue !== bDue) {
-                return aDue - bDue;
-              }
-              return a.title.localeCompare(b.title);
-            });
+              return compareActionable(a, b);
+            })
+            .slice(0, unscheduledMax)
+            .map(({ _slackSort, _dueSort, _prioritySort, _plannedStartSort, ...entry }) => entry);
 
           result = {
             ok: true,
             result: {
               scheduled,
+              actionable_now: actionableNow,
               unscheduled_ready: unscheduledReady,
+              meta: {
+                scheduled_total: scheduledCandidates.length,
+                actionable_total: actionableCandidates.length,
+                unscheduled_total: unscheduledCandidates.length,
+                truncated: {
+                  scheduled: scheduledCandidates.length > scheduledMax,
+                  actionable_now: actionableCandidates.length > actionableMax,
+                  unscheduled_ready: unscheduledCandidates.length > unscheduledMax,
+                },
+              },
             },
           };
           break;

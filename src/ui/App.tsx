@@ -245,31 +245,31 @@ const App = () => {
     setScope({ kind: "user", userId });
   }, []);
 
-  const handleDeleteProject = useCallback(async () => {
-    if (
-      !selectedProjectId ||
-      selectedProjectId === UNGROUPED_PROJECT_ID ||
-      !selectedProject
-    ) {
-      return;
-    }
-    if (
-      !confirm(
-        `Delete ${selectedProject.title}? This removes all descendants.`
-      )
-    ) {
-      return;
-    }
-    setDeleteError(null);
-    try {
-      await mutate("delete_item", { item_id: selectedProjectId });
-      setSelectedProjectId(UNGROUPED_PROJECT_ID);
-      triggerRefresh();
-    } catch (err) {
-      const message = err instanceof Error ? err.message : "Unknown error";
-      setDeleteError(message);
-    }
-  }, [selectedProject, selectedProjectId, triggerRefresh]);
+  const handleDeleteProjectById = useCallback(
+    async (projectId: string, projectTitle: string) => {
+      if (!projectId || projectId === UNGROUPED_PROJECT_ID) {
+        return;
+      }
+      if (
+        !confirm(`Delete ${projectTitle}? This removes all descendants.`)
+      ) {
+        return;
+      }
+      setDeleteError(null);
+      try {
+        await mutate("delete_item", { item_id: projectId });
+        if (selectedProjectId === projectId) {
+          setSelectedProjectId(UNGROUPED_PROJECT_ID);
+          setScope({ kind: "project", projectId: UNGROUPED_PROJECT_ID });
+        }
+        triggerRefresh();
+      } catch (err) {
+        const message = err instanceof Error ? err.message : "Unknown error";
+        setDeleteError(message);
+      }
+    },
+    [selectedProjectId, triggerRefresh]
+  );
 
   const openSheet = useCallback(
     (type: "project" | "milestone" | "task") => {
@@ -291,6 +291,24 @@ const App = () => {
     setSheetFocusTitle(true);
     setSheetOpen(true);
   }, []);
+
+  const handleDashboardItemSelect = useCallback(
+    (itemId: string, projectId: string | null) => {
+      if (activeScope.kind !== "user") {
+        openTaskEditor(itemId);
+        return;
+      }
+      const targetId = projectId ?? UNGROUPED_PROJECT_ID;
+      if (selectedProjectId === targetId) {
+        openTaskEditor(itemId);
+        return;
+      }
+      setActiveView("list");
+      setSelectedProjectId(targetId);
+      setScope({ kind: "project", projectId: targetId });
+    },
+    [activeScope.kind, openTaskEditor, selectedProjectId]
+  );
 
   const handleSeededProject = useCallback(
     (projectId: string) => {
@@ -321,6 +339,7 @@ const App = () => {
           onSetProjectId={handleSetProjectId}
           refreshToken={refreshToken}
           onAddProject={() => openSheet("project")}
+          onDeleteProject={handleDeleteProjectById}
           users={users}
           usersError={usersError}
           selectedUserId={selectedUserId ?? currentUser.user_id}
@@ -432,17 +451,6 @@ const App = () => {
               >
                 New Milestone
               </button>
-              <button
-                type="button"
-                className="button"
-                onClick={handleDeleteProject}
-                disabled={
-                  !selectedProjectId ||
-                  selectedProjectId === UNGROUPED_PROJECT_ID
-                }
-              >
-                Delete Project
-              </button>
             </div>
           ) : null}
           {deleteError ? <div className="error">{deleteError}</div> : null}
@@ -451,7 +459,7 @@ const App = () => {
             <DashboardView
               scope={activeScope}
               refreshToken={refreshToken}
-              onOpenItem={openTaskEditor}
+              onSelectItem={handleDashboardItemSelect}
             />
           ) : activeView === "list" ? (
             <ListView

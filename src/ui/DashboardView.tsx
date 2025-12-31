@@ -7,7 +7,7 @@ import { getTodayRange, getWeekRange } from "./dateWindow";
 type DashboardViewProps = {
   scope: Scope;
   refreshToken: number;
-  onOpenItem: (itemId: string) => void;
+  onSelectItem: (itemId: string, projectId: string | null) => void;
 };
 
 type ExecutionWindowResult = {
@@ -17,9 +17,27 @@ type ExecutionWindowResult = {
     title: string;
     start_at: number;
     duration_minutes: number;
+    end_at?: number;
     due_at?: number | null;
     status: string;
+    priority?: number;
+    slack_minutes?: number | null;
+    project_id?: string | null;
     project_title?: string | null;
+    assignee_name?: string | null;
+  }>;
+  actionable_now: Array<{
+    item_id: string;
+    title: string;
+    due_at?: number | null;
+    status: string;
+    priority: number;
+    slack_minutes?: number | null;
+    planned_start_at?: number | null;
+    planned_end_at?: number | null;
+    project_id?: string | null;
+    project_title?: string | null;
+    assignee_name?: string | null;
   }>;
   unscheduled_ready: Array<{
     item_id: string;
@@ -29,8 +47,22 @@ type ExecutionWindowResult = {
     priority: number;
     sequence_rank?: number;
     slack_minutes?: number | null;
+    planned_start_at?: number | null;
+    planned_end_at?: number | null;
+    project_id?: string | null;
     project_title?: string | null;
+    assignee_name?: string | null;
   }>;
+  meta?: {
+    scheduled_total: number;
+    actionable_total: number;
+    unscheduled_total: number;
+    truncated: {
+      scheduled: boolean;
+      actionable_now: boolean;
+      unscheduled_ready: boolean;
+    };
+  };
 };
 
 type BlockedViewResult = {
@@ -109,11 +141,12 @@ const formatDays = (value: number) =>
 const DashboardView: FC<DashboardViewProps> = ({
   scope,
   refreshToken,
-  onOpenItem,
+  onSelectItem,
 }) => {
   const [windowMode, setWindowMode] = useState<"today" | "week">("today");
   const [execution, setExecution] = useState<ExecutionWindowResult>({
     scheduled: [],
+    actionable_now: [],
     unscheduled_ready: [],
   });
   const [blocked, setBlocked] = useState<BlockedViewResult>({
@@ -199,7 +232,7 @@ const DashboardView: FC<DashboardViewProps> = ({
         <section className="dashboard-card">
           <h3>Execution</h3>
           <div className="dashboard-section">
-            <div className="dashboard-section-title">Scheduled</div>
+            <div className="dashboard-section-title">Now / Next</div>
             {execution.scheduled.length === 0 ? (
               <div className="dashboard-empty">No scheduled blocks.</div>
             ) : (
@@ -208,7 +241,9 @@ const DashboardView: FC<DashboardViewProps> = ({
                   key={block.block_id}
                   type="button"
                   className="dashboard-row"
-                  onClick={() => onOpenItem(block.item_id)}
+                  onClick={() =>
+                    onSelectItem(block.item_id, block.project_id ?? null)
+                  }
                 >
                   <span className="dashboard-time">
                     {TIME_LABEL.format(new Date(block.start_at))}
@@ -220,18 +255,26 @@ const DashboardView: FC<DashboardViewProps> = ({
                 </button>
               ))
             )}
+            {execution.meta?.truncated.scheduled ? (
+              <div className="dashboard-meta">
+                Showing {execution.scheduled.length} of{" "}
+                {execution.meta.scheduled_total}
+              </div>
+            ) : null}
           </div>
           <div className="dashboard-section">
-            <div className="dashboard-section-title">Unscheduled (Ready)</div>
-            {execution.unscheduled_ready.length === 0 ? (
-              <div className="dashboard-empty">Nothing ready without blocks.</div>
+            <div className="dashboard-section-title">Available now</div>
+            {execution.actionable_now.length === 0 ? (
+              <div className="dashboard-empty">No actionable items.</div>
             ) : (
-              execution.unscheduled_ready.map((item) => (
+              execution.actionable_now.map((item) => (
                 <button
                   key={item.item_id}
                   type="button"
                   className="dashboard-row"
-                  onClick={() => onOpenItem(item.item_id)}
+                  onClick={() =>
+                    onSelectItem(item.item_id, item.project_id ?? null)
+                  }
                 >
                   <span className="dashboard-title-text">{item.title}</span>
                   <span className="dashboard-meta">
@@ -243,6 +286,43 @@ const DashboardView: FC<DashboardViewProps> = ({
                 </button>
               ))
             )}
+            {execution.meta?.truncated.actionable_now ? (
+              <div className="dashboard-meta">
+                Showing {execution.actionable_now.length} of{" "}
+                {execution.meta.actionable_total}
+              </div>
+            ) : null}
+          </div>
+          <div className="dashboard-section">
+            <div className="dashboard-section-title">Back pocket</div>
+            {execution.unscheduled_ready.length === 0 ? (
+              <div className="dashboard-empty">Nothing ready without blocks.</div>
+            ) : (
+              execution.unscheduled_ready.map((item) => (
+                <button
+                  key={item.item_id}
+                  type="button"
+                  className="dashboard-row"
+                  onClick={() =>
+                    onSelectItem(item.item_id, item.project_id ?? null)
+                  }
+                >
+                  <span className="dashboard-title-text">{item.title}</span>
+                  <span className="dashboard-meta">
+                    {item.project_title ?? "—"}
+                  </span>
+                  <span className="dashboard-meta">
+                    {item.due_at ? formatDate(item.due_at) : "No due"}
+                  </span>
+                </button>
+              ))
+            )}
+            {execution.meta?.truncated.unscheduled_ready ? (
+              <div className="dashboard-meta">
+                Showing {execution.unscheduled_ready.length} of{" "}
+                {execution.meta.unscheduled_total}
+              </div>
+            ) : null}
           </div>
         </section>
 
@@ -258,7 +338,7 @@ const DashboardView: FC<DashboardViewProps> = ({
                   key={item.item_id}
                   type="button"
                   className="dashboard-row"
-                  onClick={() => onOpenItem(item.item_id)}
+                  onClick={() => onSelectItem(item.item_id, null)}
                 >
                   <span className="dashboard-title-text">{item.title}</span>
                   <span className="dashboard-meta">
@@ -278,7 +358,7 @@ const DashboardView: FC<DashboardViewProps> = ({
                   key={item.item_id}
                   type="button"
                   className="dashboard-row"
-                  onClick={() => onOpenItem(item.item_id)}
+                  onClick={() => onSelectItem(item.item_id, null)}
                 >
                   <span className="dashboard-title-text">{item.title}</span>
                   <span className="dashboard-meta">
@@ -301,7 +381,7 @@ const DashboardView: FC<DashboardViewProps> = ({
                   key={item.item_id}
                   type="button"
                   className="dashboard-row dashboard-row-warning"
-                  onClick={() => onOpenItem(item.item_id)}
+                  onClick={() => onSelectItem(item.item_id, null)}
                 >
                   <span className="dashboard-title-text">{item.title}</span>
                   <span className="dashboard-meta">
@@ -325,7 +405,7 @@ const DashboardView: FC<DashboardViewProps> = ({
                   key={item.item_id}
                   type="button"
                   className="dashboard-row"
-                  onClick={() => onOpenItem(item.item_id)}
+                  onClick={() => onSelectItem(item.item_id, null)}
                 >
                   <span className="dashboard-title-text">{item.title}</span>
                   <span className="dashboard-meta">
@@ -348,7 +428,7 @@ const DashboardView: FC<DashboardViewProps> = ({
                   key={item.item_id}
                   type="button"
                   className="dashboard-row dashboard-row-warning"
-                  onClick={() => onOpenItem(item.item_id)}
+                  onClick={() => onSelectItem(item.item_id, null)}
                 >
                   <span className="dashboard-title-text">{item.title}</span>
                   <span className="dashboard-meta">

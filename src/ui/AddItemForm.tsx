@@ -10,6 +10,7 @@ import { mutate, query } from "../rpc/clientSingleton";
 import { UNGROUPED_PROJECT_ID } from "./constants";
 import { toDateTimeLocal } from "../domain/formatters";
 import { ItemAutocomplete } from "./ItemAutocomplete";
+import UserSelect from "./UserSelect";
 
 type ItemType = "project" | "milestone" | "task";
 
@@ -29,6 +30,8 @@ type ItemRow = {
   health_mode?: string;
   tags: { id: string; name: string }[];
   assignees: { id: string; name: string | null }[];
+  assignee_id?: string | null;
+  assignee_name?: string | null;
 };
 
 type ItemDetails = {
@@ -48,6 +51,8 @@ type ItemDetails = {
   scheduled_minutes_total: number;
   schedule_start_at: number | null;
   primary_block_id: string | null;
+  assignee_id?: string | null;
+  assignee_name?: string | null;
   blockers: {
     blocker_id: string;
     kind: string;
@@ -73,18 +78,6 @@ const formatOptionLabel = (item: ItemRow, parentType: ItemType | null) => {
     item.type === "task" && parentType === "task" ? "Subtask" : item.type;
   return `${" ".repeat(item.depth * 2)}${item.title} (${labelType})`;
 };
-
-const parseCommaList = (value: string) =>
-  Array.from(
-    new Set(
-      value
-        .split(",")
-        .map((entry) => entry.trim())
-        .filter(Boolean)
-    )
-  );
-
-const normalizeAssignees = (value: string) => parseCommaList(value).join(", ");
 
 const AddItemForm: FC<AddItemFormProps> = ({
   selectedProjectId,
@@ -120,7 +113,7 @@ const AddItemForm: FC<AddItemFormProps> = ({
   const [notes, setNotes] = useState("");
   const [tagsInput, setTagsInput] = useState("");
   const [tagChips, setTagChips] = useState<string[]>([]);
-  const [assigneesInput, setAssigneesInput] = useState("");
+  const [assigneeId, setAssigneeId] = useState<string | null>(null);
   const [depChips, setDepChips] = useState<string[]>([]);
   const [blockerKind, setBlockerKind] = useState("general");
   const [blockerText, setBlockerText] = useState("");
@@ -263,13 +256,18 @@ const AddItemForm: FC<AddItemFormProps> = ({
           setScheduledFor(nextScheduledFor);
           setScheduledBlockId(data.primary_block_id ?? null);
           scheduledForInitialRef.current = nextScheduledFor;
+          setAssigneeId(data.assignee_id ?? null);
           const fromList = items.find((item) => item.id === data.id);
           if (fromList) {
             setTagsInput("");
             setTagChips(fromList.tags.map((tag) => tag.name));
-            setAssigneesInput(
-              fromList.assignees.map((assignee) => assignee.id).join(", ")
-            );
+            if (!data.assignee_id) {
+              setAssigneeId(
+                fromList.assignee_id ??
+                  fromList.assignees[0]?.id ??
+                  null
+              );
+            }
           }
         })
         .catch((err) => {
@@ -379,8 +377,7 @@ const AddItemForm: FC<AddItemFormProps> = ({
     setHealth("unknown");
     setTagsInput("");
     setTagChips([]);
-    setAssigneesInput("");
-    setDepsInput("");
+    setAssigneeId(null);
     setDepChips([]);
     setBlockerKind("general");
     setBlockerText("");
@@ -490,13 +487,10 @@ const AddItemForm: FC<AddItemFormProps> = ({
           if (tags.length > 0) {
             await mutate("set_item_tags", { item_id: itemId, tags });
           }
-          const assignees = parseCommaList(assigneesInput);
-          if (assignees.length > 0) {
-            await mutate("set_item_assignees", {
-              item_id: itemId,
-              assignee_ids: assignees,
-            });
-          }
+          await mutate("item.set_assignee", {
+            item_id: itemId,
+            user_id: assigneeId ?? null,
+          });
           for (const depId of depChips) {
             await mutate("add_dependency", {
               item_id: itemId,
@@ -550,10 +544,9 @@ const AddItemForm: FC<AddItemFormProps> = ({
         await mutate("set_status", { id: selectedItemId, status });
         const tags = tagChips;
         await mutate("set_item_tags", { item_id: selectedItemId, tags });
-        const assignees = parseCommaList(assigneesInput);
-        await mutate("set_item_assignees", {
+        await mutate("item.set_assignee", {
           item_id: selectedItemId,
-          assignee_ids: assignees,
+          user_id: assigneeId ?? null,
         });
         const desiredDeps = new Set(depChips);
         const existingDeps = new Set(currentDeps);
@@ -573,6 +566,7 @@ const AddItemForm: FC<AddItemFormProps> = ({
             });
           }
         }
+        onCreated?.();
       }
       onRefresh();
     } catch (err) {
@@ -928,12 +922,11 @@ const AddItemForm: FC<AddItemFormProps> = ({
           </div>
         </label>
         <label>
-          Assignees (comma-separated IDs)
-          <input
-            value={assigneesInput}
-            onChange={(event) => setAssigneesInput(event.target.value)}
-            onBlur={() => setAssigneesInput((current) => normalizeAssignees(current))}
-            placeholder="user-1, user-2"
+          Assignee
+          <UserSelect
+            value={assigneeId}
+            onChange={setAssigneeId}
+            placeholder="Search users"
           />
         </label>
         <label>

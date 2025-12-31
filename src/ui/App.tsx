@@ -4,15 +4,34 @@ import SidebarProjects from "./SidebarProjects";
 import { UNGROUPED_PROJECT_ID, UNGROUPED_PROJECT_LABEL } from "./constants";
 import ListView from "./ListView";
 import CalendarView from "./CalendarView";
+import DashboardView from "./DashboardView";
 import AddItemForm from "./AddItemForm";
 import RightSheet from "./RightSheet";
 import CommandPalette from "./CommandPalette";
+import ThemeSettings from "./ThemeSettings";
 import { mutate, query } from "../rpc/clientSingleton";
 import type { ListItem } from "../domain/listTypes";
+
+type UserLite = {
+  user_id: string;
+  display_name: string;
+  avatar_url?: string | null;
+};
+
+// Placeholder current user until real auth/users are wired.
+const DEFAULT_USER: UserLite = {
+  user_id: "me",
+  display_name: "Me",
+  avatar_url: null,
+};
 
 const App = () => {
   const [projectItems, setProjectItems] = useState<ListItem[]>([]);
   const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null);
+  const [users, setUsers] = useState<UserLite[]>([]);
+  const [selectedUserId, setSelectedUserId] = useState<string | null>(null);
+  const [usersError, setUsersError] = useState<string | null>(null);
+  const [scopeKind, setScopeKind] = useState<"project" | "user">("project");
   const [error, setError] = useState<string | null>(null);
   const [deleteError, setDeleteError] = useState<string | null>(null);
   const [refreshToken, setRefreshToken] = useState(0);
@@ -24,7 +43,10 @@ const App = () => {
   const [sheetItemId, setSheetItemId] = useState<string | null>(null);
   const [sheetFocusTitle, setSheetFocusTitle] = useState(false);
   const [paletteOpen, setPaletteOpen] = useState(false);
-  const [activeView, setActiveView] = useState<"list" | "calendar">("list");
+  const [activeView, setActiveView] = useState<
+    "list" | "calendar" | "dashboard"
+  >("list");
+  const [settingsOpen, setSettingsOpen] = useState(false);
 
   const loadProjectItems = useCallback(async () => {
     if (!selectedProjectId) {
@@ -45,6 +67,49 @@ const App = () => {
     setRefreshToken((value) => value + 1);
   }, []);
 
+  const loadUsers = useCallback(async () => {
+    setUsersError(null);
+    try {
+      const data = await query<{
+        users: UserLite[];
+        current_user_id?: string | null;
+      }>("users_list", {});
+      let list = data.users;
+      let currentId =
+        typeof data.current_user_id === "string" ? data.current_user_id : null;
+      if (list.length === 0) {
+        await mutate("user.create", { display_name: "Me" });
+        const refreshed = await query<{
+          users: UserLite[];
+          current_user_id?: string | null;
+        }>("users_list", {});
+        list = refreshed.users;
+        currentId =
+          typeof refreshed.current_user_id === "string"
+            ? refreshed.current_user_id
+            : currentId;
+      }
+      if (list.length === 0) {
+        list = [DEFAULT_USER];
+      }
+      setUsers(list);
+      setSelectedUserId((prev) => {
+        if (prev && list.some((user) => user.user_id === prev)) {
+          return prev;
+        }
+        if (currentId && list.some((user) => user.user_id === currentId)) {
+          return currentId;
+        }
+        return list[0]?.user_id ?? null;
+      });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Unknown error";
+      setUsersError(message);
+      setUsers([DEFAULT_USER]);
+      setSelectedUserId((prev) => prev ?? DEFAULT_USER.user_id);
+    }
+  }, []);
+
   useEffect(() => {
     setError(null);
     loadProjectItems().catch((err) => {
@@ -52,6 +117,10 @@ const App = () => {
       setError(message);
     });
   }, [loadProjectItems, refreshToken]);
+
+  useEffect(() => {
+    void loadUsers();
+  }, [loadUsers, refreshToken]);
 
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
@@ -80,6 +149,34 @@ const App = () => {
       projectItems.find((item) => item.id === selectedProjectId) ?? null
     );
   }, [projectItems, selectedProjectId]);
+
+  const currentUser = useMemo(() => {
+    const list = users.length > 0 ? users : [DEFAULT_USER];
+    if (selectedUserId) {
+      const match = list.find((user) => user.user_id === selectedUserId);
+      if (match) {
+        return match;
+      }
+    }
+    return list[0] ?? DEFAULT_USER;
+  }, [selectedUserId, users]);
+
+  const handleSelectProject = useCallback(
+    (projectId: string | null) => {
+      setSelectedProjectId(projectId);
+      setScopeKind("project");
+      if (activeView === "dashboard") {
+        setActiveView("list");
+      }
+    },
+    [activeView]
+  );
+
+  const handleSelectUser = useCallback((userId: string) => {
+    setSelectedUserId(userId);
+    setScopeKind("user");
+    setActiveView("calendar");
+  }, []);
 
   const handleDeleteProject = useCallback(async () => {
     if (
@@ -142,39 +239,89 @@ const App = () => {
       <div className="layout">
         <SidebarProjects
           selectedProjectId={selectedProjectId}
-          onSelect={setSelectedProjectId}
+          onSelect={handleSelectProject}
           refreshToken={refreshToken}
           onAddProject={() => openSheet("project")}
+          users={users}
+          usersError={usersError}
+          selectedUserId={selectedUserId}
+          onSelectUser={handleSelectUser}
         />
         <main className="main">
-          <div className="title-row">
-            <h1 className="title">
-              {selectedProject ? selectedProject.title : "Select a project"}
-            </h1>
-            <div className="view-toggle">
+          <div className="top-bar">
+            <div className="top-bar-left">
+              <div className="top-tabs">
+                <button
+                  type="button"
+                  className={
+                    activeView === "dashboard"
+                      ? "top-tab top-tab-active"
+                      : "top-tab"
+                  }
+                  onClick={() => setActiveView("dashboard")}
+                >
+                  Dashboard
+                </button>
+                <button
+                  type="button"
+                  className={
+                    activeView === "list"
+                      ? "top-tab top-tab-active"
+                      : "top-tab"
+                  }
+                  onClick={() => {
+                    setScopeKind("project");
+                    setActiveView("list");
+                  }}
+                >
+                  List
+                </button>
+                <button
+                  type="button"
+                  className={
+                    activeView === "calendar"
+                      ? "top-tab top-tab-active"
+                      : "top-tab"
+                  }
+                  onClick={() => setActiveView("calendar")}
+                >
+                  Calendar
+                </button>
+              </div>
+              <div className="top-title">
+                {activeView === "dashboard"
+                  ? "Dashboard"
+                  : scopeKind === "user"
+                    ? currentUser.display_name
+                    : selectedProject
+                      ? selectedProject.title
+                      : "Select a project"}
+              </div>
+            </div>
+            <div className="top-bar-right">
+              <div className="user-chip" title={currentUser.display_name}>
+                <span className="user-chip-icon" aria-hidden="true">
+                  👤
+                </span>
+                <span className="user-chip-label">
+                  {currentUser.display_name}
+                </span>
+              </div>
               <button
                 type="button"
-                className={
-                  activeView === "list"
-                    ? "view-toggle-button view-toggle-active"
-                    : "view-toggle-button"
-                }
-                onClick={() => setActiveView("list")}
+                className="button"
+                onClick={() => setSettingsOpen((prev) => !prev)}
               >
-                List
-              </button>
-              <button
-                type="button"
-                className={
-                  activeView === "calendar"
-                    ? "view-toggle-button view-toggle-active"
-                    : "view-toggle-button"
-                }
-                onClick={() => setActiveView("calendar")}
-              >
-                Calendar
+                Settings
               </button>
             </div>
+          </div>
+          {settingsOpen ? (
+            <div className="settings-panel">
+              <ThemeSettings />
+            </div>
+          ) : null}
+          {scopeKind === "project" && activeView !== "dashboard" ? (
             <div className="title-actions">
               <button
                 type="button"
@@ -195,18 +342,25 @@ const App = () => {
                 Delete Project
               </button>
             </div>
-          </div>
+          ) : null}
           {deleteError ? <div className="error">{deleteError}</div> : null}
           {error ? <div className="error">{error}</div> : null}
-          {activeView === "list" ? (
+          {activeView === "dashboard" ? (
+            <DashboardView />
+          ) : activeView === "list" ? (
             <ListView
               selectedProjectId={selectedProjectId}
               refreshToken={refreshToken}
               onRefresh={triggerRefresh}
+              onOpenItem={openTaskEditor}
             />
           ) : (
             <CalendarView
-              selectedProjectId={selectedProjectId}
+              scope={
+                scopeKind === "user"
+                  ? { kind: "user", userId: selectedUserId ?? currentUser.user_id }
+                  : { kind: "project", projectId: selectedProjectId }
+              }
               projectItems={projectItems}
               refreshToken={refreshToken}
               onRefresh={triggerRefresh}

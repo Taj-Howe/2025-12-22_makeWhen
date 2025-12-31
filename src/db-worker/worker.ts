@@ -311,15 +311,22 @@ const getAssigneesMap = (db: any, ids: string[]) => {
   }
   const placeholders = buildPlaceholders(ids.length);
   const rows = db.exec({
-    sql: `SELECT item_id, assignee_id FROM item_assignees WHERE item_id IN (${placeholders});`,
+    sql: `SELECT item_id, assignee_id FROM item_assignees WHERE item_id IN (${placeholders}) ORDER BY assignee_id ASC;`,
     rowMode: "array",
     returnValue: "resultRows",
     bind: ids,
   }) as Array<[string, string]>;
   for (const row of rows) {
     const list = map.get(row[0]) ?? [];
-    list.push(row[1]);
+    if (!list.includes(row[1])) {
+      list.push(row[1]);
+    }
     map.set(row[0], list);
+  }
+  for (const [key, list] of map.entries()) {
+    if (list.length > 1) {
+      map.set(key, [list[0]]);
+    }
   }
   return map;
 };
@@ -546,6 +553,68 @@ const getSettings = (db: any) => {
     }
   }
   return settings;
+};
+
+const USERS_SETTING_KEY = "users_registry";
+const CURRENT_USER_SETTING_KEY = "current_user_id";
+
+type UserRecord = {
+  user_id: string;
+  display_name: string;
+  avatar_url: string | null;
+};
+
+const normalizeUserList = (value: unknown): UserRecord[] => {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  const map = new Map<string, UserRecord>();
+  for (const entry of value) {
+    if (!entry || typeof entry !== "object") {
+      continue;
+    }
+    const record = entry as Record<string, unknown>;
+    if (typeof record.user_id !== "string" || typeof record.display_name !== "string") {
+      continue;
+    }
+    const avatar =
+      typeof record.avatar_url === "string" ? record.avatar_url : null;
+    if (!map.has(record.user_id)) {
+      map.set(record.user_id, {
+        user_id: record.user_id,
+        display_name: record.display_name,
+        avatar_url: avatar,
+      });
+    }
+  }
+  return Array.from(map.values());
+};
+
+const readUserRegistry = (db: any) => {
+  const settings = getSettings(db);
+  return normalizeUserList(settings.get(USERS_SETTING_KEY));
+};
+
+const writeUserRegistry = (db: any, users: UserRecord[]) => {
+  const payload = JSON.stringify(users);
+  db.exec(
+    "INSERT INTO settings (key, value_json) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value_json = excluded.value_json;",
+    {
+      bind: [USERS_SETTING_KEY, payload],
+    }
+  );
+};
+
+const getUserMap = (db: any) => {
+  const registry = readUserRegistry(db);
+  return new Map(registry.map((user) => [user.user_id, user.display_name]));
+};
+
+const getUserDisplayName = (userId: string, nameMap: Map<string, string>) => {
+  if (!userId) {
+    return null;
+  }
+  return nameMap.get(userId) ?? `User ${userId.slice(0, 6)}`;
 };
 
 const exportData = (db: any) => {
@@ -2256,6 +2325,99 @@ const handleMutate = (envelope: MutateEnvelope): MutateResult => {
           };
           break;
         }
+        case "user.create": {
+          const displayName = ensureString(args.display_name, "display_name").trim();
+          if (!displayName) {
+            result = { ok: false, error: "display_name must be a non-empty string" };
+            break;
+          }
+          const avatarUrl =
+            typeof args.avatar_url === "string" ? args.avatar_url : null;
+          const users = readUserRegistry(dbHandle);
+          const userId = crypto.randomUUID();
+          users.push({
+            user_id: userId,
+            display_name: displayName,
+            avatar_url: avatarUrl,
+          });
+          writeUserRegistry(dbHandle, users);
+          const settings = getSettings(dbHandle);
+          if (typeof settings.get(CURRENT_USER_SETTING_KEY) !== "string") {
+            dbHandle.exec(
+              "INSERT INTO settings (key, value_json) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value_json = excluded.value_json;",
+              {
+                bind: [
+                  CURRENT_USER_SETTING_KEY,
+                  JSON.stringify(userId),
+                ],
+              }
+            );
+          }
+          result = {
+            ok: true,
+            result: { user_id: userId },
+            invalidate: ["users"],
+          };
+          break;
+        }
+        case "user.update": {
+          const userId = ensureString(args.user_id, "user_id");
+          const displayName =
+            typeof args.display_name === "string"
+              ? args.display_name.trim()
+              : null;
+          const avatarUrl =
+            typeof args.avatar_url === "string" ? args.avatar_url : null;
+          const users = readUserRegistry(dbHandle);
+          const index = users.findIndex((user) => user.user_id === userId);
+          if (index === -1) {
+            result = { ok: false, error: "user_id not found" };
+            break;
+          }
+          const next = { ...users[index] };
+          if (displayName !== null) {
+            if (!displayName) {
+              result = { ok: false, error: "display_name must be non-empty" };
+              break;
+            }
+            next.display_name = displayName;
+          }
+          if (avatarUrl !== null) {
+            next.avatar_url = avatarUrl;
+          }
+          users[index] = next;
+          writeUserRegistry(dbHandle, users);
+          result = {
+            ok: true,
+            result: { user_id: userId },
+            invalidate: ["users"],
+          };
+          break;
+        }
+        case "item.set_assignee": {
+          const itemId = ensureString(args.item_id, "item_id");
+          const userId =
+            args.user_id === null || args.user_id === undefined
+              ? null
+              : ensureString(args.user_id, "user_id");
+          dbHandle.exec("DELETE FROM item_assignees WHERE item_id = ?;", {
+            bind: [itemId],
+          });
+          if (userId) {
+            dbHandle.exec(
+              "INSERT INTO item_assignees (item_id, assignee_id) VALUES (?, ?);",
+              {
+                bind: [itemId, userId],
+              }
+            );
+          }
+          result = {
+            ok: true,
+            result: { item_id: itemId, assignee_id: userId },
+            invalidate: ["items", `item:${itemId}`],
+          };
+          break;
+        }
         case "set_item_assignees": {
           const itemId = ensureString(args.item_id, "item_id");
           const assigneesRaw = ensureArray(
@@ -2269,20 +2431,24 @@ const handleMutate = (envelope: MutateEnvelope): MutateResult => {
                 .filter((value) => value.length > 0)
             )
           );
+          const singleAssigneeId = assigneeIds[0] ?? null;
           dbHandle.exec("DELETE FROM item_assignees WHERE item_id = ?;", {
             bind: [itemId],
           });
-          for (const assigneeId of assigneeIds) {
+          if (singleAssigneeId) {
             dbHandle.exec(
               "INSERT INTO item_assignees (item_id, assignee_id) VALUES (?, ?);",
               {
-                bind: [itemId, assigneeId],
+                bind: [itemId, singleAssigneeId],
               }
             );
           }
           result = {
             ok: true,
-            result: { item_id: itemId, assignee_ids: assigneeIds },
+            result: {
+              item_id: itemId,
+              assignee_ids: singleAssigneeId ? [singleAssigneeId] : [],
+            },
             invalidate: ["items", `item:${itemId}`],
           };
           break;
@@ -2493,6 +2659,17 @@ const handleRequest = async (message: RpcRequest): Promise<RpcResponse> => {
             bind: [itemId],
           }) as Array<[string, string, string, number, number | null]>;
 
+          const assigneeRows = dbHandle.exec({
+            sql: "SELECT assignee_id FROM item_assignees WHERE item_id = ? ORDER BY assignee_id ASC LIMIT 1;",
+            rowMode: "array",
+            returnValue: "resultRows",
+            bind: [itemId],
+          }) as Array<[string]>;
+          const assigneeId = assigneeRows[0]?.[0] ?? null;
+          const assigneeName = assigneeId
+            ? getUserDisplayName(assigneeId, getUserMap(dbHandle))
+            : null;
+
           const hasActiveBlocker = blockersRows.some((row) => row[4] === null);
           const hasUnmetDep = depsRows.some(
             (row) => row[1] === null || row[1] !== "done"
@@ -2630,6 +2807,8 @@ const handleRequest = async (message: RpcRequest): Promise<RpcResponse> => {
               health: rows[0][9],
               health_mode: rows[0][10],
               notes: rows[0][11],
+              assignee_id: assigneeId,
+              assignee_name: assigneeName,
               dependencies: depsRows.map((row) => row[0]),
               blockers: blockersRows.map((row) => ({
                 blocker_id: row[0],
@@ -3021,6 +3200,7 @@ const handleRequest = async (message: RpcRequest): Promise<RpcResponse> => {
           const blockedMap = getBlockedStatusMap(dbHandle, ids);
           const assigneesMap = getAssigneesMap(dbHandle, ids);
           const tagsMap = getTagsMap(dbHandle, ids);
+          const userNameMap = getUserMap(dbHandle);
           const dependenciesMap = getDependenciesMap(dbHandle, ids);
           const dependentsMap = getDependentsCountMap(dbHandle, ids);
           const activeBlockerCountMap = getActiveBlockerCountMap(dbHandle, ids);
@@ -3123,6 +3303,11 @@ const handleRequest = async (message: RpcRequest): Promise<RpcResponse> => {
             const dueMetrics = dueMetricsMap.get(row[0])!;
             const rollupTotals = rollupMap.get(row[0]);
             const actualMinutes = timeMap.get(row[0]) ?? 0;
+            const assigneeIds = assigneesMap.get(row[0]) ?? [];
+            const assigneeId = assigneeIds[0] ?? null;
+            const assigneeName = assigneeId
+              ? getUserDisplayName(assigneeId, userNameMap)
+              : null;
             const rollupEstimate = rollupTotals?.totalEstimate ?? row[8];
             const rollupActual =
               rollupTotals?.totalActual ?? actualMinutes;
@@ -3182,10 +3367,12 @@ const handleRequest = async (message: RpcRequest): Promise<RpcResponse> => {
                 scheduled_but_blocked:
                   schedule.count > 0 && blocked.is_blocked ? true : false,
               },
-              assignees: (assigneesMap.get(row[0]) ?? []).map((id) => ({
+              assignees: assigneeIds.map((id) => ({
                 id,
                 name: null,
               })),
+              assignee_id: assigneeId,
+              assignee_name: assigneeName,
               tags: (tagsMap.get(row[0]) ?? []).map((tag) => ({
                 id: tag,
                 name: tag,
@@ -3406,6 +3593,9 @@ const handleRequest = async (message: RpcRequest): Promise<RpcResponse> => {
             break;
           }
 
+          const assigneesMap = getAssigneesMap(dbHandle, uniqueBaseIds);
+          const userNameMap = getUserMap(dbHandle);
+
           const scheduleRows = dbHandle.exec({
             sql: `SELECT block_id, item_id, start_at, duration_minutes
               FROM scheduled_blocks
@@ -3618,6 +3808,11 @@ const handleRequest = async (message: RpcRequest): Promise<RpcResponse> => {
             const rollupTotals = rollupMap.get(id);
             const depsIn = depsInMap.get(id) ?? [];
             const depsOut = depsOutMap.get(id) ?? [];
+            const assigneeIds = assigneesMap.get(id) ?? [];
+            const assigneeId = assigneeIds[0] ?? null;
+            const assigneeName = assigneeId
+              ? getUserDisplayName(assigneeId, userNameMap)
+              : null;
             const blockedBy = depsIn.map((dep) => {
               const meta = metaMap.get(dep.predecessor_id);
               const predecessorSummary = scheduleSummaryMap.get(
@@ -3685,6 +3880,8 @@ const handleRequest = async (message: RpcRequest): Promise<RpcResponse> => {
               blocked_by: blockedBy,
               blocking,
               slack_minutes: slackMinutes,
+              assignee_id: assigneeId,
+              assignee_name: assigneeName,
             };
           });
 
@@ -4786,6 +4983,102 @@ const handleRequest = async (message: RpcRequest): Promise<RpcResponse> => {
           }) as Array<
             [string, string, string, number, string | null, string, number]
           >;
+          const itemIds = itemRows.map((row) => row[0]);
+          const assigneesMap = getAssigneesMap(dbHandle, itemIds);
+          const userNameMap = getUserMap(dbHandle);
+
+          result = {
+            ok: true,
+            result: {
+              blocks: blockRows.map((row) => ({
+                block_id: row[0],
+                item_id: row[1],
+                start_at: row[2],
+                duration_minutes: row[3],
+              })),
+              items: itemRows.map((row) => ({
+                assignee_id: (assigneesMap.get(row[0]) ?? [])[0] ?? null,
+                assignee_name: getUserDisplayName(
+                  (assigneesMap.get(row[0]) ?? [])[0] ?? "",
+                  userNameMap
+                ),
+                id: row[0],
+                title: row[1],
+                status: row[2],
+                due_at: row[3],
+                parent_id: row[4],
+                item_type: row[5],
+                priority: row[6],
+              })),
+            },
+          };
+          break;
+        }
+        case "calendar_range_user": {
+          const userId = ensureString(args.user_id, "user_id");
+          const timeMin = ensureTimeMs(args.time_min, "time_min");
+          const timeMax = ensureTimeMs(args.time_max, "time_max");
+          if (timeMax <= timeMin) {
+            throw new Error("time_max must be greater than time_min");
+          }
+
+          const blockRows = dbHandle.exec({
+            sql: `SELECT b.block_id, b.item_id, b.start_at, b.duration_minutes
+              FROM scheduled_blocks b
+              JOIN item_assignees a ON a.item_id = b.item_id
+              WHERE a.assignee_id = ?
+                AND b.start_at < ?
+                AND (b.start_at + b.duration_minutes * 60000) > ?
+              ORDER BY b.start_at ASC;`,
+            rowMode: "array",
+            returnValue: "resultRows",
+            bind: [userId, timeMax, timeMin],
+          }) as Array<[string, string, number, number]>;
+
+          const dueRows = dbHandle.exec({
+            sql: `SELECT i.id, i.title, i.status, i.due_at, i.parent_id, i.type, i.priority
+              FROM items i
+              JOIN item_assignees a ON a.item_id = i.id
+              WHERE a.assignee_id = ?
+                AND i.due_at IS NOT NULL
+                AND i.due_at >= ?
+                AND i.due_at < ?
+              ORDER BY i.due_at ASC;`,
+            rowMode: "array",
+            returnValue: "resultRows",
+            bind: [userId, timeMin, timeMax],
+          }) as Array<
+            [string, string, string, number, string | null, string, number]
+          >;
+
+          const itemIds = new Set<string>();
+          for (const row of blockRows) {
+            itemIds.add(row[1]);
+          }
+          for (const row of dueRows) {
+            itemIds.add(row[0]);
+          }
+
+          let itemRows: Array<
+            [string, string, string, number | null, string | null, string, number]
+          > = [];
+          if (itemIds.size > 0) {
+            const ids = Array.from(itemIds);
+            const placeholders = buildPlaceholders(ids.length);
+            itemRows = dbHandle.exec({
+              sql: `SELECT id, title, status, due_at, parent_id, type, priority
+                FROM items
+                WHERE id IN (${placeholders})
+                ORDER BY title ASC;`,
+              rowMode: "array",
+              returnValue: "resultRows",
+              bind: ids,
+            }) as Array<
+              [string, string, string, number | null, string | null, string, number]
+            >;
+          }
+          const userNameMap = getUserMap(dbHandle);
+          const assigneeName = getUserDisplayName(userId, userNameMap);
 
           result = {
             ok: true,
@@ -4804,8 +5097,41 @@ const handleRequest = async (message: RpcRequest): Promise<RpcResponse> => {
                 parent_id: row[4],
                 item_type: row[5],
                 priority: row[6],
+                assignee_id: userId,
+                assignee_name: assigneeName,
               })),
             },
+          };
+          break;
+        }
+        case "users_list": {
+          const settings = getSettings(dbHandle);
+          const registry = normalizeUserList(settings.get(USERS_SETTING_KEY));
+          const userMap = new Map(registry.map((user) => [user.user_id, user]));
+          const rows = dbHandle.exec({
+            sql: "SELECT DISTINCT assignee_id FROM item_assignees ORDER BY assignee_id ASC;",
+            rowMode: "array",
+            returnValue: "resultRows",
+          }) as Array<[string]>;
+          for (const row of rows) {
+            const id = row[0];
+            if (!userMap.has(id)) {
+              const shortId = id.length > 6 ? id.slice(0, 6) : id;
+              userMap.set(id, {
+                user_id: id,
+                display_name: `User ${shortId}`,
+                avatar_url: null,
+              });
+            }
+          }
+          const users = Array.from(userMap.values());
+          const currentUserId =
+            typeof settings.get(CURRENT_USER_SETTING_KEY) === "string"
+              ? (settings.get(CURRENT_USER_SETTING_KEY) as string)
+              : null;
+          result = {
+            ok: true,
+            result: { users, current_user_id: currentUserId },
           };
           break;
         }

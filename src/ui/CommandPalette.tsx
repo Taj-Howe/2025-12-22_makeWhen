@@ -417,10 +417,10 @@ const CommandPalette: FC<CommandPaletteProps> = ({
         if (value.tags) {
           await mutate("set_item_tags", { item_id: targetId, tags: value.tags });
         }
-        if (value.assignees) {
-          await mutate("set_item_assignees", {
+        if (value.assignees && value.assignees.length > 0) {
+          await mutate("item.set_assignee", {
             item_id: targetId,
-            assignee_ids: value.assignees,
+            user_id: value.assignees[0],
           });
         }
         if (value.dependsOn) {
@@ -441,25 +441,36 @@ const CommandPalette: FC<CommandPaletteProps> = ({
           const current = data.items.find((item) => item.id === targetId);
           const currentDeps = new Set(current?.depends_on ?? []);
           const desiredDeps = new Set(resolvedDeps);
+          const depTypeForCreate = value.depType ?? "FS";
+          const hasDepUpdates =
+            value.depType !== undefined || value.depLagMinutes !== undefined;
           for (const depId of desiredDeps) {
             if (!currentDeps.has(depId)) {
-              await mutate("add_dependency", {
-                item_id: targetId,
-                depends_on_id: depId,
+              await mutate("dependency.create", {
+                predecessor_id: depId,
+                successor_id: targetId,
+                type: depTypeForCreate,
+                lag_minutes: value.depLagMinutes,
+              });
+            } else if (hasDepUpdates) {
+              await mutate("dependency.update", {
+                edge_id: `${targetId}->${depId}`,
+                type: value.depType,
+                lag_minutes: value.depLagMinutes,
               });
             }
           }
           for (const depId of currentDeps) {
             if (!desiredDeps.has(depId)) {
-              await mutate("remove_dependency", {
-                item_id: targetId,
-                depends_on_id: depId,
+              await mutate("dependency.delete", {
+                edge_id: `${targetId}->${depId}`,
               });
             }
           }
         }
         if (value.scheduledFor) {
-          let durationMinutes = value.estimateMinutes ?? null;
+          let durationMinutes =
+            value.scheduledDurationMinutes ?? value.estimateMinutes ?? null;
           if (!durationMinutes || durationMinutes <= 0) {
             const scopeId = projectScopeId ?? selectedProjectId ?? null;
             const data = await query<{
@@ -483,6 +494,24 @@ const CommandPalette: FC<CommandPaletteProps> = ({
             locked: 0,
             source: "manual",
           });
+        }
+        if (value.health || value.healthMode) {
+          await mutate("update_item_fields", {
+            id: targetId,
+            fields: {
+              health: value.health,
+              health_mode: value.healthMode,
+            },
+          });
+        }
+        if (value.blockerTexts && value.blockerTexts.length > 0) {
+          for (const text of value.blockerTexts) {
+            await mutate("add_blocker", {
+              item_id: targetId,
+              kind: value.blockerKind ?? "general",
+              text,
+            });
+          }
         }
         setSubmitError(null);
         setInputValue("");
@@ -554,6 +583,18 @@ const CommandPalette: FC<CommandPaletteProps> = ({
     if (value.priority !== undefined) {
       createArgs.priority = value.priority;
     }
+    if (value.status) {
+      createArgs.status = value.status;
+    }
+    if (value.notes !== undefined) {
+      createArgs.notes = value.notes || null;
+    }
+    if (value.health) {
+      createArgs.health = value.health;
+    }
+    if (value.healthMode) {
+      createArgs.health_mode = value.healthMode;
+    }
 
     try {
       const created = await mutate("create_item", createArgs);
@@ -565,23 +606,36 @@ const CommandPalette: FC<CommandPaletteProps> = ({
         await mutate("set_item_tags", { item_id: itemId, tags: value.tags });
       }
       if (value.assignees && value.assignees.length > 0) {
-        await mutate("set_item_assignees", {
+        await mutate("item.set_assignee", {
           item_id: itemId,
-          assignee_ids: value.assignees,
+          user_id: value.assignees[0],
         });
+      }
+      if (value.blockerTexts && value.blockerTexts.length > 0) {
+        for (const text of value.blockerTexts) {
+          await mutate("add_blocker", {
+            item_id: itemId,
+            kind: value.blockerKind ?? "general",
+            text,
+          });
+        }
       }
       if (value.dependsOn && value.dependsOn.length > 0) {
         const scopeId = resolvedProjectId ?? targetProjectId ?? null;
+        const depTypeForCreate = value.depType ?? "FS";
         for (const depTarget of value.dependsOn) {
           const depId = await resolveItemId(depTarget, scopeId, false);
-          await mutate("add_dependency", {
-            item_id: itemId,
-            depends_on_id: depId,
+          await mutate("dependency.create", {
+            predecessor_id: depId,
+            successor_id: itemId,
+            type: depTypeForCreate,
+            lag_minutes: value.depLagMinutes,
           });
         }
       }
       if (value.scheduledFor) {
-        const durationMinutes = value.estimateMinutes ?? 0;
+        const durationMinutes =
+          value.scheduledDurationMinutes ?? value.estimateMinutes ?? 0;
         if (durationMinutes <= 0) {
           setSubmitError("Est Dur must be greater than 0 to schedule.");
           return;
@@ -680,8 +734,12 @@ const CommandPalette: FC<CommandPaletteProps> = ({
                 <div>
                   <strong>Scheduled:</strong>{" "}
                   {new Date(parseResult.value.scheduledFor).toLocaleString()}
-                  {parseResult.value.estimateMinutes
-                    ? ` (${parseResult.value.estimateMinutes} min)`
+                  {parseResult.value.scheduledDurationMinutes ||
+                  parseResult.value.estimateMinutes
+                    ? ` (${
+                        parseResult.value.scheduledDurationMinutes ??
+                        parseResult.value.estimateMinutes
+                      } min)`
                     : ""}
                 </div>
               ) : null}
@@ -712,18 +770,27 @@ const COMMAND_HELP: Record<string, CommandHelpData> = {
       "parent/under",
       "in",
       "due",
+      "start/start_at",
+      "duration/dur",
       "priority/pri",
       "status",
       "tags",
       "depends_on/dep",
-      "assignees",
+      "dep_type",
+      "dep_lag/lag",
+      "assignee/assignees",
+      "blocker/blockers",
+      "blocker_kind",
       "notes",
       "estimate_mode",
       "estimate_minutes",
-      "scheduled_for",
+      "health",
+      "health_mode",
     ],
     examples: [
       'create task "Write outline" due:"2026-01-03 17:00" priority:3',
+      'create task "Plan sprint" start:"2026-01-03 09:00" dur:"90m"',
+      'create task "Fix bug" blocker:"Needs API key" blocker_kind:general',
       'create task "No due date task" priority:1',
       'create milestone "Phase 1" parent:project_id',
       'create milestone "Follow Up" in:"Sample Project"',
@@ -732,7 +799,24 @@ const COMMAND_HELP: Record<string, CommandHelpData> = {
   edit: {
     title: "edit",
     description: "Edit by id or exact title match.",
-    props: ["type", "id or \"title\"", "in", "title", "status", "priority", "tags"],
+    props: [
+      "type",
+      "id or \"title\"",
+      "in",
+      "title",
+      "status",
+      "priority",
+      "tags",
+      "start/start_at",
+      "duration/dur",
+      "dep_type",
+      "dep_lag/lag",
+      "assignee/assignees",
+      "blocker/blockers",
+      "blocker_kind",
+      "health",
+      "health_mode",
+    ],
     examples: [
       'edit task 01H... title:"New title" status:in_progress',
       'edit task "Weekly sync" in:"Sample Project" priority:2',
@@ -752,7 +836,15 @@ const COMMAND_HELP: Record<string, CommandHelpData> = {
   project: {
     title: "project (alias)",
     description: "Alias for create project.",
-    props: ["title", "due", "priority/pri", "tags"],
+    props: [
+      "title",
+      "due",
+      "priority/pri",
+      "tags",
+      "assignee/assignees",
+      "health",
+      "health_mode",
+    ],
     examples: [
       'project "Website revamp"',
       'project title:"Infra cleanup" pri:2',
@@ -762,7 +854,23 @@ const COMMAND_HELP: Record<string, CommandHelpData> = {
   milestone: {
     title: "milestone (alias)",
     description: "Alias for create milestone.",
-    props: ["title", "parent", "under", "in", "due", "pri", "tags", "dep"],
+    props: [
+      "title",
+      "parent",
+      "under",
+      "in",
+      "due",
+      "pri",
+      "tags",
+      "dep",
+      "dep_type",
+      "dep_lag/lag",
+      "assignee/assignees",
+      "blocker/blockers",
+      "blocker_kind",
+      "health",
+      "health_mode",
+    ],
     examples: [
       'milestone "MVP" parent:project_id',
       'milestone title:"Phase 1" under:project_id',
@@ -779,13 +887,22 @@ const COMMAND_HELP: Record<string, CommandHelpData> = {
       "under",
       "in",
       "due",
+      "start/start_at",
+      "duration/dur",
       "pri",
       "tags",
       "dep",
-      "scheduled_for",
+      "dep_type",
+      "dep_lag/lag",
+      "assignee/assignees",
+      "blocker/blockers",
+      "blocker_kind",
+      "health",
+      "health_mode",
     ],
     examples: [
       'task "Fix bug" pri:3',
+      'task "Fix bug" start:"2026-01-03 09:00" dur:"45m"',
       'task title:"API audit" parent:milestone_id',
       'task "Ship build" in:"Sample Project" pri:2',
       'task "Ship build" due:2025-02-15 tags:release',
@@ -794,7 +911,24 @@ const COMMAND_HELP: Record<string, CommandHelpData> = {
   subtask: {
     title: "subtask (alias)",
     description: "Alias for create subtask.",
-    props: ["title", "parent", "under", "due", "pri", "tags", "dep"],
+    props: [
+      "title",
+      "parent",
+      "under",
+      "due",
+      "start/start_at",
+      "duration/dur",
+      "pri",
+      "tags",
+      "dep",
+      "dep_type",
+      "dep_lag/lag",
+      "assignee/assignees",
+      "blocker/blockers",
+      "blocker_kind",
+      "health",
+      "health_mode",
+    ],
     examples: [
       'subtask "Refactor module" parent:task_id',
       'subtask title:"Write tests" under:task_id',
@@ -826,6 +960,7 @@ const GeneralHelp = () => {
       <div className="palette-help-title">Examples</div>
       <ul className="palette-help-list">
         <li>create task "Write outline" due:"2026-01-03 17:00"</li>
+        <li>create task "Plan sprint" start:"2026-01-03 09:00" dur:"90m"</li>
         <li>edit task 01H... title:"New title"</li>
         <li>delete task 01H...</li>
       </ul>

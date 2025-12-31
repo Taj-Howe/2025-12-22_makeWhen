@@ -25,6 +25,10 @@ export const createBlock = (args: {
 export const setItemTags = (itemId: string, tags: string[]) =>
   mutate("set_item_tags", { item_id: itemId, tags });
 
+// Single-assignee invariant: item.set_assignee replaces any existing assignment.
+export const setItemAssignee = (itemId: string, userId: string | null) =>
+  mutate("item.set_assignee", { item_id: itemId, user_id: userId });
+
 export const addDependency = (itemId: string, dependsOnId: string) =>
   mutate("add_dependency", { item_id: itemId, depends_on_id: dependsOnId });
 

@@ -13,8 +13,13 @@ import { mutate, query } from "../rpc/clientSingleton";
 import { UNGROUPED_PROJECT_ID } from "./constants";
 import type { ListItem } from "../domain/listTypes";
 
+// Scope rule: user calendars show only items assigned to that user (no parent inference).
+export type CalendarScope =
+  | { kind: "project"; projectId: string | null }
+  | { kind: "user"; userId: string };
+
 type CalendarViewProps = {
-  selectedProjectId: string | null;
+  scope: CalendarScope;
   projectItems: ListItem[];
   refreshToken: number;
   onRefresh: () => void;
@@ -36,6 +41,8 @@ type CalendarItem = {
   parent_id: string | null;
   item_type: string;
   priority: number;
+  assignee_id?: string | null;
+  assignee_name?: string | null;
 };
 
 type CalendarRangeResult = {
@@ -79,14 +86,14 @@ const startOfWeek = (value: Date) => {
 };
 
 const CalendarView: FC<CalendarViewProps> = ({
-  selectedProjectId,
+  scope,
   projectItems,
   refreshToken,
   onRefresh,
   onOpenItem,
 }) => {
   const [blocks, setBlocks] = useState<CalendarBlock[]>([]);
-  const [dueItems, setDueItems] = useState<CalendarItem[]>([]);
+  const [calendarItems, setCalendarItems] = useState<CalendarItem[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [viewMode, setViewMode] = useState<"week" | "month">("week");
@@ -142,20 +149,33 @@ const CalendarView: FC<CalendarViewProps> = ({
   const suppressNextBlockClickRef = useRef(false);
   const refreshTimerRef = useRef<number | null>(null);
 
-  const itemTitleMap = useMemo(
-    () => new Map(projectItems.map((item) => [item.id, item.title])),
-    [projectItems]
-  );
+  const itemTitleMap = useMemo(() => {
+    const map = new Map<string, string>();
+    if (scope.kind === "project") {
+      for (const item of projectItems) {
+        map.set(item.id, item.title);
+      }
+    }
+    for (const item of calendarItems) {
+      map.set(item.id, item.title);
+    }
+    return map;
+  }, [calendarItems, projectItems, scope.kind]);
 
-  const projectItemIds = useMemo(
-    () => new Set(projectItems.map((item) => item.id)),
-    [projectItems]
-  );
+  const projectItemIds = useMemo(() => {
+    if (scope.kind !== "project") {
+      return new Set<string>();
+    }
+    return new Set(projectItems.map((item) => item.id));
+  }, [projectItems, scope.kind]);
 
   const projectItemMap = useMemo(
     () => new Map(projectItems.map((item) => [item.id, item])),
     [projectItems]
   );
+
+  const scopeProjectId = scope.kind === "project" ? scope.projectId : null;
+  const scopeUserId = scope.kind === "user" ? scope.userId : null;
 
   const range = useMemo(() => {
     if (viewMode === "week") {
@@ -174,38 +194,71 @@ const CalendarView: FC<CalendarViewProps> = ({
   }, [focusDate, viewMode]);
 
   useEffect(() => {
-    if (!selectedProjectId) {
+    if (scope.kind === "project" && !scopeProjectId) {
       setBlocks([]);
-      setDueItems([]);
+      setCalendarItems([]);
+      setError(null);
+      return;
+    }
+    if (scope.kind === "user" && !scopeUserId) {
+      setBlocks([]);
+      setCalendarItems([]);
       setError(null);
       return;
     }
     let isMounted = true;
     setLoading(true);
     setError(null);
-    const scopeProjectId =
-      selectedProjectId === UNGROUPED_PROJECT_ID ? undefined : selectedProjectId;
-    query<CalendarRangeResult>("calendar_range", {
+    if (scope.kind === "project") {
+      const scopedProjectId =
+        scopeProjectId === UNGROUPED_PROJECT_ID ? undefined : scopeProjectId;
+      query<CalendarRangeResult>("calendar_range", {
+        time_min: range.start.getTime(),
+        time_max: range.end.getTime(),
+        ...(scopedProjectId ? { scopeProjectId: scopedProjectId } : {}),
+      })
+        .then((result) => {
+          if (!isMounted) {
+            return;
+          }
+          const shouldFilter =
+            scopedProjectId || scopeProjectId === UNGROUPED_PROJECT_ID;
+          const nextBlocks = shouldFilter
+            ? result.blocks.filter((block) => projectItemIds.has(block.item_id))
+            : result.blocks;
+          const nextItems = shouldFilter
+            ? result.items.filter((item) => projectItemIds.has(item.id))
+            : result.items;
+          setBlocks(nextBlocks);
+          setCalendarItems(nextItems);
+        })
+        .catch((err) => {
+          if (!isMounted) {
+            return;
+          }
+          const message = err instanceof Error ? err.message : "Unknown error";
+          setError(message);
+        })
+        .finally(() => {
+          if (isMounted) {
+            setLoading(false);
+          }
+        });
+      return () => {
+        isMounted = false;
+      };
+    }
+    query<CalendarRangeResult>("calendar_range_user", {
+      user_id: scopeUserId,
       time_min: range.start.getTime(),
       time_max: range.end.getTime(),
-      ...(scopeProjectId ? { scopeProjectId } : {}),
     })
       .then((result) => {
         if (!isMounted) {
           return;
         }
-        const nextBlocks =
-          scopeProjectId || selectedProjectId === UNGROUPED_PROJECT_ID
-            ? result.blocks.filter((block) =>
-                projectItemIds.has(block.item_id)
-              )
-            : result.blocks;
-        const nextItems =
-          scopeProjectId || selectedProjectId === UNGROUPED_PROJECT_ID
-            ? result.items.filter((item) => projectItemIds.has(item.id))
-            : result.items;
-        setBlocks(nextBlocks);
-        setDueItems(nextItems);
+        setBlocks(result.blocks);
+        setCalendarItems(result.items);
       })
       .catch((err) => {
         if (!isMounted) {
@@ -222,7 +275,15 @@ const CalendarView: FC<CalendarViewProps> = ({
     return () => {
       isMounted = false;
     };
-  }, [projectItemIds, range.end, range.start, refreshToken, selectedProjectId]);
+  }, [
+    projectItemIds,
+    range.end,
+    range.start,
+    refreshToken,
+    scope.kind,
+    scopeProjectId,
+    scopeUserId,
+  ]);
 
   const handlePrev = () => {
     if (viewMode === "week") {
@@ -261,8 +322,11 @@ const CalendarView: FC<CalendarViewProps> = ({
     );
   }, [blocks, dragPreview]);
 
-  if (!selectedProjectId) {
+  if (scope.kind === "project" && !scopeProjectId) {
     return <div className="calendar-view">Select a project</div>;
+  }
+  if (scope.kind === "user" && !scopeUserId) {
+    return <div className="calendar-view">Select a calendar</div>;
   }
 
   const dayKey = (value: Date) => value.toISOString().slice(0, 10);
@@ -277,8 +341,13 @@ const CalendarView: FC<CalendarViewProps> = ({
     blocksByDay.set(key, list);
   }
 
-  for (const item of dueItems) {
+  const timeMin = range.start.getTime();
+  const timeMax = range.end.getTime();
+  for (const item of calendarItems) {
     if (!item.due_at) {
+      continue;
+    }
+    if (item.due_at < timeMin || item.due_at >= timeMax) {
       continue;
     }
     const key = dayKey(new Date(item.due_at));
@@ -345,32 +414,50 @@ const CalendarView: FC<CalendarViewProps> = ({
 
   const handleDuplicateTask = useCallback(
     async (itemId: string) => {
-      const item = projectItemMap.get(itemId);
+      const item =
+        scope.kind === "project"
+          ? projectItemMap.get(itemId)
+          : calendarItems.find((entry) => entry.id === itemId);
       if (!item) {
         return;
       }
       setError(null);
       try {
+        const itemType = "type" in item ? item.type : item.item_type;
         const estimateMode =
-          item.estimate_mode ?? (item.type === "task" ? "manual" : "rollup");
-        await mutate("create_item", {
-          type: item.type,
+          "estimate_mode" in item
+            ? item.estimate_mode ?? (itemType === "task" ? "manual" : "rollup")
+            : itemType === "task"
+              ? "manual"
+              : "rollup";
+        const created = await mutate<{ id: string }>("create_item", {
+          type: itemType,
           title: `${item.title} (copy)`,
           parent_id: item.parent_id,
           due_at: item.due_at ?? null,
           estimate_mode: estimateMode,
-          estimate_minutes: item.estimate_minutes ?? 0,
+          estimate_minutes:
+            "estimate_minutes" in item ? item.estimate_minutes ?? 0 : 0,
           status: item.status,
           priority: item.priority ?? 0,
-          notes: item.notes ?? null,
+          notes: "notes" in item ? item.notes ?? null : null,
         });
+        if (scope.kind === "user" && scopeUserId) {
+          const itemIdValue = created?.id;
+          if (itemIdValue) {
+            await mutate("item.set_assignee", {
+              item_id: itemIdValue,
+              user_id: scopeUserId,
+            });
+          }
+        }
         scheduleRefresh();
       } catch (err) {
         const message = err instanceof Error ? err.message : "Unknown error";
         setError(message);
       }
     },
-    [projectItemMap, scheduleRefresh]
+    [calendarItems, projectItemMap, scheduleRefresh, scope.kind, scopeUserId]
   );
 
   const updateDragPreview = (next: {
@@ -404,11 +491,15 @@ const CalendarView: FC<CalendarViewProps> = ({
 
   const createTaskWithBlock = useCallback(
     async (startAt: number, durationMinutes: number) => {
-      if (!selectedProjectId) {
+      if (scope.kind === "project" && !scopeProjectId) {
         return;
       }
       const parentId =
-        selectedProjectId === UNGROUPED_PROJECT_ID ? null : selectedProjectId;
+        scope.kind === "project"
+          ? scopeProjectId === UNGROUPED_PROJECT_ID
+            ? null
+            : scopeProjectId
+          : null;
       setError(null);
       try {
         const created = await mutate<{ id: string }>("create_item", {
@@ -425,6 +516,12 @@ const CalendarView: FC<CalendarViewProps> = ({
         if (!itemId) {
           throw new Error("Failed to create task");
         }
+        if (scope.kind === "user" && scopeUserId) {
+          await mutate("item.set_assignee", {
+            item_id: itemId,
+            user_id: scopeUserId,
+          });
+        }
         await mutate("scheduled_block.create", {
           item_id: itemId,
           start_at: startAt,
@@ -438,7 +535,7 @@ const CalendarView: FC<CalendarViewProps> = ({
         setError(message);
       }
     },
-    [onOpenItem, scheduleRefresh, selectedProjectId]
+    [onOpenItem, scheduleRefresh, scope.kind, scopeProjectId, scopeUserId]
   );
 
   const beginBlockDrag = useCallback(
@@ -879,7 +976,7 @@ const CalendarView: FC<CalendarViewProps> = ({
           </button>
         </div>
       </div>
-      {loading && blocks.length === 0 && dueItems.length === 0 ? (
+      {loading && blocks.length === 0 && calendarItems.length === 0 ? (
         <div className="list-empty">Loading…</div>
       ) : null}
       {viewMode === "week" ? (
@@ -913,7 +1010,12 @@ const CalendarView: FC<CalendarViewProps> = ({
                   <div className="calendar-day-header">{DAY_LABEL.format(day)}</div>
                   <div
                     className="calendar-day-body"
-                    style={{ height: hourCount * HOUR_HEIGHT }}
+                    style={
+                      {
+                        height: hourCount * HOUR_HEIGHT,
+                        "--calendar-hour-height": `${HOUR_HEIGHT}px`,
+                      } as React.CSSProperties
+                    }
                     onMouseDown={handleSelectStart(day)}
                     data-day-key={key}
                     data-day-start={dayStart}

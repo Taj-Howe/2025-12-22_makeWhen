@@ -3,12 +3,15 @@ import * as ContextMenu from "@radix-ui/react-context-menu";
 import { PlusIcon } from "@radix-ui/react-icons";
 import { query } from "../rpc/clientSingleton";
 import { UNGROUPED_PROJECT_ID, UNGROUPED_PROJECT_LABEL } from "./constants";
-import ThemeSettings from "./ThemeSettings";
-
 type Project = {
   id: string;
   title: string;
   type: "project" | "milestone" | "task";
+};
+
+type UserLite = {
+  user_id: string;
+  display_name: string;
 };
 
 type SidebarProjectsProps = {
@@ -16,6 +19,10 @@ type SidebarProjectsProps = {
   onSelect: (projectId: string | null) => void;
   refreshToken: number;
   onAddProject: () => void;
+  users: UserLite[];
+  usersError: string | null;
+  selectedUserId: string | null;
+  onSelectUser: (userId: string) => void;
 };
 
 const SidebarProjects: FC<SidebarProjectsProps> = ({
@@ -23,6 +30,10 @@ const SidebarProjects: FC<SidebarProjectsProps> = ({
   onSelect,
   refreshToken,
   onAddProject,
+  users,
+  usersError,
+  selectedUserId,
+  onSelectUser,
 }) => {
   const [projects, setProjects] = useState<Project[]>([]);
   const [error, setError] = useState<string | null>(null);
@@ -71,70 +82,93 @@ const SidebarProjects: FC<SidebarProjectsProps> = ({
 
   return (
     <aside className="sidebar">
-      <ContextMenu.Root>
-        <ContextMenu.Trigger asChild>
-          <div className="sidebar-header">
-            <div className="sidebar-title">Projects</div>
-            <button
-              type="button"
-              className="icon-button"
-              onClick={(event) => {
-                event.stopPropagation();
-                onAddProject();
-              }}
-              aria-label="Add project"
-              title="Add project"
-            >
-              <PlusIcon />
-            </button>
-          </div>
-        </ContextMenu.Trigger>
-        <ContextMenu.Portal>
-          <ContextMenu.Content className="context-menu-content">
-            <ContextMenu.Item
-              className="context-menu-item"
-              onSelect={onAddProject}
-            >
-              New project…
-            </ContextMenu.Item>
-          </ContextMenu.Content>
-        </ContextMenu.Portal>
-      </ContextMenu.Root>
-      <div className="sidebar-list">
-        {error ? <div className="error">{error}</div> : null}
-        <button
-          key={UNGROUPED_PROJECT_ID}
-          className={
-            selectedProjectId === UNGROUPED_PROJECT_ID
-              ? "sidebar-item is-active"
-              : "sidebar-item"
-          }
-          type="button"
-          onClick={() => onSelect(UNGROUPED_PROJECT_ID)}
-        >
-          {UNGROUPED_PROJECT_LABEL}
-        </button>
-        {projects.length === 0 ? (
-          <div className="sidebar-empty">No projects yet</div>
-        ) : (
-          projects.map((project) => (
-            <button
-              key={project.id}
-              className={
-                project.id === selectedProjectId
-                  ? "sidebar-item is-active"
-                  : "sidebar-item"
-              }
-              type="button"
-              onClick={() => onSelect(project.id)}
-            >
-              {project.title}
-            </button>
-          ))
-        )}
+      <div className="sidebar-section">
+        <ContextMenu.Root>
+          <ContextMenu.Trigger asChild>
+            <div className="sidebar-header">
+              <div className="sidebar-title">Projects</div>
+              <button
+                type="button"
+                className="icon-button"
+                onClick={(event) => {
+                  event.stopPropagation();
+                  onAddProject();
+                }}
+                aria-label="Add project"
+                title="Add project"
+              >
+                <PlusIcon />
+              </button>
+            </div>
+          </ContextMenu.Trigger>
+          <ContextMenu.Portal>
+            <ContextMenu.Content className="context-menu-content">
+              <ContextMenu.Item
+                className="context-menu-item"
+                onSelect={onAddProject}
+              >
+                New project…
+              </ContextMenu.Item>
+            </ContextMenu.Content>
+          </ContextMenu.Portal>
+        </ContextMenu.Root>
+        <div className="sidebar-list">
+          {error ? <div className="error">{error}</div> : null}
+          <button
+            key={UNGROUPED_PROJECT_ID}
+            className={
+              selectedProjectId === UNGROUPED_PROJECT_ID
+                ? "sidebar-item is-active"
+                : "sidebar-item"
+            }
+            type="button"
+            onClick={() => onSelect(UNGROUPED_PROJECT_ID)}
+          >
+            {UNGROUPED_PROJECT_LABEL}
+          </button>
+          {projects.length === 0 ? (
+            <div className="sidebar-empty">No projects yet</div>
+          ) : (
+            projects.map((project) => (
+              <button
+                key={project.id}
+                className={
+                  project.id === selectedProjectId
+                    ? "sidebar-item is-active"
+                    : "sidebar-item"
+                }
+                type="button"
+                onClick={() => onSelect(project.id)}
+              >
+                {project.title}
+              </button>
+            ))
+          )}
+        </div>
       </div>
-      <div className="sidebar-footer">
-        <ThemeSettings />
+      <div className="sidebar-section">
+        <div className="sidebar-title">Calendars</div>
+        <div className="sidebar-list">
+          {usersError ? <div className="error">{usersError}</div> : null}
+          {users.length === 0 ? (
+            <div className="sidebar-empty">No calendars yet</div>
+          ) : (
+            users.map((user) => (
+              <button
+                key={user.user_id}
+                className={
+                  user.user_id === selectedUserId
+                    ? "sidebar-item is-active"
+                    : "sidebar-item"
+                }
+                type="button"
+                onClick={() => onSelectUser(user.user_id)}
+              >
+                {user.display_name}
+              </button>
+            ))
+          )}
+        </div>
       </div>
     </aside>
   );

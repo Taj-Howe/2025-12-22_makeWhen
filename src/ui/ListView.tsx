@@ -33,12 +33,14 @@ import {
   deleteItem,
   deleteDependencyEdge,
   duplicateTaskFromItem,
+  setItemAssignee,
   setItemTags,
   setStatus,
   updateDependencyEdge,
   updateItemFields,
 } from "./itemActions";
 import { ItemAutocomplete } from "./ItemAutocomplete";
+import UserSelect from "./UserSelect";
 
 type ListViewItem = ListItem & {
   completed_on: number | null;
@@ -67,12 +69,14 @@ type ListViewProps = {
   selectedProjectId: string | null;
   refreshToken: number;
   onRefresh: () => void;
+  onOpenItem?: (itemId: string) => void;
 };
 
 const ListView: FC<ListViewProps> = ({
   selectedProjectId,
   refreshToken,
   onRefresh,
+  onOpenItem,
 }) => {
   const [items, setItems] = useState<ListViewItem[]>([]);
   const [itemsProjectId, setItemsProjectId] = useState<string | null>(null);
@@ -99,6 +103,9 @@ const ListView: FC<ListViewProps> = ({
   } | null>(null);
   const [editValue, setEditValue] = useState("");
   const [editingBlockId, setEditingBlockId] = useState<string | null>(null);
+  const [editingAssigneeId, setEditingAssigneeId] = useState<string | null>(
+    null
+  );
   const [milestoneDrop, setMilestoneDrop] = useState<{
     milestoneId: string;
     position: "top" | "bottom";
@@ -281,6 +288,21 @@ const ListView: FC<ListViewProps> = ({
     [getAllTasksUnderMilestone, itemById, parentTypeMap]
   );
 
+  const handleAssigneeChange = useCallback(
+    async (itemId: string, userId: string | null) => {
+      setError(null);
+      try {
+        await setItemAssignee(itemId, userId);
+        setEditingAssigneeId(null);
+        onRefresh();
+      } catch (err) {
+        const message = err instanceof Error ? err.message : "Unknown error";
+        setError(message);
+      }
+    },
+    [onRefresh]
+  );
+
   const formatSlackMinutes = (value: number | null) => {
     if (value === null || !Number.isFinite(value)) {
       return "";
@@ -403,13 +425,38 @@ const ListView: FC<ListViewProps> = ({
         ),
       },
       {
-        key: "assignees",
-        label: "Assignees",
+        key: "assignee",
+        label: "Assignee",
         minWidth: 160,
-        render: (item: ListViewItem) =>
-          item.assignees.length > 0
-            ? item.assignees.map((assignee) => assignee.id).join(", ")
-            : "unassigned",
+        render: (item: ListViewItem) => {
+          const currentId =
+            item.assignee_id ?? item.assignees[0]?.id ?? null;
+          const currentName =
+            item.assignee_name ??
+            item.assignees[0]?.id ??
+            "unassigned";
+          if (editingAssigneeId === item.id) {
+            return (
+              <UserSelect
+                value={currentId}
+                onChange={(value) => handleAssigneeChange(item.id, value)}
+                onClose={() => setEditingAssigneeId(null)}
+              />
+            );
+          }
+          return (
+            <button
+              type="button"
+              className="assignee-pill"
+              onClick={(event) => {
+                event.stopPropagation();
+                setEditingAssigneeId(item.id);
+              }}
+            >
+              {currentName}
+            </button>
+          );
+        },
       },
       {
         key: "status",
@@ -585,6 +632,8 @@ const ListView: FC<ListViewProps> = ({
       formatDependencyList,
       formatDependencySummary,
       formatSlackMinutes,
+      editingAssigneeId,
+      handleAssigneeChange,
     ]
   );
 
@@ -650,6 +699,28 @@ const ListView: FC<ListViewProps> = ({
         estimate_minutes: 0,
       });
       onRefresh();
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Unknown error";
+      setError(message);
+    }
+  };
+
+  const handleAddSubtask = async (parent: ListItem) => {
+    setError(null);
+    try {
+      const created = (await createItem({
+        type: "task",
+        title: "New subtask",
+        parent_id: parent.id,
+        due_at: null,
+        estimate_minutes: 0,
+        status: "ready",
+        priority: 0,
+      })) as { id?: string };
+      onRefresh();
+      if (created?.id) {
+        onOpenItem?.(created.id);
+      }
     } catch (err) {
       const message = err instanceof Error ? err.message : "Unknown error";
       setError(message);
@@ -1596,7 +1667,6 @@ const ListView: FC<ListViewProps> = ({
     }
   };
 
-
   const handleDragStart = (itemId: string, groupKey: string) => (
     event: DragEvent
   ) => {
@@ -1979,6 +2049,18 @@ const ListView: FC<ListViewProps> = ({
                                 <ContextMenu.Content className="context-menu-content">
                                   <ContextMenu.Item
                                     className="context-menu-item"
+                                    onSelect={() => onOpenItem?.(item.id)}
+                                  >
+                                    Edit task
+                                  </ContextMenu.Item>
+                                  <ContextMenu.Item
+                                    className="context-menu-item"
+                                    onSelect={() => handleAddSubtask(item)}
+                                  >
+                                    Add subtask
+                                  </ContextMenu.Item>
+                                  <ContextMenu.Item
+                                    className="context-menu-item"
                                     onSelect={() => handleDelete(item)}
                                   >
                                     Delete task
@@ -2043,6 +2125,18 @@ const ListView: FC<ListViewProps> = ({
                                       <ContextMenu.Content className="context-menu-content">
                                         <ContextMenu.Item
                                           className="context-menu-item"
+                                          onSelect={() => onOpenItem?.(child.id)}
+                                        >
+                                          Edit task
+                                        </ContextMenu.Item>
+                                        <ContextMenu.Item
+                                          className="context-menu-item"
+                                          onSelect={() => handleAddSubtask(child)}
+                                        >
+                                          Add subtask
+                                        </ContextMenu.Item>
+                                        <ContextMenu.Item
+                                          className="context-menu-item"
                                           onSelect={() => handleDelete(child)}
                                         >
                                           Delete task
@@ -2066,44 +2160,6 @@ const ListView: FC<ListViewProps> = ({
                                   </ContextMenu.Root>
                                 );
                               })}
-                              <tr className="add-row">
-                                <td colSpan={columns.length}>
-                                  {inlineAdd?.groupKey === `subtask:${item.id}` ? (
-                                    <input
-                                      className="add-row-input"
-                                      value={inlineTitle}
-                                      onChange={(event) =>
-                                        setInlineTitle(event.target.value)
-                                      }
-                                      onKeyDown={(event) => {
-                                        if (event.key === "Enter") {
-                                          event.preventDefault();
-                                          void handleInlineCommit();
-                                        }
-                                        if (event.key === "Escape") {
-                                          event.preventDefault();
-                                          handleInlineCancel();
-                                        }
-                                      }}
-                                      placeholder="New subtask title"
-                                      autoFocus
-                                    />
-                                  ) : (
-                                    <button
-                                      type="button"
-                                      className="add-row-button"
-                                      onClick={() =>
-                                        startInlineAdd(
-                                          `subtask:${item.id}`,
-                                          item.id
-                                        )
-                                      }
-                                    >
-                                      Add subtask…
-                                    </button>
-                                  )}
-                                </td>
-                              </tr>
                             </>
                           )}
                         </Fragment>
@@ -2303,6 +2359,18 @@ const ListView: FC<ListViewProps> = ({
                                     <ContextMenu.Content className="context-menu-content">
                                       <ContextMenu.Item
                                         className="context-menu-item"
+                                        onSelect={() => onOpenItem?.(item.id)}
+                                      >
+                                        Edit task
+                                      </ContextMenu.Item>
+                                      <ContextMenu.Item
+                                        className="context-menu-item"
+                                        onSelect={() => handleAddSubtask(item)}
+                                      >
+                                        Add subtask
+                                      </ContextMenu.Item>
+                                      <ContextMenu.Item
+                                        className="context-menu-item"
                                         onSelect={() => handleDelete(item)}
                                       >
                                         Delete task
@@ -2370,6 +2438,22 @@ const ListView: FC<ListViewProps> = ({
                                             <ContextMenu.Content className="context-menu-content">
                                               <ContextMenu.Item
                                                 className="context-menu-item"
+                                                onSelect={() =>
+                                                  onOpenItem?.(child.id)
+                                                }
+                                              >
+                                                Edit task
+                                              </ContextMenu.Item>
+                                              <ContextMenu.Item
+                                                className="context-menu-item"
+                                                onSelect={() =>
+                                                  handleAddSubtask(child)
+                                                }
+                                              >
+                                                Add subtask
+                                              </ContextMenu.Item>
+                                              <ContextMenu.Item
+                                                className="context-menu-item"
                                                 onSelect={() => handleDelete(child)}
                                               >
                                                 Delete task
@@ -2393,44 +2477,6 @@ const ListView: FC<ListViewProps> = ({
                                         </ContextMenu.Root>
                                       );
                                     })}
-                                    <tr className="add-row">
-                                      <td colSpan={columns.length}>
-                                        {inlineAdd?.groupKey === `subtask:${item.id}` ? (
-                                          <input
-                                            className="add-row-input"
-                                            value={inlineTitle}
-                                            onChange={(event) =>
-                                              setInlineTitle(event.target.value)
-                                            }
-                                            onKeyDown={(event) => {
-                                              if (event.key === "Enter") {
-                                                event.preventDefault();
-                                                void handleInlineCommit();
-                                              }
-                                              if (event.key === "Escape") {
-                                                event.preventDefault();
-                                                handleInlineCancel();
-                                              }
-                                            }}
-                                            placeholder="New subtask title"
-                                            autoFocus
-                                          />
-                                        ) : (
-                                          <button
-                                            type="button"
-                                            className="add-row-button"
-                                            onClick={() =>
-                                              startInlineAdd(
-                                                `subtask:${item.id}`,
-                                                item.id
-                                              )
-                                            }
-                                          >
-                                            Add subtask…
-                                          </button>
-                                        )}
-                                      </td>
-                                    </tr>
                                   </>
                                 )}
                               </Fragment>

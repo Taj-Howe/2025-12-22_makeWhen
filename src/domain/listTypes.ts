@@ -34,6 +34,8 @@ export type ListItem = {
     unmet_dependency_count: number;
   };
   assignees: { id: string; name: string | null }[];
+  assignee_id?: string | null;
+  assignee_name?: string | null;
   tags: { id: string; name: string }[];
   health: string;
   health_mode?: string;
@@ -90,4 +92,6 @@ export type ItemGanttModel = {
   blocked_by: DependencyProjectionLite[];
   blocking: DependencyProjectionLite[];
   slack_minutes: number | null;
+  assignee_id?: string | null;
+  assignee_name?: string | null;
 };

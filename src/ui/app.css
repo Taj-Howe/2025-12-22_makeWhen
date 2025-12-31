@@ -39,13 +39,18 @@ body {
 
 .sidebar-title {
   font-size: 16px;
-  margin-bottom: 12px;
+  margin: 0;
 }
 
 .sidebar-header {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  gap: 12px;
+}
+
+.sidebar-section {
+  display: grid;
   gap: 12px;
 }
 
@@ -142,20 +147,21 @@ body {
   padding: 20px;
 }
 
-.title {
-  margin: 0 0 16px;
-  font-size: 22px;
-}
-
-.title-row {
+.top-bar {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   justify-content: space-between;
-  gap: 12px;
+  gap: 16px;
   margin-bottom: 16px;
 }
 
-.view-toggle {
+.top-bar-left {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.top-tabs {
   display: inline-flex;
   gap: 6px;
   padding: 4px;
@@ -164,7 +170,7 @@ body {
   background: var(--color-panel);
 }
 
-.view-toggle-button {
+.top-tab {
   background: transparent;
   border: none;
   padding: 6px 14px;
@@ -173,20 +179,149 @@ body {
   color: var(--color-muted);
 }
 
-.view-toggle-button:hover {
+.top-tab:hover {
   color: var(--color-text);
 }
 
-.view-toggle-active {
+.top-tab-active {
   background: var(--color-panel-2);
   color: var(--color-text);
   border: 1px solid var(--color-border);
+}
+
+.top-title {
+  font-size: 22px;
+}
+
+.top-bar-right {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.user-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px;
+  border-radius: 999px;
+  border: 1px solid var(--color-border);
+  background: var(--color-panel);
+  color: var(--color-text);
+  font-size: 14px;
+}
+
+.user-chip-icon {
+  display: inline-flex;
+  align-items: center;
+}
+
+.user-chip-label {
+  white-space: nowrap;
 }
 
 .title-actions {
   display: inline-flex;
   gap: 8px;
   align-items: center;
+  margin-bottom: 16px;
+}
+
+.settings-panel {
+  padding: 12px;
+  border-radius: var(--radius);
+  border: 1px solid var(--color-border);
+  background: var(--color-panel);
+  margin-bottom: 16px;
+}
+
+.dashboard-view {
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius);
+  padding: 16px;
+  background: var(--color-panel);
+  color: var(--color-text);
+}
+
+.user-select {
+  position: relative;
+  display: inline-flex;
+  width: 100%;
+}
+
+.user-select-trigger {
+  width: 100%;
+  text-align: left;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius);
+  background: var(--color-panel);
+  color: var(--color-text);
+  padding: 8px 10px;
+}
+
+.user-select-popover {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  right: 0;
+  border-radius: var(--radius);
+  border: 1px solid var(--color-border);
+  background: var(--color-panel);
+  padding: 8px;
+  z-index: 20;
+  box-shadow: 0 12px 28px color-mix(in srgb, var(--shadow-color) 30%, transparent);
+}
+
+.user-select-input {
+  width: 100%;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius);
+  padding: 6px 8px;
+  margin-bottom: 8px;
+  background: var(--color-panel-2);
+  color: var(--color-text);
+}
+
+.user-select-list {
+  display: grid;
+  gap: 6px;
+  max-height: 220px;
+  overflow: auto;
+}
+
+.user-select-option {
+  text-align: left;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius);
+  background: transparent;
+  color: var(--color-text);
+  padding: 6px 8px;
+}
+
+.user-select-option.is-active {
+  border-color: var(--color-accent);
+  background: var(--color-panel-2);
+}
+
+.user-select-empty,
+.user-select-error {
+  font-size: 12px;
+  opacity: 0.8;
+}
+
+.assignee-pill {
+  width: 100%;
+  text-align: left;
+  border: 1px solid var(--color-border);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--color-text);
+  padding: 4px 10px;
+  cursor: pointer;
+}
+
+.assignee-pill:hover {
+  border-color: var(--color-border-hover);
 }
 
 .sheet-root {
@@ -419,12 +554,19 @@ button:focus-visible {
   position: relative;
   background: var(--color-panel);
   padding: 4px;
+  background-image: linear-gradient(
+    to bottom,
+    color-mix(in srgb, var(--color-border) 45%, transparent) 1px,
+    transparent 1px
+  );
+  background-size: 100% var(--calendar-hour-height, 48px);
 }
 
 .calendar-block {
   position: absolute;
   left: 4px;
   right: 4px;
+  z-index: 1;
   background: color-mix(in srgb, var(--color-accent) 15%, var(--color-panel));
   border: 1px solid var(--color-border);
   border-left: 3px solid var(--color-accent);
@@ -473,6 +615,7 @@ button:focus-visible {
   position: absolute;
   left: 4px;
   right: 4px;
+  z-index: 2;
   padding: 2px 6px;
   border-left: 3px solid var(--color-danger);
   background: color-mix(in srgb, var(--color-danger) 12%, var(--color-panel));

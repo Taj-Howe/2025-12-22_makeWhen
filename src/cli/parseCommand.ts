@@ -1,3 +1,5 @@
+import { parseEstimateMinutesInput } from "../domain/formatters";
+
 export type ParsedCommand = {
   verb: "create" | "edit" | "delete";
   type: "project" | "milestone" | "task" | "subtask";
@@ -8,14 +10,21 @@ export type ParsedCommand = {
   inProject?: string;
   dueAt?: number;
   scheduledFor?: number;
+  scheduledDurationMinutes?: number;
   priority?: number;
   status?: string;
   tags?: string[];
   dependsOn?: string[];
+  depType?: "FS" | "SS" | "FF" | "SF";
+  depLagMinutes?: number;
   assignees?: string[];
   notes?: string;
   estimateMode?: "manual" | "rollup";
   estimateMinutes?: number;
+  health?: "on_track" | "at_risk" | "behind" | "ahead" | "unknown";
+  healthMode?: "auto" | "manual";
+  blockerTexts?: string[];
+  blockerKind?: string;
 };
 
 type ParseError = {
@@ -36,17 +45,31 @@ const KEYS = new Set([
   "id",
   "due",
   "due_at",
+  "start",
+  "start_at",
   "scheduled_for",
+  "duration",
+  "duration_minutes",
+  "dur",
   "priority",
   "pri",
   "tags",
   "dep",
   "depends_on",
+  "dep_type",
+  "dep_lag",
+  "lag",
   "status",
+  "assignee",
   "assignees",
   "notes",
   "estimate_mode",
   "estimate_minutes",
+  "health",
+  "health_mode",
+  "blocker",
+  "blockers",
+  "blocker_kind",
 ]);
 
 export const parseCommand = (input: string): ParseResult => {
@@ -83,14 +106,21 @@ export const parseCommand = (input: string): ParseResult => {
   let id: string | undefined;
   let dueAt: number | undefined;
   let scheduledFor: number | undefined;
+  let scheduledDurationMinutes: number | undefined;
   let priority: number | undefined;
   let status: string | undefined;
   let tags: string[] | undefined;
   let dependsOn: string[] | undefined;
+  let depType: ParsedCommand["depType"];
+  let depLagMinutes: number | undefined;
   let assignees: string[] | undefined;
   let notes: string | undefined;
   let estimateMode: "manual" | "rollup" | undefined;
   let estimateMinutes: number | undefined;
+  let health: ParsedCommand["health"];
+  let healthMode: ParsedCommand["healthMode"];
+  let blockerTexts: string[] = [];
+  let blockerKind: string | undefined;
   let target: string | undefined;
 
   if (verb !== "create") {
@@ -188,15 +218,30 @@ export const parseCommand = (input: string): ParseResult => {
           dueAt = parsed;
           break;
         }
+        case "start":
+        case "start_at":
         case "scheduled_for": {
           const parsed = parseDate(value);
           if (parsed === null) {
             return {
               ok: false,
-              error: { message: "Invalid scheduled_for date" },
+              error: { message: "Invalid start date" },
             };
           }
           scheduledFor = parsed;
+          break;
+        }
+        case "duration":
+        case "duration_minutes":
+        case "dur": {
+          const parsed = parseEstimateMinutesInput(value);
+          if (parsed === null) {
+            return {
+              ok: false,
+              error: { message: "duration must be minutes or hours" },
+            };
+          }
+          scheduledDurationMinutes = parsed;
           break;
         }
         case "priority":
@@ -221,6 +266,27 @@ export const parseCommand = (input: string): ParseResult => {
           dependsOn = splitList(value);
           break;
         }
+        case "dep_type": {
+          const typeValue = value.toUpperCase();
+          if (!["FS", "SS", "FF", "SF"].includes(typeValue)) {
+            return {
+              ok: false,
+              error: { message: "dep_type must be FS, SS, FF, or SF" },
+            };
+          }
+          depType = typeValue as ParsedCommand["depType"];
+          break;
+        }
+        case "dep_lag":
+        case "lag": {
+          const parsed = parseEstimateMinutesInput(value);
+          if (parsed === null || parsed < 0) {
+            return { ok: false, error: { message: "lag must be >= 0 minutes" } };
+          }
+          depLagMinutes = parsed;
+          break;
+        }
+        case "assignee":
         case "assignees": {
           assignees = splitList(value);
           break;
@@ -234,11 +300,61 @@ export const parseCommand = (input: string): ParseResult => {
           break;
         }
         case "estimate_minutes": {
-          const minutes = Number(value);
-          if (!Number.isFinite(minutes)) {
-            return { ok: false, error: { message: "estimate_minutes must be a number" } };
+          const minutes = parseEstimateMinutesInput(value);
+          if (minutes === null) {
+            return {
+              ok: false,
+              error: { message: "estimate_minutes must be minutes or hours" },
+            };
           }
           estimateMinutes = minutes;
+          break;
+        }
+        case "health": {
+          const normalized = value.toLowerCase();
+          if (
+            !["on_track", "at_risk", "behind", "ahead", "unknown"].includes(
+              normalized
+            )
+          ) {
+            return {
+              ok: false,
+              error: {
+                message:
+                  "health must be on_track, at_risk, behind, ahead, or unknown",
+              },
+            };
+          }
+          health = normalized as ParsedCommand["health"];
+          break;
+        }
+        case "health_mode": {
+          const normalized = value.toLowerCase();
+          if (!["auto", "manual"].includes(normalized)) {
+            return {
+              ok: false,
+              error: { message: "health_mode must be auto or manual" },
+            };
+          }
+          healthMode = normalized as ParsedCommand["healthMode"];
+          break;
+        }
+        case "blocker": {
+          blockerTexts.push(value);
+          break;
+        }
+        case "blockers": {
+          blockerTexts = blockerTexts.concat(splitList(value));
+          break;
+        }
+        case "blocker_kind": {
+          if (blockerKind) {
+            return {
+              ok: false,
+              error: { message: "blocker_kind provided more than once" },
+            };
+          }
+          blockerKind = value;
           break;
         }
         default:
@@ -286,14 +402,21 @@ export const parseCommand = (input: string): ParseResult => {
       inProject,
       dueAt,
       scheduledFor,
+      scheduledDurationMinutes,
       priority,
       status,
       tags,
       dependsOn,
+      depType,
+      depLagMinutes,
       assignees,
       notes,
       estimateMode,
       estimateMinutes,
+      health,
+      healthMode,
+      blockerTexts: blockerTexts.length > 0 ? blockerTexts : undefined,
+      blockerKind,
     },
   };
 };

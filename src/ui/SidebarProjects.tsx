@@ -3,6 +3,7 @@ import * as ContextMenu from "@radix-ui/react-context-menu";
 import { PlusIcon } from "@radix-ui/react-icons";
 import { query } from "../rpc/clientSingleton";
 import { UNGROUPED_PROJECT_ID, UNGROUPED_PROJECT_LABEL } from "./constants";
+import type { Scope } from "../domain/scope";
 type Project = {
   id: string;
   title: string;
@@ -15,8 +16,10 @@ type UserLite = {
 };
 
 type SidebarProjectsProps = {
+  scope: Scope;
   selectedProjectId: string | null;
   onSelect: (projectId: string | null) => void;
+  onSetProjectId: (projectId: string | null) => void;
   refreshToken: number;
   onAddProject: () => void;
   users: UserLite[];
@@ -26,8 +29,10 @@ type SidebarProjectsProps = {
 };
 
 const SidebarProjects: FC<SidebarProjectsProps> = ({
+  scope,
   selectedProjectId,
   onSelect,
+  onSetProjectId,
   refreshToken,
   onAddProject,
   users,
@@ -52,14 +57,23 @@ const SidebarProjects: FC<SidebarProjectsProps> = ({
       const list = data.items.filter((item) => item.type === "project");
       setProjects(list);
       if (!selectedProjectId) {
-        onSelect(UNGROUPED_PROJECT_ID);
+        if (scope.kind === "project") {
+          onSelect(UNGROUPED_PROJECT_ID);
+        } else {
+          onSetProjectId(UNGROUPED_PROJECT_ID);
+        }
         return;
       }
       if (
         selectedProjectId !== UNGROUPED_PROJECT_ID &&
         !list.some((item) => item.id === selectedProjectId)
       ) {
-        onSelect(list[0]?.id ?? UNGROUPED_PROJECT_ID);
+        const fallback = list[0]?.id ?? UNGROUPED_PROJECT_ID;
+        if (scope.kind === "project") {
+          onSelect(fallback);
+        } else {
+          onSetProjectId(fallback);
+        }
       }
     } catch (err) {
       if (isMounted) {
@@ -71,7 +85,7 @@ const SidebarProjects: FC<SidebarProjectsProps> = ({
     return () => {
       isMounted = false;
     };
-  }, [onSelect, selectedProjectId]);
+  }, [onSelect, onSetProjectId, scope.kind, selectedProjectId]);
 
   useEffect(() => {
     const cleanup = loadProjects();
@@ -117,6 +131,7 @@ const SidebarProjects: FC<SidebarProjectsProps> = ({
           <button
             key={UNGROUPED_PROJECT_ID}
             className={
+              scope.kind === "project" &&
               selectedProjectId === UNGROUPED_PROJECT_ID
                 ? "sidebar-item is-active"
                 : "sidebar-item"
@@ -133,6 +148,7 @@ const SidebarProjects: FC<SidebarProjectsProps> = ({
               <button
                 key={project.id}
                 className={
+                  scope.kind === "project" &&
                   project.id === selectedProjectId
                     ? "sidebar-item is-active"
                     : "sidebar-item"
@@ -147,7 +163,7 @@ const SidebarProjects: FC<SidebarProjectsProps> = ({
         </div>
       </div>
       <div className="sidebar-section">
-        <div className="sidebar-title">Calendars</div>
+        <div className="sidebar-title">Team</div>
         <div className="sidebar-list">
           {usersError ? <div className="error">{usersError}</div> : null}
           {users.length === 0 ? (
@@ -157,6 +173,7 @@ const SidebarProjects: FC<SidebarProjectsProps> = ({
               <button
                 key={user.user_id}
                 className={
+                  scope.kind === "user" &&
                   user.user_id === selectedUserId
                     ? "sidebar-item is-active"
                     : "sidebar-item"

@@ -12,14 +12,11 @@ import * as ContextMenu from "@radix-ui/react-context-menu";
 import { mutate, query } from "../rpc/clientSingleton";
 import { UNGROUPED_PROJECT_ID } from "./constants";
 import type { ListItem } from "../domain/listTypes";
-
-// Scope rule: user calendars show only items assigned to that user (no parent inference).
-export type CalendarScope =
-  | { kind: "project"; projectId: string | null }
-  | { kind: "user"; userId: string };
+import type { Scope } from "../domain/scope";
+import { addDays, startOfDay, startOfWeek } from "./dateWindow";
 
 type CalendarViewProps = {
-  scope: CalendarScope;
+  scope: Scope;
   projectItems: ListItem[];
   refreshToken: number;
   onRefresh: () => void;
@@ -65,25 +62,6 @@ const TIME_LABEL = new Intl.DateTimeFormat(undefined, {
   hour12: false,
 });
 
-const startOfDay = (value: Date) => {
-  const next = new Date(value);
-  next.setHours(0, 0, 0, 0);
-  return next;
-};
-
-const addDays = (value: Date, days: number) => {
-  const next = new Date(value);
-  next.setDate(next.getDate() + days);
-  return next;
-};
-
-const startOfWeek = (value: Date) => {
-  const next = startOfDay(value);
-  const day = next.getDay();
-  const diff = day === 0 ? -6 : 1 - day;
-  next.setDate(next.getDate() + diff);
-  return next;
-};
 
 const CalendarView: FC<CalendarViewProps> = ({
   scope,
@@ -148,6 +126,9 @@ const CalendarView: FC<CalendarViewProps> = ({
   const suppressOpenUntilRef = useRef(0);
   const suppressNextBlockClickRef = useRef(false);
   const refreshTimerRef = useRef<number | null>(null);
+  const [statusOverrides, setStatusOverrides] = useState<Record<string, string>>(
+    {}
+  );
 
   const itemTitleMap = useMemo(() => {
     const map = new Map<string, string>();
@@ -161,6 +142,22 @@ const CalendarView: FC<CalendarViewProps> = ({
     }
     return map;
   }, [calendarItems, projectItems, scope.kind]);
+
+  const itemStatusMap = useMemo(() => {
+    const map = new Map<string, string>();
+    if (scope.kind === "project") {
+      for (const item of projectItems) {
+        map.set(item.id, item.status);
+      }
+    }
+    for (const item of calendarItems) {
+      map.set(item.id, item.status);
+    }
+    for (const [id, status] of Object.entries(statusOverrides)) {
+      map.set(id, status);
+    }
+    return map;
+  }, [calendarItems, projectItems, scope.kind, statusOverrides]);
 
   const projectItemIds = useMemo(() => {
     if (scope.kind !== "project") {
@@ -397,6 +394,31 @@ const CalendarView: FC<CalendarViewProps> = ({
       onRefresh();
     }, 200);
   }, [onRefresh]);
+
+  const handleToggleDone = useCallback(
+    async (itemId: string, checked: boolean) => {
+      const nextStatus = checked ? "done" : "ready";
+      const prevStatus = itemStatusMap.get(itemId);
+      setStatusOverrides((prev) => ({ ...prev, [itemId]: nextStatus }));
+      try {
+        await mutate("set_status", { id: itemId, status: nextStatus });
+        scheduleRefresh();
+      } catch (err) {
+        setStatusOverrides((prev) => {
+          const next = { ...prev };
+          if (prevStatus) {
+            next[itemId] = prevStatus;
+          } else {
+            delete next[itemId];
+          }
+          return next;
+        });
+        const message = err instanceof Error ? err.message : "Unknown error";
+        setError(message);
+      }
+    },
+    [itemStatusMap, scheduleRefresh]
+  );
 
   const handleDeleteBlock = useCallback(
     async (blockId: string) => {
@@ -1100,6 +1122,8 @@ const CalendarView: FC<CalendarViewProps> = ({
                       );
                       const title =
                         itemTitleMap.get(block.item_id) ?? block.item_id;
+                      const isDone =
+                        itemStatusMap.get(block.item_id) === "done";
                       return (
                         <ContextMenu.Root
                           key={block.block_id}
@@ -1116,7 +1140,23 @@ const CalendarView: FC<CalendarViewProps> = ({
                               onClick={handleBlockClick(block.item_id)}
                               onKeyDown={handleOpenKey(block.item_id)}
                             >
-                              <div className="calendar-block-title">{title}</div>
+                              <div className="calendar-block-header">
+                                <input
+                                  type="checkbox"
+                                  className="task-checkbox task-checkbox--compact"
+                                  checked={isDone}
+                                  onChange={(event) =>
+                                    void handleToggleDone(
+                                      block.item_id,
+                                      event.target.checked
+                                    )
+                                  }
+                                  onClick={(event) => event.stopPropagation()}
+                                />
+                                <div className="calendar-block-title">
+                                  {title}
+                                </div>
+                              </div>
                               <div className="calendar-block-meta">
                                 {labelTime} · {block.duration_minutes}m
                               </div>
@@ -1206,6 +1246,8 @@ const CalendarView: FC<CalendarViewProps> = ({
                   );
                   const title =
                     itemTitleMap.get(block.item_id) ?? block.item_id;
+                  const isDone =
+                    itemStatusMap.get(block.item_id) === "done";
                   return (
                     <ContextMenu.Root
                       key={block.block_id}
@@ -1220,6 +1262,18 @@ const CalendarView: FC<CalendarViewProps> = ({
                           onContextMenu={handleBlockContextMenu}
                           onKeyDown={handleOpenKey(block.item_id)}
                         >
+                          <input
+                            type="checkbox"
+                            className="task-checkbox task-checkbox--compact"
+                            checked={isDone}
+                            onChange={(event) =>
+                              void handleToggleDone(
+                                block.item_id,
+                                event.target.checked
+                              )
+                            }
+                            onClick={(event) => event.stopPropagation()}
+                          />
                           {labelTime} {title}
                         </div>
                       </ContextMenu.Trigger>

@@ -280,7 +280,7 @@ const getBlockedStatusMap = (db: any, ids: string[]) => {
   }
   const placeholders = buildPlaceholders(ids.length);
   const rows = db.exec({
-    sql: `SELECT id,
+    sql: `SELECT id, status,
       EXISTS(SELECT 1 FROM blockers b WHERE b.item_id = items.id AND b.cleared_at IS NULL) AS has_blocker,
       EXISTS(
         SELECT 1 FROM dependencies d
@@ -291,14 +291,15 @@ const getBlockedStatusMap = (db: any, ids: string[]) => {
     rowMode: "array",
     returnValue: "resultRows",
     bind: ids,
-  }) as Array<[string, number, number]>;
+  }) as Array<[string, string, number, number]>;
   for (const row of rows) {
-    const hasBlocker = Boolean(row[1]);
-    const hasUnmetDep = Boolean(row[2]);
+    const status = row[1];
+    const hasBlocker = Boolean(row[2]);
+    const hasUnmetDep = Boolean(row[3]);
     map.set(row[0], {
       hasBlocker,
       hasUnmetDep,
-      is_blocked: hasBlocker || hasUnmetDep,
+      is_blocked: status === "blocked" || hasBlocker || hasUnmetDep,
     });
   }
   return map;
@@ -514,6 +515,87 @@ const buildHierarchyMaps = (
 
   return { depthMap, projectMap };
 };
+
+const resolveScopeArgs = (args: Record<string, unknown>) => {
+  let scopeProjectId =
+    typeof args.scopeProjectId === "string" ? args.scopeProjectId : null;
+  let scopeUserId =
+    typeof args.scopeUserId === "string" ? args.scopeUserId : null;
+  const scope =
+    typeof args.scope === "object" && args.scope !== null
+      ? (args.scope as Record<string, unknown>)
+      : null;
+  if (scope && typeof scope.kind === "string") {
+    if (scope.kind === "project") {
+      scopeProjectId =
+        typeof scope.projectId === "string" ? scope.projectId : null;
+      scopeUserId = null;
+    } else if (scope.kind === "user") {
+      scopeUserId = typeof scope.userId === "string" ? scope.userId : null;
+      scopeProjectId = null;
+    }
+  }
+  return { scopeProjectId, scopeUserId };
+};
+
+const getScopeItemIds = (
+  db: any,
+  scopeProjectId: string | null,
+  scopeUserId: string | null
+) => {
+  if (scopeUserId) {
+    const rows = db.exec({
+      sql: `SELECT i.id
+        FROM items i
+        JOIN item_assignees a ON a.item_id = i.id
+        WHERE a.assignee_id = ?;`,
+      rowMode: "array",
+      returnValue: "resultRows",
+      bind: [scopeUserId],
+    }) as Array<[string]>;
+    return rows.map((row) => row[0]);
+  }
+  if (scopeProjectId === UNGROUPED_PROJECT_ID) {
+    const rows = db.exec({
+      sql: `WITH RECURSIVE tree AS (
+        SELECT * FROM items WHERE parent_id IS NULL AND type = 'task'
+        UNION ALL
+        SELECT i.* FROM items i JOIN tree t ON i.parent_id = t.id
+      )
+      SELECT id FROM tree;`,
+      rowMode: "array",
+      returnValue: "resultRows",
+    }) as Array<[string]>;
+    return rows.map((row) => row[0]);
+  }
+  if (scopeProjectId) {
+    const rows = db.exec({
+      sql: `WITH RECURSIVE tree AS (
+        SELECT * FROM items WHERE id = ?
+        UNION ALL
+        SELECT i.* FROM items i JOIN tree t ON i.parent_id = t.id
+      )
+      SELECT id FROM tree;`,
+      rowMode: "array",
+      returnValue: "resultRows",
+      bind: [scopeProjectId],
+    }) as Array<[string]>;
+    return rows.map((row) => row[0]);
+  }
+  const rows = db.exec({
+    sql: `SELECT id FROM items;`,
+    rowMode: "array",
+    returnValue: "resultRows",
+  }) as Array<[string]>;
+  return rows.map((row) => row[0]);
+};
+
+const getHierarchyRows = (db: any) =>
+  db.exec({
+    sql: "SELECT id, type, parent_id, title FROM items;",
+    rowMode: "array",
+    returnValue: "resultRows",
+  }) as Array<[string, string, string | null, string]>;
 
 const computeSequenceRank = (data: {
   is_overdue: boolean;
@@ -3425,9 +3507,11 @@ const handleRequest = async (message: RpcRequest): Promise<RpcResponse> => {
           };
           break;
         }
-        case "list_view_complete": {
-          const scopeProjectId =
-            typeof args.scopeProjectId === "string" ? args.scopeProjectId : null;
+        case "list_view_complete":
+        case "list_view_scope": {
+          const { scopeProjectId, scopeUserId } = resolveScopeArgs(
+            args as Record<string, unknown>
+          );
           const scopeParentId =
             typeof args.scopeParentId === "string" ? args.scopeParentId : null;
           const includeUngrouped =
@@ -3537,6 +3621,112 @@ const handleRequest = async (message: RpcRequest): Promise<RpcResponse> => {
               ]
             >;
 
+          const fetchTreeForUser = (rootId: string, userId: string) =>
+            dbHandle.exec({
+              sql: `WITH RECURSIVE tree AS (
+                SELECT * FROM items WHERE id = ?
+                UNION ALL
+                SELECT i.* FROM items i JOIN tree t ON i.parent_id = t.id
+              )
+              SELECT i.id, i.type, i.title, i.parent_id, i.status, i.priority, i.due_at,
+                i.estimate_mode, i.estimate_minutes, i.notes, i.created_at, i.updated_at, i.sort_order
+              FROM tree i
+              JOIN item_assignees a ON a.item_id = i.id
+              WHERE a.assignee_id = ?
+              ORDER BY i.sort_order ASC,
+                CASE WHEN i.due_at IS NULL THEN 1 ELSE 0 END,
+                i.due_at ASC,
+                i.title ASC;`,
+              rowMode: "array",
+              returnValue: "resultRows",
+              bind: [rootId, userId],
+            }) as Array<
+              [
+                string,
+                string,
+                string,
+                string | null,
+                string,
+                number,
+                number | null,
+                string,
+                number,
+                string | null,
+                number,
+                number,
+                number
+              ]
+            >;
+
+          const fetchUngroupedForUser = (userId: string) =>
+            dbHandle.exec({
+              sql: `WITH RECURSIVE tree AS (
+                SELECT * FROM items WHERE parent_id IS NULL AND type = 'task'
+                UNION ALL
+                SELECT i.* FROM items i JOIN tree t ON i.parent_id = t.id
+              )
+              SELECT i.id, i.type, i.title, i.parent_id, i.status, i.priority, i.due_at,
+                i.estimate_mode, i.estimate_minutes, i.notes, i.created_at, i.updated_at, i.sort_order
+              FROM tree i
+              JOIN item_assignees a ON a.item_id = i.id
+              WHERE a.assignee_id = ?
+              ORDER BY i.sort_order ASC,
+                CASE WHEN i.due_at IS NULL THEN 1 ELSE 0 END,
+                i.due_at ASC,
+                i.title ASC;`,
+              rowMode: "array",
+              returnValue: "resultRows",
+              bind: [userId],
+            }) as Array<
+              [
+                string,
+                string,
+                string,
+                string | null,
+                string,
+                number,
+                number | null,
+                string,
+                number,
+                string | null,
+                number,
+                number,
+                number
+              ]
+            >;
+
+          const fetchAllForUser = (userId: string) =>
+            dbHandle.exec({
+              sql: `SELECT i.id, i.type, i.title, i.parent_id, i.status, i.priority, i.due_at,
+                i.estimate_mode, i.estimate_minutes, i.notes, i.created_at, i.updated_at, i.sort_order
+              FROM items i
+              JOIN item_assignees a ON a.item_id = i.id
+              WHERE a.assignee_id = ?
+              ORDER BY i.sort_order ASC,
+                CASE WHEN i.due_at IS NULL THEN 1 ELSE 0 END,
+                i.due_at ASC,
+                i.title ASC;`,
+              rowMode: "array",
+              returnValue: "resultRows",
+              bind: [userId],
+            }) as Array<
+              [
+                string,
+                string,
+                string,
+                string | null,
+                string,
+                number,
+                number | null,
+                string,
+                number,
+                string | null,
+                number,
+                number,
+                number
+              ]
+            >;
+
           let rows: Array<
             [
               string,
@@ -3555,7 +3745,17 @@ const handleRequest = async (message: RpcRequest): Promise<RpcResponse> => {
             ]
           > = [];
 
-          if (scopeProjectId === UNGROUPED_PROJECT_ID) {
+          if (scopeUserId) {
+            if (scopeProjectId === UNGROUPED_PROJECT_ID) {
+              rows = fetchUngroupedForUser(scopeUserId);
+            } else if (scopeParentId) {
+              rows = fetchTreeForUser(scopeParentId, scopeUserId);
+            } else if (scopeProjectId) {
+              rows = fetchTreeForUser(scopeProjectId, scopeUserId);
+            } else {
+              rows = fetchAllForUser(scopeUserId);
+            }
+          } else if (scopeProjectId === UNGROUPED_PROJECT_ID) {
             rows = fetchUngrouped();
           } else if (scopeParentId) {
             rows = fetchTree(scopeParentId);
@@ -3572,7 +3772,9 @@ const handleRequest = async (message: RpcRequest): Promise<RpcResponse> => {
             scopeProjectId &&
             scopeProjectId !== UNGROUPED_PROJECT_ID
           ) {
-            const extraRows = fetchUngrouped();
+            const extraRows = scopeUserId
+              ? fetchUngroupedForUser(scopeUserId)
+              : fetchUngrouped();
             const rowMap = new Map(rows.map((row) => [row[0], row]));
             for (const row of extraRows) {
               if (!rowMap.has(row[0])) {
@@ -3638,6 +3840,28 @@ const handleRequest = async (message: RpcRequest): Promise<RpcResponse> => {
             summary.start = minNullable(summary.start, row[2]);
             summary.end = maxNullable(summary.end, endAt);
             scheduleSummaryMap.set(row[1], summary);
+          }
+
+          if (scopeUserId && envelope.name === "list_view_scope") {
+            rows = rows
+              .slice()
+              .sort((a, b) => {
+                const aSummary = scheduleSummaryMap.get(a[0]);
+                const bSummary = scheduleSummaryMap.get(b[0]);
+                const aStart =
+                  aSummary?.start ?? Number.POSITIVE_INFINITY;
+                const bStart =
+                  bSummary?.start ?? Number.POSITIVE_INFINITY;
+                if (aStart !== bStart) {
+                  return aStart - bStart;
+                }
+                const aDue = a[6] ?? Number.POSITIVE_INFINITY;
+                const bDue = b[6] ?? Number.POSITIVE_INFINITY;
+                if (aDue !== bDue) {
+                  return aDue - bDue;
+                }
+                return a[2].localeCompare(b[2]);
+              });
           }
 
           const timeRows = dbHandle.exec({
@@ -3888,11 +4112,490 @@ const handleRequest = async (message: RpcRequest): Promise<RpcResponse> => {
           result = { ok: true, result: items };
           break;
         }
+        case "execution_window": {
+          const timeMin = ensureTimeMs(args.time_min, "time_min");
+          const timeMax = ensureTimeMs(args.time_max, "time_max");
+          if (timeMax <= timeMin) {
+            throw new Error("time_max must be greater than time_min");
+          }
+
+          const { scopeProjectId, scopeUserId } = resolveScopeArgs(
+            args as Record<string, unknown>
+          );
+          const itemIds = getScopeItemIds(
+            dbHandle,
+            scopeProjectId,
+            scopeUserId
+          );
+          if (itemIds.length === 0) {
+            result = { ok: true, result: { scheduled: [], unscheduled_ready: [] } };
+            break;
+          }
+
+          const placeholders = buildPlaceholders(itemIds.length);
+          const itemRows = dbHandle.exec({
+            sql: `SELECT id, title, status, priority, due_at, parent_id, type, updated_at
+              FROM items
+              WHERE id IN (${placeholders});`,
+            rowMode: "array",
+            returnValue: "resultRows",
+            bind: itemIds,
+          }) as Array<
+            [
+              string,
+              string,
+              string,
+              number,
+              number | null,
+              string | null,
+              string,
+              number
+            ]
+          >;
+          const itemMap = new Map(itemRows.map((row) => [row[0], row]));
+          const scheduleMap = getScheduleSummaryMap(dbHandle, itemIds);
+          const blockedMap = getBlockedStatusMap(dbHandle, itemIds);
+          const dependentsMap = getDependentsCountMap(dbHandle, itemIds);
+          const assigneesMap = getAssigneesMap(dbHandle, itemIds);
+          const userNameMap = getUserMap(dbHandle);
+          const hierarchyRows = getHierarchyRows(dbHandle);
+          const { projectMap } = buildHierarchyMaps(
+            hierarchyRows.map((row) => [row[0], row[1], row[2]]),
+            null
+          );
+          const projectTitleMap = new Map(
+            hierarchyRows
+              .filter((row) => row[1] === "project")
+              .map((row) => [row[0], row[3]])
+          );
+
+          const blockRows = dbHandle.exec({
+            sql: `SELECT block_id, item_id, start_at, duration_minutes
+              FROM scheduled_blocks
+              WHERE item_id IN (${placeholders})
+                AND start_at < ?
+                AND (start_at + duration_minutes * 60000) > ?
+              ORDER BY start_at ASC;`,
+            rowMode: "array",
+            returnValue: "resultRows",
+            bind: [...itemIds, timeMax, timeMin],
+          }) as Array<[string, string, number, number]>;
+
+          const blocksInWindow = new Set(blockRows.map((row) => row[1]));
+          const scheduled = blockRows.map((row) => {
+            const item = itemMap.get(row[1]);
+            const assigneeId = (assigneesMap.get(row[1]) ?? [])[0] ?? null;
+            const projectId = projectMap.get(row[1]) ?? row[1];
+            return {
+              block_id: row[0],
+              item_id: row[1],
+              title: item?.[1] ?? row[1],
+              start_at: row[2],
+              duration_minutes: row[3],
+              due_at: item?.[4] ?? null,
+              status: item?.[2] ?? "unknown",
+              project_id: projectId,
+              project_title: projectTitleMap.get(projectId) ?? null,
+              assignee_id: assigneeId,
+              assignee_name: assigneeId
+                ? getUserDisplayName(assigneeId, userNameMap)
+                : null,
+            };
+          });
+
+          const now = Date.now();
+          const dueMetricsMap = new Map(
+            itemRows.map((row) => [row[0], computeDueMetrics(row[4], now, row[2])])
+          );
+          const readyStatuses = new Set(["ready", "in_progress", "review"]);
+          const unscheduledReady = itemRows
+            .filter((row) => {
+              if (!readyStatuses.has(row[2])) {
+                return false;
+              }
+              const blocked = blockedMap.get(row[0]);
+              if (blocked?.is_blocked) {
+                return false;
+              }
+              return !blocksInWindow.has(row[0]);
+            })
+            .map((row) => {
+              const dueMetrics = dueMetricsMap.get(row[0]);
+              const schedule = scheduleMap.get(row[0]);
+              const slackMinutes = computeSlackMinutes(
+                row[4],
+                schedule?.end ?? null
+              );
+              const dependents = dependentsMap.get(row[0]) ?? 0;
+              const sequenceRank = computeSequenceRank({
+                is_overdue: dueMetrics?.is_overdue ?? false,
+                is_blocked: false,
+                due_at: row[4],
+                priority: row[3],
+                dependents,
+              });
+              const projectId = projectMap.get(row[0]) ?? row[0];
+              const assigneeId = (assigneesMap.get(row[0]) ?? [])[0] ?? null;
+              return {
+                item_id: row[0],
+                title: row[1],
+                due_at: row[4],
+                status: row[2],
+                priority: row[3],
+                sequence_rank: sequenceRank,
+                slack_minutes: slackMinutes,
+                project_id: projectId,
+                project_title: projectTitleMap.get(projectId) ?? null,
+                assignee_id: assigneeId,
+                assignee_name: assigneeId
+                  ? getUserDisplayName(assigneeId, userNameMap)
+                  : null,
+              };
+            })
+            .sort((a, b) => {
+              if (a.sequence_rank !== b.sequence_rank) {
+                return a.sequence_rank - b.sequence_rank;
+              }
+              const aDue = a.due_at ?? Number.POSITIVE_INFINITY;
+              const bDue = b.due_at ?? Number.POSITIVE_INFINITY;
+              if (aDue !== bDue) {
+                return aDue - bDue;
+              }
+              return a.title.localeCompare(b.title);
+            });
+
+          result = {
+            ok: true,
+            result: {
+              scheduled,
+              unscheduled_ready: unscheduledReady,
+            },
+          };
+          break;
+        }
+        case "blocked_view": {
+          const { scopeProjectId, scopeUserId } = resolveScopeArgs(
+            args as Record<string, unknown>
+          );
+          const timeMin =
+            args.time_min !== undefined ? ensureTimeMs(args.time_min, "time_min") : null;
+          const timeMax =
+            args.time_max !== undefined ? ensureTimeMs(args.time_max, "time_max") : null;
+          if (timeMin !== null && timeMax !== null && timeMax <= timeMin) {
+            throw new Error("time_max must be greater than time_min");
+          }
+
+          const itemIds = getScopeItemIds(
+            dbHandle,
+            scopeProjectId,
+            scopeUserId
+          );
+          if (itemIds.length === 0) {
+            result = {
+              ok: true,
+              result: {
+                blocked_by_dependencies: [],
+                blocked_by_blockers: [],
+                scheduled_but_blocked: [],
+              },
+            };
+            break;
+          }
+
+          const placeholders = buildPlaceholders(itemIds.length);
+          const itemRows = dbHandle.exec({
+            sql: `SELECT id, title, status, priority, due_at, parent_id, type, updated_at
+              FROM items
+              WHERE id IN (${placeholders});`,
+            rowMode: "array",
+            returnValue: "resultRows",
+            bind: itemIds,
+          }) as Array<
+            [
+              string,
+              string,
+              string,
+              number,
+              number | null,
+              string | null,
+              string,
+              number
+            ]
+          >;
+          const itemMap = new Map(itemRows.map((row) => [row[0], row]));
+          const scheduleMap = getScheduleSummaryMap(dbHandle, itemIds);
+          const blockedMap = getBlockedStatusMap(dbHandle, itemIds);
+          const unmetDepMap = getUnmetDependencyMap(dbHandle, itemIds);
+          const activeBlockerCountMap = getActiveBlockerCountMap(
+            dbHandle,
+            itemIds
+          );
+          const assigneesMap = getAssigneesMap(dbHandle, itemIds);
+          const userNameMap = getUserMap(dbHandle);
+          const hierarchyRows = getHierarchyRows(dbHandle);
+          const { projectMap } = buildHierarchyMaps(
+            hierarchyRows.map((row) => [row[0], row[1], row[2]]),
+            null
+          );
+          const projectTitleMap = new Map(
+            hierarchyRows
+              .filter((row) => row[1] === "project")
+              .map((row) => [row[0], row[3]])
+          );
+
+          const blockRows =
+            timeMin !== null && timeMax !== null
+              ? (dbHandle.exec({
+                  sql: `SELECT block_id, item_id, start_at, duration_minutes
+                    FROM scheduled_blocks
+                    WHERE item_id IN (${placeholders})
+                      AND start_at < ?
+                      AND (start_at + duration_minutes * 60000) > ?
+                    ORDER BY start_at ASC;`,
+                  rowMode: "array",
+                  returnValue: "resultRows",
+                  bind: [...itemIds, timeMax, timeMin],
+                }) as Array<[string, string, number, number]>)
+              : [];
+          const blockMap = new Map<
+            string,
+            { block_id: string; start_at: number; duration_minutes: number }
+          >();
+          for (const row of blockRows) {
+            if (!blockMap.has(row[1])) {
+              blockMap.set(row[1], {
+                block_id: row[0],
+                start_at: row[2],
+                duration_minutes: row[3],
+              });
+            }
+          }
+
+          const blockedByDeps = [];
+          const blockedByBlockers = [];
+          const scheduledButBlocked = [];
+
+          for (const row of itemRows) {
+            const blocked = blockedMap.get(row[0]);
+            if (!blocked?.is_blocked) {
+              continue;
+            }
+            const schedule = scheduleMap.get(row[0]) ?? {
+              start: null,
+              end: null,
+            };
+            const slackMinutes = computeSlackMinutes(row[4], schedule.end ?? null);
+            const projectId = projectMap.get(row[0]) ?? row[0];
+            const assigneeId = (assigneesMap.get(row[0]) ?? [])[0] ?? null;
+            const assigneeName = assigneeId
+              ? getUserDisplayName(assigneeId, userNameMap)
+              : null;
+            const baseEntry = {
+              item_id: row[0],
+              title: row[1],
+              due_at: row[4],
+              planned_start_at: schedule.start ?? null,
+              planned_end_at: schedule.end ?? null,
+              slack_minutes: slackMinutes,
+              project_title: projectTitleMap.get(projectId) ?? null,
+              assignee_name: assigneeName,
+            };
+            if (blocked.hasUnmetDep) {
+              blockedByDeps.push({
+                ...baseEntry,
+                blocked_reason: "dependencies",
+              });
+            }
+            if (blocked.hasBlocker) {
+              blockedByBlockers.push({
+                ...baseEntry,
+                blocker_count: activeBlockerCountMap.get(row[0]) ?? 0,
+              });
+            }
+            if (!blocked.hasUnmetDep && !blocked.hasBlocker && row[2] === "blocked") {
+              blockedByDeps.push({
+                ...baseEntry,
+                blocked_reason: "status",
+              });
+            }
+            const hasBlockInWindow = blockMap.has(row[0]);
+            const hasAnyBlock = schedule.end !== null;
+            if ((timeMin !== null && timeMax !== null && hasBlockInWindow) ||
+                (timeMin === null && timeMax === null && hasAnyBlock)) {
+              const block = blockMap.get(row[0]);
+              const reason = blocked.hasUnmetDep && blocked.hasBlocker
+                ? "both"
+                : blocked.hasUnmetDep
+                  ? "dependencies"
+                  : blocked.hasBlocker
+                    ? "blockers"
+                    : "status";
+              scheduledButBlocked.push({
+                item_id: row[0],
+                title: row[1],
+                block_id: block?.block_id ?? null,
+                start_at: block?.start_at ?? null,
+                duration_minutes: block?.duration_minutes ?? null,
+                blocked_reason: reason,
+                due_at: row[4],
+                project_title: projectTitleMap.get(projectId) ?? null,
+              });
+            }
+          }
+
+          result = {
+            ok: true,
+            result: {
+              blocked_by_dependencies: blockedByDeps,
+              blocked_by_blockers: blockedByBlockers,
+              scheduled_but_blocked: scheduledButBlocked,
+            },
+          };
+          break;
+        }
+        case "due_overdue": {
+          const nowAt = ensureTimeMs(args.now_at, "now_at");
+          const dueSoonDays = ensureNonNegativeInteger(
+            args.due_soon_days,
+            "due_soon_days"
+          );
+          const dayMs = 24 * 60 * 60 * 1000;
+          const dueSoonEnd = nowAt + dueSoonDays * dayMs;
+
+          const { scopeProjectId, scopeUserId } = resolveScopeArgs(
+            args as Record<string, unknown>
+          );
+          const itemIds = getScopeItemIds(
+            dbHandle,
+            scopeProjectId,
+            scopeUserId
+          );
+          if (itemIds.length === 0) {
+            result = {
+              ok: true,
+              result: { due_soon: [], overdue: [], projects: [] },
+            };
+            break;
+          }
+
+          const placeholders = buildPlaceholders(itemIds.length);
+          const itemRows = dbHandle.exec({
+            sql: `SELECT id, title, status, due_at, parent_id, type, priority
+              FROM items
+              WHERE id IN (${placeholders});`,
+            rowMode: "array",
+            returnValue: "resultRows",
+            bind: itemIds,
+          }) as Array<
+            [
+              string,
+              string,
+              string,
+              number | null,
+              string | null,
+              string,
+              number
+            ]
+          >;
+
+          const scheduleMap = getScheduleSummaryMap(dbHandle, itemIds);
+          const assigneesMap = getAssigneesMap(dbHandle, itemIds);
+          const userNameMap = getUserMap(dbHandle);
+          const hierarchyRows = getHierarchyRows(dbHandle);
+          const { projectMap } = buildHierarchyMaps(
+            hierarchyRows.map((row) => [row[0], row[1], row[2]]),
+            null
+          );
+          const projectTitleMap = new Map(
+            hierarchyRows
+              .filter((row) => row[1] === "project")
+              .map((row) => [row[0], row[3]])
+          );
+
+          const dueSoon = [];
+          const overdue = [];
+          const projects = [];
+
+          for (const row of itemRows) {
+            if (row[2] === "done" || row[2] === "canceled") {
+              continue;
+            }
+            const dueAt = row[3];
+            const schedule = scheduleMap.get(row[0]) ?? {
+              start: null,
+              end: null,
+            };
+            const slackMinutes = computeSlackMinutes(dueAt, schedule.end ?? null);
+            const projectId = projectMap.get(row[0]) ?? row[0];
+            const assigneeId = (assigneesMap.get(row[0]) ?? [])[0] ?? null;
+            const assigneeName = assigneeId
+              ? getUserDisplayName(assigneeId, userNameMap)
+              : null;
+
+            if (row[5] === "project") {
+              if (dueAt !== null) {
+                const metrics = computeDueMetrics(dueAt, nowAt, row[2]);
+                projects.push({
+                  project_id: row[0],
+                  title: row[1],
+                  due_at: dueAt,
+                  days_until_due_or_overdue: metrics.is_overdue
+                    ? -metrics.days_overdue
+                    : metrics.days_until_due,
+                });
+              }
+              continue;
+            }
+
+            if (dueAt === null) {
+              continue;
+            }
+
+            const metrics = computeDueMetrics(dueAt, nowAt, row[2]);
+            const entry = {
+              item_id: row[0],
+              title: row[1],
+              due_at: dueAt,
+              planned_end_at: schedule.end ?? null,
+              slack_minutes: slackMinutes,
+              project_title: projectTitleMap.get(projectId) ?? null,
+              assignee_name: assigneeName,
+            };
+            if (dueAt >= nowAt && dueAt <= dueSoonEnd) {
+              dueSoon.push({
+                ...entry,
+                days_until_due: metrics.days_until_due,
+              });
+            } else if (dueAt < nowAt) {
+              overdue.push({
+                ...entry,
+                days_overdue: metrics.days_overdue,
+              });
+            }
+          }
+
+          dueSoon.sort((a, b) => a.due_at - b.due_at);
+          overdue.sort((a, b) => a.due_at - b.due_at);
+          projects.sort((a, b) => {
+            const aDue = a.due_at ?? Number.POSITIVE_INFINITY;
+            const bDue = b.due_at ?? Number.POSITIVE_INFINITY;
+            return aDue - bDue;
+          });
+
+          result = {
+            ok: true,
+            result: {
+              due_soon: dueSoon,
+              overdue,
+              projects,
+            },
+          };
+          break;
+        }
         case "kanban_view": {
-          const scopeProjectId =
-            typeof args.scopeProjectId === "string" ? args.scopeProjectId : null;
-          const scopeUserId =
-            typeof args.scopeUserId === "string" ? args.scopeUserId : null;
+          const { scopeProjectId, scopeUserId } = resolveScopeArgs(
+            args as Record<string, unknown>
+          );
           const includeCompleted =
             typeof args.includeCompleted === "boolean"
               ? args.includeCompleted
@@ -5377,10 +6080,9 @@ const handleRequest = async (message: RpcRequest): Promise<RpcResponse> => {
           if (timeMax <= timeMin) {
             throw new Error("time_max must be greater than time_min");
           }
-          const scopeProjectId =
-            typeof args.scopeProjectId === "string" ? args.scopeProjectId : null;
-          const scopeUserId =
-            typeof args.scopeUserId === "string" ? args.scopeUserId : null;
+          const { scopeProjectId, scopeUserId } = resolveScopeArgs(
+            args as Record<string, unknown>
+          );
           const includeCompleted =
             typeof args.includeCompleted === "boolean"
               ? args.includeCompleted

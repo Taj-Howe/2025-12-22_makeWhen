@@ -1,9 +1,6 @@
 import { useCallback, useEffect, useMemo, useState, type FC } from "react";
 import { mutate, query } from "../rpc/clientSingleton";
-
-type KanbanScope =
-  | { kind: "project"; projectId: string | null }
-  | { kind: "user"; userId: string };
+import type { Scope } from "../domain/scope";
 
 type CardItem = {
   id: string;
@@ -28,7 +25,7 @@ type KanbanLane = {
 };
 
 type KanbanViewProps = {
-  scope: KanbanScope;
+  scope: Scope;
   refreshToken: number;
   onRefresh: () => void;
   onOpenItem: (itemId: string) => void;
@@ -80,8 +77,7 @@ const KanbanView: FC<KanbanViewProps> = ({
       setError(null);
     try {
       const data = await query<{ lanes: KanbanLane[] }>("kanban_view", {
-        scopeProjectId: scope.kind === "project" ? scope.projectId : undefined,
-        scopeUserId: scope.kind === "user" ? scope.userId : undefined,
+        scope,
         includeCompleted: showDone,
         showCanceled,
         swimlaneMode,
@@ -127,6 +123,29 @@ const KanbanView: FC<KanbanViewProps> = ({
     return map;
   }, [lanes]);
 
+  const moveCardStatus = useCallback(
+    (itemId: string, laneId: string, nextStatus: string) => {
+      const card = cardById.get(itemId);
+      if (!card) {
+        return;
+      }
+      setLanes((prev) =>
+        prev.map((lane) => {
+          const nextColumns: Record<string, CardItem[]> = {};
+          for (const [key, list] of Object.entries(lane.columns)) {
+            nextColumns[key] = list.filter((entry) => entry.id !== itemId);
+          }
+          if (lane.lane_id === laneId) {
+            const nextList = nextColumns[nextStatus] ?? [];
+            nextColumns[nextStatus] = [...nextList, { ...card, status: nextStatus }];
+          }
+          return { ...lane, columns: nextColumns };
+        })
+      );
+    },
+    [cardById]
+  );
+
   const handleDrop = async (
     event: React.DragEvent,
     laneId: string,
@@ -145,21 +164,25 @@ const KanbanView: FC<KanbanViewProps> = ({
     if (currentLaneId && currentLaneId !== laneId) {
       return;
     }
-    setLanes((prev) =>
-      prev.map((lane) => {
-        const nextColumns: Record<string, CardItem[]> = {};
-        for (const [key, list] of Object.entries(lane.columns)) {
-          nextColumns[key] = list.filter((entry) => entry.id !== itemId);
-        }
-        if (lane.lane_id === laneId) {
-          const nextList = nextColumns[status] ?? [];
-          nextColumns[status] = [...nextList, { ...card, status }];
-        }
-        return { ...lane, columns: nextColumns };
-      })
-    );
+    moveCardStatus(itemId, laneId, status);
     try {
       await mutate("set_status", { id: itemId, status });
+      void loadBoard(true);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Unknown error";
+      setError(message);
+    }
+  };
+
+  const handleToggleDone = async (itemId: string, checked: boolean) => {
+    const laneId = cardLaneMap.get(itemId);
+    if (!laneId) {
+      return;
+    }
+    const nextStatus = checked ? "done" : "ready";
+    moveCardStatus(itemId, laneId, nextStatus);
+    try {
+      await mutate("set_status", { id: itemId, status: nextStatus });
       void loadBoard(true);
     } catch (err) {
       const message = err instanceof Error ? err.message : "Unknown error";
@@ -194,7 +217,12 @@ const KanbanView: FC<KanbanViewProps> = ({
         throw new Error("Create failed");
       }
 
-      if (swimlaneMode === "assignee" && lane.lane_id !== "unassigned") {
+      if (scope.kind === "user") {
+        await mutate("item.set_assignee", {
+          item_id: itemId,
+          user_id: scope.userId,
+        });
+      } else if (swimlaneMode === "assignee" && lane.lane_id !== "unassigned") {
         await mutate("item.set_assignee", {
           item_id: itemId,
           user_id: lane.lane_id,
@@ -275,10 +303,13 @@ const KanbanView: FC<KanbanViewProps> = ({
                     </button>
                   </div>
                   <div className="kanban-column-body">
-                    {(lane.columns[status] ?? []).map((card) => (
-                      <div
-                        key={card.id}
-                        className="kanban-card"
+                    {(lane.columns[status] ?? []).length === 0 ? (
+                      <div className="kanban-empty">No items</div>
+                    ) : (
+                      (lane.columns[status] ?? []).map((card) => (
+                        <div
+                          key={card.id}
+                          className="kanban-card"
                         draggable
                         onDragStart={(event) => {
                           event.dataTransfer.setData("text/plain", card.id);
@@ -286,7 +317,18 @@ const KanbanView: FC<KanbanViewProps> = ({
                         }}
                         onClick={() => onOpenItem(card.id)}
                       >
-                        <div className="kanban-card-title">{card.title}</div>
+                        <div className="kanban-card-header">
+                          <input
+                            type="checkbox"
+                            className="task-checkbox task-checkbox--compact"
+                            checked={card.status === "done"}
+                            onChange={(event) =>
+                              void handleToggleDone(card.id, event.target.checked)
+                            }
+                            onClick={(event) => event.stopPropagation()}
+                          />
+                          <div className="kanban-card-title">{card.title}</div>
+                        </div>
                         <div className="kanban-card-meta">
                           {card.priority ? (
                             <span className="kanban-chip">
@@ -308,7 +350,8 @@ const KanbanView: FC<KanbanViewProps> = ({
                           ) : null}
                         </div>
                       </div>
-                    ))}
+                      ))
+                    )}
                   </div>
                 </div>
               ))}

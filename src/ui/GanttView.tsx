@@ -6,13 +6,10 @@ import type {
   GanttItem,
   GanttRangeResult,
 } from "../domain/ganttTypes";
-
-type GanttScope =
-  | { kind: "project"; projectId: string | null }
-  | { kind: "user"; userId: string };
+import type { Scope } from "../domain/scope";
 
 type GanttViewProps = {
-  scope: GanttScope;
+  scope: Scope;
   refreshToken: number;
   onRefresh: () => void;
   onOpenItem: (itemId: string) => void;
@@ -137,9 +134,7 @@ const GanttView: FC<GanttViewProps> = ({
       const data = await query<GanttRangeResult>("gantt_range", {
         time_min: timeWindow.start.toISOString(),
         time_max: timeWindow.end.toISOString(),
-        scopeProjectId:
-          scope.kind === "project" ? scope.projectId ?? undefined : undefined,
-        scopeUserId: scope.kind === "user" ? scope.userId : undefined,
+        scope,
         includeCompleted: false,
       });
       setItems(data.items);
@@ -171,10 +166,9 @@ const GanttView: FC<GanttViewProps> = ({
     items,
   ]);
 
-  const sortedChildren = useCallback(
-    (parentId: string | null) => {
-      const children = childMap.get(parentId) ?? [];
-      return children.slice().sort((a, b) => {
+  const sortItems = useCallback(
+    (list: GanttItem[]) =>
+      list.slice().sort((a, b) => {
         const aHasChildren = (childMap.get(a.id) ?? []).length > 0;
         const bHasChildren = (childMap.get(b.id) ?? []).length > 0;
         const aStart = getPrimaryTime(a, aHasChildren) ?? Number.POSITIVE_INFINITY;
@@ -188,9 +182,13 @@ const GanttView: FC<GanttViewProps> = ({
           return aDue - bDue;
         }
         return a.title.localeCompare(b.title);
-      });
-    },
+      }),
     [childMap]
+  );
+
+  const sortedChildren = useCallback(
+    (parentId: string | null) => sortItems(childMap.get(parentId) ?? []),
+    [childMap, sortItems]
   );
 
   const visibleRows = useMemo(() => {
@@ -205,9 +203,25 @@ const GanttView: FC<GanttViewProps> = ({
         }
       }
     };
-    walk(null, 0);
+    if (scope.kind === "user") {
+      const roots = items.filter(
+        (item) => !item.parent_id || !itemMap.has(item.parent_id)
+      );
+      for (const root of sortItems(roots)) {
+        rows.push({ item: root, depth: 0 });
+        const hasChildren = (childMap.get(root.id) ?? []).length > 0;
+        if (hasChildren && !collapsed.has(root.id)) {
+          walk(root.id, 1);
+        }
+      }
+      if (roots.length === 0) {
+        walk(null, 0);
+      }
+    } else {
+      walk(null, 0);
+    }
     return rows;
-  }, [childMap, collapsed, sortedChildren]);
+  }, [childMap, collapsed, itemMap, items, scope.kind, sortedChildren]);
 
   const timelineDays = useMemo(() => {
     const days: Date[] = [];

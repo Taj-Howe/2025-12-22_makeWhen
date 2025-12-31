@@ -12,12 +12,14 @@ import {
 import * as ContextMenu from "@radix-ui/react-context-menu";
 import { query, mutate } from "../rpc/clientSingleton";
 import { UNGROUPED_PROJECT_ID } from "./constants";
+import { scopeKey } from "../domain/scope";
 import type {
   DependencyProjectionLite,
   ItemGanttModel,
   ListItem,
   ScheduledBlockLite,
 } from "../domain/listTypes";
+import type { Scope } from "../domain/scope";
 import { buildListViewModel } from "../domain/listViewModel";
 import {
   formatDate,
@@ -66,20 +68,19 @@ type Column = {
 };
 
 type ListViewProps = {
-  selectedProjectId: string | null;
+  scope: Scope;
   refreshToken: number;
   onRefresh: () => void;
   onOpenItem?: (itemId: string) => void;
 };
 
 const ListView: FC<ListViewProps> = ({
-  selectedProjectId,
+  scope,
   refreshToken,
   onRefresh,
   onOpenItem,
 }) => {
   const [items, setItems] = useState<ListViewItem[]>([]);
-  const [itemsProjectId, setItemsProjectId] = useState<string | null>(null);
   const itemsCacheRef = useRef<Map<string, ListViewItem[]>>(new Map());
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -123,20 +124,29 @@ const ListView: FC<ListViewProps> = ({
     return lastItem.id;
   };
 
+  const isUserScope = scope.kind === "user";
+  const projectScopeId = scope.kind === "project" ? scope.projectId : null;
+  const cacheKey = scopeKey(scope);
+
   const loadItems = useCallback(async () => {
-    if (!selectedProjectId) {
+    if (scope.kind === "project" && !scope.projectId) {
       return [];
     }
     const [listData, completeData] = await Promise.all([
       query<{ items: ListItem[] }>("listItems", {
-        projectId: selectedProjectId,
+        ...(scope.kind === "project"
+          ? { projectId: scope.projectId }
+          : { assigneeId: scope.userId }),
         includeDone: true,
         includeCanceled: true,
         orderBy: "due_at",
         orderDir: "asc",
       }),
       query<ItemGanttModel[]>("list_view_complete", {
-        scopeProjectId: selectedProjectId,
+        scope,
+        ...(scope.kind === "project"
+          ? { scopeProjectId: scope.projectId }
+          : { scopeUserId: scope.userId }),
         includeUngrouped: false,
         includeCompleted: true,
       }),
@@ -159,24 +169,21 @@ const ListView: FC<ListViewProps> = ({
       };
     });
     return merged;
-  }, [selectedProjectId]);
+  }, [scope]);
 
   useEffect(() => {
-    if (!selectedProjectId) {
+    if (scope.kind === "project" && !scope.projectId) {
       setItems([]);
-      setItemsProjectId(null);
       setError(null);
       setLoading(false);
       return;
     }
     let isMounted = true;
-    const cached = itemsCacheRef.current.get(selectedProjectId);
+    const cached = itemsCacheRef.current.get(cacheKey);
     if (cached) {
       setItems(cached);
-      setItemsProjectId(selectedProjectId);
     } else {
       setItems([]);
-      setItemsProjectId(selectedProjectId);
     }
     setLoading(!cached);
     setError(null);
@@ -186,8 +193,7 @@ const ListView: FC<ListViewProps> = ({
           return;
         }
         setItems(merged);
-        setItemsProjectId(selectedProjectId);
-        itemsCacheRef.current.set(selectedProjectId, merged);
+        itemsCacheRef.current.set(cacheKey, merged);
       })
       .catch((err) => {
         if (!isMounted) {
@@ -204,25 +210,18 @@ const ListView: FC<ListViewProps> = ({
     return () => {
       isMounted = false;
     };
-  }, [loadItems, refreshToken, selectedProjectId]);
+  }, [cacheKey, loadItems, refreshToken, scope]);
 
-  const effectiveProjectId = itemsProjectId ?? selectedProjectId;
   const viewModel = useMemo(
     () =>
       buildListViewModel({
         items,
-        selectedProjectId: effectiveProjectId,
+        selectedProjectId: projectScopeId,
         ungroupedProjectId: UNGROUPED_PROJECT_ID,
+        mode: isUserScope ? "user" : "project",
       }),
-    [effectiveProjectId, items]
+    [isUserScope, items, projectScopeId]
   );
-
-  useEffect(() => {
-    if (!itemsProjectId) {
-      return;
-    }
-    itemsCacheRef.current.set(itemsProjectId, items);
-  }, [items, itemsProjectId]);
 
   const {
     parentTypeMap,
@@ -1111,7 +1110,7 @@ const ListView: FC<ListViewProps> = ({
             })
           )}
           <ItemAutocomplete
-            scopeId={selectedProjectId}
+            scopeId={projectScopeId}
             excludeIds={[item.id, ...incomingIds]}
             placeholder="Add predecessor"
             onSelect={(dependency) =>
@@ -1180,7 +1179,7 @@ const ListView: FC<ListViewProps> = ({
             })
           )}
           <ItemAutocomplete
-            scopeId={selectedProjectId}
+            scopeId={projectScopeId}
             excludeIds={[item.id, ...outgoingIds]}
             placeholder="Add successor"
             onSelect={(dependency) =>
@@ -1912,21 +1911,27 @@ const ListView: FC<ListViewProps> = ({
   };
 
 
-  const renderDragHandle = (itemId: string, groupKey: string) => (
-    <span
-      className="drag-handle"
-      draggable
-      onDragStart={handleDragStart(itemId, groupKey)}
-      onDragEnd={handleDragEnd}
-      title="Drag to reorder"
-    >
-      ⋮⋮
-    </span>
-  );
+  const renderDragHandle = (itemId: string, groupKey: string) => {
+    if (isUserScope) {
+      return null;
+    }
+    return (
+      <span
+        className="drag-handle"
+        draggable
+        onDragStart={handleDragStart(itemId, groupKey)}
+        onDragEnd={handleDragEnd}
+        title="Drag to reorder"
+      >
+        ⋮⋮
+      </span>
+    );
+  };
 
   const showLoading = loading && items.length === 0;
+  const ungroupedLabel = isUserScope ? "Assigned tasks" : "Ungrouped";
 
-  if (!selectedProjectId) {
+  if (scope.kind === "project" && !scope.projectId) {
     return (
       <div className="list-view list-view-container">Select a project</div>
     );
@@ -1978,7 +1983,7 @@ const ListView: FC<ListViewProps> = ({
                       className="group-toggle"
                       onClick={() => setCollapsedUngrouped((prev) => !prev)}
                     >
-                      {collapsedUngrouped ? "▶" : "▼"} Ungrouped
+                      {collapsedUngrouped ? "▶" : "▼"} {ungroupedLabel}
                     </button>
                   </td>
                 </tr>

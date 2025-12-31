@@ -243,6 +243,103 @@ body {
   color: var(--color-text);
 }
 
+.dashboard-toolbar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 16px;
+}
+
+.dashboard-title {
+  font-size: 18px;
+  font-weight: 600;
+}
+
+.dashboard-toggle {
+  display: inline-flex;
+  gap: 6px;
+}
+
+.dashboard-grid {
+  display: grid;
+  gap: 16px;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+}
+
+.dashboard-card {
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius);
+  padding: 12px;
+  background: var(--color-panel-2);
+  display: grid;
+  gap: 12px;
+}
+
+.dashboard-card h3 {
+  margin: 0;
+  font-size: 16px;
+}
+
+.dashboard-section {
+  display: grid;
+  gap: 6px;
+}
+
+.dashboard-section-title {
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--color-muted-text);
+}
+
+.dashboard-row {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  gap: 8px;
+  align-items: center;
+  text-align: left;
+  padding: 6px 8px;
+  border-radius: var(--radius);
+  border: 1px solid transparent;
+  background: transparent;
+  cursor: pointer;
+}
+
+.dashboard-row:hover {
+  border-color: var(--color-border);
+  background: color-mix(in srgb, var(--color-panel) 70%, transparent);
+}
+
+.dashboard-row-warning {
+  border-color: var(--color-danger);
+}
+
+.dashboard-title-text {
+  font-size: 14px;
+}
+
+.dashboard-meta {
+  font-size: 12px;
+  color: var(--color-muted-text);
+}
+
+.dashboard-time {
+  font-size: 12px;
+  color: var(--color-muted-text);
+}
+
+.dashboard-empty {
+  font-size: 12px;
+  color: var(--color-muted-text);
+}
+
+.button-active {
+  background: var(--color-accent);
+  color: var(--color-accent-text);
+  border-color: var(--color-accent-border);
+}
+
 .gantt-root {
   display: flex;
   flex-direction: column;
@@ -547,6 +644,12 @@ body {
   gap: 8px;
 }
 
+.kanban-empty {
+  font-size: 12px;
+  color: var(--color-text-muted);
+  padding: 6px 4px;
+}
+
 .kanban-card {
   border: 1px solid var(--color-border);
   border-radius: 12px;
@@ -554,6 +657,12 @@ body {
   background: var(--color-panel);
   cursor: pointer;
   display: grid;
+  gap: 6px;
+}
+
+.kanban-card-header {
+  display: flex;
+  align-items: center;
   gap: 6px;
 }
 
@@ -939,6 +1048,12 @@ button:focus-visible {
   cursor: ns-resize;
 }
 
+.calendar-block-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
 .calendar-selection {
   position: absolute;
   left: 4px;
@@ -1042,6 +1157,9 @@ button:focus-visible {
   background: var(--color-panel-2);
   color: var(--color-text);
   cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
 }
 
 .list-scroll {
@@ -1289,7 +1407,7 @@ button:focus-visible {
 .task-checkbox-wrap {
   display: inline-flex;
   align-items: center;
-  padding-right: 2px;
+  padding: 2px 6px 2px 2px;
 }
 
 .cell-title-label {
@@ -1302,8 +1420,46 @@ button:focus-visible {
 }
 
 .task-checkbox {
-  margin-right: 8px;
-  accent-color: var(--color-accent);
+  appearance: none;
+  width: 18px;
+  height: 18px;
+  border-radius: 999px;
+  border: 1px solid var(--color-border);
+  background: var(--color-panel-2);
+  display: inline-grid;
+  place-content: center;
+  cursor: pointer;
+  margin-right: 6px;
+}
+
+.task-checkbox::after {
+  content: "";
+  width: 8px;
+  height: 8px;
+  border-radius: 999px;
+  background: var(--color-accent);
+  transform: scale(0);
+  transition: transform 120ms ease;
+}
+
+.task-checkbox:checked {
+  border-color: var(--color-accent-border);
+  background: color-mix(in srgb, var(--color-accent) 15%, var(--color-panel-2));
+}
+
+.task-checkbox:checked::after {
+  transform: scale(1);
+}
+
+.task-checkbox--compact {
+  width: 14px;
+  height: 14px;
+  margin-right: 4px;
+}
+
+.task-checkbox--compact::after {
+  width: 6px;
+  height: 6px;
 }
 
 .drag-over-top td {

@@ -14,6 +14,8 @@ import ThemeSettings from "./ThemeSettings";
 import SampleDataPanel from "./SampleDataPanel";
 import { mutate, query } from "../rpc/clientSingleton";
 import type { ListItem } from "../domain/listTypes";
+import type { Scope } from "../domain/scope";
+import { ScopeProvider } from "./ScopeContext";
 
 type UserLite = {
   user_id: string;
@@ -30,11 +32,13 @@ const DEFAULT_USER: UserLite = {
 
 const App = () => {
   const [projectItems, setProjectItems] = useState<ListItem[]>([]);
-  const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null);
+  const [selectedProjectId, setSelectedProjectId] = useState<string | null>(
+    UNGROUPED_PROJECT_ID
+  );
   const [users, setUsers] = useState<UserLite[]>([]);
   const [selectedUserId, setSelectedUserId] = useState<string | null>(null);
   const [usersError, setUsersError] = useState<string | null>(null);
-  const [scopeKind, setScopeKind] = useState<"project" | "user">("project");
+  const [scope, setScope] = useState<Scope | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [deleteError, setDeleteError] = useState<string | null>(null);
   const [refreshToken, setRefreshToken] = useState(0);
@@ -164,21 +168,81 @@ const App = () => {
     return list[0] ?? DEFAULT_USER;
   }, [selectedUserId, users]);
 
+  // Scope drives all views; user scope is assignee-only with no parent inference.
+  const activeScope = useMemo<Scope>(() => {
+    if (scope) {
+      return scope;
+    }
+    if (selectedUserId) {
+      return { kind: "user", userId: selectedUserId };
+    }
+    return {
+      kind: "project",
+      projectId: selectedProjectId ?? UNGROUPED_PROJECT_ID,
+    };
+  }, [scope, selectedProjectId, selectedUserId]);
+
+  useEffect(() => {
+    if (scope) {
+      return;
+    }
+    if (selectedUserId) {
+      setScope({ kind: "user", userId: selectedUserId });
+      return;
+    }
+    if (selectedProjectId) {
+      setScope({ kind: "project", projectId: selectedProjectId });
+    }
+  }, [scope, selectedProjectId, selectedUserId]);
+
+  useEffect(() => {
+    if (!selectedUserId) {
+      return;
+    }
+    setScope((prev) => {
+      if (prev?.kind === "user" && prev.userId !== selectedUserId) {
+        return { kind: "user", userId: selectedUserId };
+      }
+      return prev;
+    });
+  }, [selectedUserId]);
+
+  useEffect(() => {
+    if (!selectedProjectId) {
+      return;
+    }
+    setScope((prev) => {
+      if (prev?.kind === "project" && prev.projectId !== selectedProjectId) {
+        return { kind: "project", projectId: selectedProjectId };
+      }
+      return prev;
+    });
+  }, [selectedProjectId]);
+
   const handleSelectProject = useCallback(
     (projectId: string | null) => {
-      setSelectedProjectId(projectId);
-      setScopeKind("project");
-      if (activeView === "dashboard") {
-        setActiveView("list");
+      if (!projectId) {
+        return;
       }
+      setSelectedProjectId(projectId);
+      setScope({ kind: "project", projectId });
     },
-    [activeView]
+    []
   );
+
+  const handleSetProjectId = useCallback((projectId: string | null) => {
+    if (!projectId) {
+      return;
+    }
+    setSelectedProjectId(projectId);
+    setScope((prev) =>
+      prev?.kind === "project" ? { kind: "project", projectId } : prev
+    );
+  }, []);
 
   const handleSelectUser = useCallback((userId: string) => {
     setSelectedUserId(userId);
-    setScopeKind("user");
-    setActiveView("calendar");
+    setScope({ kind: "user", userId });
   }, []);
 
   const handleDeleteProject = useCallback(async () => {
@@ -231,7 +295,7 @@ const App = () => {
   const handleSeededProject = useCallback(
     (projectId: string) => {
       setSelectedProjectId(projectId);
-      setScopeKind("project");
+      setScope({ kind: "project", projectId });
       setActiveView("list");
     },
     []
@@ -247,16 +311,19 @@ const App = () => {
   }, []);
 
   return (
-    <div className="app-root">
-      <div className="layout">
+    <ScopeProvider scope={activeScope} setScope={setScope}>
+      <div className="app-root">
+        <div className="layout">
         <SidebarProjects
+          scope={activeScope}
           selectedProjectId={selectedProjectId}
           onSelect={handleSelectProject}
+          onSetProjectId={handleSetProjectId}
           refreshToken={refreshToken}
           onAddProject={() => openSheet("project")}
           users={users}
           usersError={usersError}
-          selectedUserId={selectedUserId}
+          selectedUserId={selectedUserId ?? currentUser.user_id}
           onSelectUser={handleSelectUser}
         />
         <main className="main">
@@ -281,10 +348,7 @@ const App = () => {
                       ? "top-tab top-tab-active"
                       : "top-tab"
                   }
-                  onClick={() => {
-                    setScopeKind("project");
-                    setActiveView("list");
-                  }}
+                  onClick={() => setActiveView("list")}
                 >
                   List
                 </button>
@@ -325,7 +389,7 @@ const App = () => {
               <div className="top-title">
                 {activeView === "dashboard"
                   ? "Dashboard"
-                  : scopeKind === "user"
+                  : activeScope.kind === "user"
                     ? currentUser.display_name
                     : selectedProject
                       ? selectedProject.title
@@ -359,7 +423,7 @@ const App = () => {
               />
             </div>
           ) : null}
-          {scopeKind === "project" && activeView !== "dashboard" ? (
+          {activeScope.kind === "project" && activeView !== "dashboard" ? (
             <div className="title-actions">
               <button
                 type="button"
@@ -384,32 +448,28 @@ const App = () => {
           {deleteError ? <div className="error">{deleteError}</div> : null}
           {error ? <div className="error">{error}</div> : null}
           {activeView === "dashboard" ? (
-            <DashboardView />
+            <DashboardView
+              scope={activeScope}
+              refreshToken={refreshToken}
+              onOpenItem={openTaskEditor}
+            />
           ) : activeView === "list" ? (
             <ListView
-              selectedProjectId={selectedProjectId}
+              scope={activeScope}
               refreshToken={refreshToken}
               onRefresh={triggerRefresh}
               onOpenItem={openTaskEditor}
             />
           ) : activeView === "kanban" ? (
             <KanbanView
-              scope={
-                scopeKind === "user"
-                  ? { kind: "user", userId: selectedUserId ?? currentUser.user_id }
-                  : { kind: "project", projectId: selectedProjectId }
-              }
+              scope={activeScope}
               refreshToken={refreshToken}
               onRefresh={triggerRefresh}
               onOpenItem={openTaskEditor}
             />
           ) : activeView === "calendar" ? (
             <CalendarView
-              scope={
-                scopeKind === "user"
-                  ? { kind: "user", userId: selectedUserId ?? currentUser.user_id }
-                  : { kind: "project", projectId: selectedProjectId }
-              }
+              scope={activeScope}
               projectItems={projectItems}
               refreshToken={refreshToken}
               onRefresh={triggerRefresh}
@@ -417,11 +477,7 @@ const App = () => {
             />
           ) : (
             <GanttView
-              scope={
-                scopeKind === "user"
-                  ? { kind: "user", userId: selectedUserId ?? currentUser.user_id }
-                  : { kind: "project", projectId: selectedProjectId }
-              }
+              scope={activeScope}
               refreshToken={refreshToken}
               onRefresh={triggerRefresh}
               onOpenItem={openTaskEditor}
@@ -453,8 +509,9 @@ const App = () => {
             onCreated={triggerRefresh}
           />
         </main>
+        </div>
       </div>
-    </div>
+    </ScopeProvider>
   );
 };
 

@@ -19,10 +19,12 @@ export const buildListViewModel = ({
   items,
   selectedProjectId,
   ungroupedProjectId,
+  mode = "project",
 }: {
   items: ListItem[];
   selectedProjectId: string | null;
   ungroupedProjectId: string;
+  mode?: "project" | "user";
 }): ListViewModel => {
   const parentTypeMap = new Map<string, ListItem["type"]>();
   const itemById = new Map<string, ListItem>();
@@ -33,12 +35,15 @@ export const buildListViewModel = ({
   }
 
   const tasks = items.filter((item) => item.type === "task");
-  const milestones = sortByOrder(
-    items.filter(
-      (item) =>
-        item.type === "milestone" && item.parent_id === selectedProjectId
-    )
-  );
+  const milestones =
+    mode === "user"
+      ? []
+      : sortByOrder(
+          items.filter(
+            (item) =>
+              item.type === "milestone" && item.parent_id === selectedProjectId
+          )
+        );
 
   const taskChildren = new Map<string, ListItem[]>();
   for (const task of tasks) {
@@ -54,30 +59,45 @@ export const buildListViewModel = ({
   }
 
   const tasksUnderMilestone = new Map<string, ListItem[]>();
-  for (const task of tasks) {
-    if (!task.parent_id) {
-      continue;
+  if (mode !== "user") {
+    for (const task of tasks) {
+      if (!task.parent_id) {
+        continue;
+      }
+      const parentType = parentTypeMap.get(task.parent_id);
+      if (parentType === "milestone") {
+        const list = tasksUnderMilestone.get(task.parent_id) ?? [];
+        list.push(task);
+        tasksUnderMilestone.set(task.parent_id, list);
+      }
     }
-    const parentType = parentTypeMap.get(task.parent_id);
-    if (parentType === "milestone") {
-      const list = tasksUnderMilestone.get(task.parent_id) ?? [];
-      list.push(task);
-      tasksUnderMilestone.set(task.parent_id, list);
+    for (const [key, list] of tasksUnderMilestone.entries()) {
+      tasksUnderMilestone.set(key, sortByOrder(list));
     }
-  }
-  for (const [key, list] of tasksUnderMilestone.entries()) {
-    tasksUnderMilestone.set(key, sortByOrder(list));
   }
 
   const ungroupedParentId =
-    selectedProjectId === ungroupedProjectId ? null : selectedProjectId;
-  const ungroupedTasks = sortByOrder(
-    tasks.filter((task) =>
-      ungroupedParentId === null
-        ? task.parent_id === null
-        : task.parent_id === ungroupedParentId
-    )
-  );
+    mode === "user"
+      ? null
+      : selectedProjectId === ungroupedProjectId
+        ? null
+        : selectedProjectId;
+  const ungroupedTasks =
+    mode === "user"
+      ? tasks.filter((task) => {
+          if (!task.parent_id) {
+            return true;
+          }
+          const parent = itemById.get(task.parent_id);
+          return !parent || parent.type !== "task";
+        })
+      : sortByOrder(
+          tasks.filter((task) =>
+            ungroupedParentId === null
+              ? task.parent_id === null
+              : task.parent_id === ungroupedParentId
+          )
+        );
 
   const collectTaskDescendants = (taskId: string, acc: ListItem[]) => {
     const children = taskChildren.get(taskId) ?? [];
@@ -87,15 +107,18 @@ export const buildListViewModel = ({
     }
   };
 
-  const getAllTasksUnderMilestone = (milestoneId: string) => {
-    const tasksForMilestone = tasksUnderMilestone.get(milestoneId) ?? [];
-    const all: ListItem[] = [];
-    for (const task of tasksForMilestone) {
-      all.push(task);
-      collectTaskDescendants(task.id, all);
-    }
-    return all;
-  };
+  const getAllTasksUnderMilestone =
+    mode === "user"
+      ? () => []
+      : (milestoneId: string) => {
+          const tasksForMilestone = tasksUnderMilestone.get(milestoneId) ?? [];
+          const all: ListItem[] = [];
+          for (const task of tasksForMilestone) {
+            all.push(task);
+            collectTaskDescendants(task.id, all);
+          }
+          return all;
+        };
 
   return {
     parentTypeMap,

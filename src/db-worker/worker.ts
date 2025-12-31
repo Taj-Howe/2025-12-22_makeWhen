@@ -5014,6 +5014,264 @@ const handleRequest = async (message: RpcRequest): Promise<RpcResponse> => {
           };
           break;
         }
+        case "gantt_range": {
+          const timeMin = ensureTimeMs(args.time_min, "time_min");
+          const timeMax = ensureTimeMs(args.time_max, "time_max");
+          if (timeMax <= timeMin) {
+            throw new Error("time_max must be greater than time_min");
+          }
+          const scopeProjectId =
+            typeof args.scopeProjectId === "string" ? args.scopeProjectId : null;
+          const scopeUserId =
+            typeof args.scopeUserId === "string" ? args.scopeUserId : null;
+          const includeCompleted =
+            typeof args.includeCompleted === "boolean"
+              ? args.includeCompleted
+              : false;
+
+          const statusFilter = includeCompleted
+            ? ""
+            : "AND i.status NOT IN ('done','canceled')";
+
+          let rows: Array<
+            [
+              string,
+              string,
+              string,
+              string | null,
+              string,
+              number | null,
+              string | null,
+              number,
+              number,
+              number
+            ]
+          > = [];
+
+          if (scopeProjectId) {
+            if (scopeUserId) {
+              rows = dbHandle.exec({
+                sql: `WITH RECURSIVE tree AS (
+                  SELECT * FROM items WHERE id = ?
+                  UNION ALL
+                  SELECT i.* FROM items i JOIN tree t ON i.parent_id = t.id
+                )
+                SELECT i.id, i.type, i.title, i.parent_id, i.status, i.due_at,
+                  i.estimate_mode, i.estimate_minutes, i.sort_order, i.updated_at
+                FROM tree i
+                JOIN item_assignees a ON a.item_id = i.id
+                WHERE a.assignee_id = ?
+                  ${statusFilter}
+                ORDER BY i.sort_order ASC,
+                  CASE WHEN i.due_at IS NULL THEN 1 ELSE 0 END,
+                  i.due_at ASC,
+                  i.title ASC;`,
+                rowMode: "array",
+                returnValue: "resultRows",
+                bind: [scopeProjectId, scopeUserId],
+              }) as Array<
+                [
+                  string,
+                  string,
+                  string,
+                  string | null,
+                  string,
+                  number | null,
+                  string | null,
+                  number,
+                  number,
+                  number
+                ]
+              >;
+            } else {
+              rows = dbHandle.exec({
+                sql: `WITH RECURSIVE tree AS (
+                  SELECT * FROM items WHERE id = ?
+                  UNION ALL
+                  SELECT i.* FROM items i JOIN tree t ON i.parent_id = t.id
+                )
+                SELECT id, type, title, parent_id, status, due_at,
+                  estimate_mode, estimate_minutes, sort_order, updated_at
+                FROM tree i
+                WHERE 1=1 ${statusFilter}
+                ORDER BY i.sort_order ASC,
+                  CASE WHEN i.due_at IS NULL THEN 1 ELSE 0 END,
+                  i.due_at ASC,
+                  i.title ASC;`,
+                rowMode: "array",
+                returnValue: "resultRows",
+                bind: [scopeProjectId],
+              }) as Array<
+                [
+                  string,
+                  string,
+                  string,
+                  string | null,
+                  string,
+                  number | null,
+                  string | null,
+                  number,
+                  number,
+                  number
+                ]
+              >;
+            }
+          } else if (scopeUserId) {
+            rows = dbHandle.exec({
+              sql: `SELECT i.id, i.type, i.title, i.parent_id, i.status, i.due_at,
+                  i.estimate_mode, i.estimate_minutes, i.sort_order, i.updated_at
+                FROM items i
+                JOIN item_assignees a ON a.item_id = i.id
+                WHERE a.assignee_id = ?
+                  ${statusFilter}
+                ORDER BY i.sort_order ASC,
+                  CASE WHEN i.due_at IS NULL THEN 1 ELSE 0 END,
+                  i.due_at ASC,
+                  i.title ASC;`,
+              rowMode: "array",
+              returnValue: "resultRows",
+              bind: [scopeUserId],
+            }) as Array<
+              [
+                string,
+                string,
+                string,
+                string | null,
+                string,
+                number | null,
+                string | null,
+                number,
+                number,
+                number
+              ]
+            >;
+          } else {
+            rows = dbHandle.exec({
+              sql: `SELECT id, type, title, parent_id, status, due_at,
+                  estimate_mode, estimate_minutes, sort_order, updated_at
+                FROM items i
+                WHERE 1=1 ${statusFilter}
+                ORDER BY i.sort_order ASC,
+                  CASE WHEN i.due_at IS NULL THEN 1 ELSE 0 END,
+                  i.due_at ASC,
+                  i.title ASC;`,
+              rowMode: "array",
+              returnValue: "resultRows",
+            }) as Array<
+              [
+                string,
+                string,
+                string,
+                string | null,
+                string,
+                number | null,
+                string | null,
+                number,
+                number,
+                number
+              ]
+            >;
+          }
+
+          const ids = rows.map((row) => row[0]);
+          if (ids.length === 0) {
+            result = { ok: true, result: { items: [], blocks: [], edges: [] } };
+            break;
+          }
+
+          const scheduleMap = getScheduleSummaryMap(dbHandle, ids);
+          const blockedRawMap = getBlockedStatusMap(dbHandle, ids);
+          const blockedMap = new Map(
+            Array.from(blockedRawMap.entries()).map(([id, summary]) => [
+              id,
+              { is_blocked: summary.is_blocked },
+            ])
+          );
+          const now = Date.now();
+          const dueMetricsMap = new Map(
+            rows.map((row) => [row[0], computeDueMetrics(row[5], now, row[4])])
+          );
+          const rollupMap = computeRollupTotals(
+            rows.map((row) => ({
+              id: row[0],
+              parent_id: row[3],
+              estimate_mode: row[6],
+              estimate_minutes: row[7],
+            })),
+            scheduleMap,
+            blockedMap,
+            dueMetricsMap,
+            new Map()
+          );
+
+          const placeholders = buildPlaceholders(ids.length);
+          const blockRows = dbHandle.exec({
+            sql: `SELECT block_id, item_id, start_at, duration_minutes
+              FROM scheduled_blocks
+              WHERE start_at < ?
+                AND (start_at + duration_minutes * 60000) > ?
+                AND item_id IN (${placeholders})
+              ORDER BY start_at ASC;`,
+            rowMode: "array",
+            returnValue: "resultRows",
+            bind: [timeMax, timeMin, ...ids],
+          }) as Array<[string, string, number, number]>;
+
+          const edgeRows = dbHandle.exec({
+            sql: `SELECT item_id, depends_on_id, type, lag_minutes
+              FROM dependencies
+              WHERE item_id IN (${placeholders})
+                AND depends_on_id IN (${placeholders});`,
+            rowMode: "array",
+            returnValue: "resultRows",
+            bind: [...ids, ...ids],
+          }) as Array<[string, string, string, number]>;
+
+          const assigneesMap = getAssigneesMap(dbHandle, ids);
+          const userNameMap = getUserMap(dbHandle);
+
+          result = {
+            ok: true,
+            result: {
+              items: rows.map((row) => {
+                const schedule = scheduleMap.get(row[0]) ?? {
+                  start: null,
+                  end: null,
+                };
+                const rollupTotals = rollupMap.get(row[0]);
+                const assigneeId = (assigneesMap.get(row[0]) ?? [])[0] ?? null;
+                return {
+                  id: row[0],
+                  item_type: row[1],
+                  title: row[2],
+                  parent_id: row[3],
+                  status: row[4],
+                  due_at: row[5],
+                  planned_start_at: schedule.start,
+                  planned_end_at: schedule.end,
+                  rollup_start_at: rollupTotals?.rollupStartAt ?? null,
+                  rollup_end_at: rollupTotals?.rollupEndAt ?? null,
+                  assignee_id: assigneeId,
+                  assignee_name: getUserDisplayName(assigneeId ?? "", userNameMap),
+                };
+              }),
+              blocks: blockRows.map((row) => ({
+                block_id: row[0],
+                item_id: row[1],
+                start_at: row[2],
+                duration_minutes: row[3],
+              })),
+              edges: edgeRows.map((row) => ({
+                edge_id: `${row[0]}->${row[1]}`,
+                predecessor_id: row[1],
+                successor_id: row[0],
+                type: row[2] ?? "FS",
+                lag_minutes: row[3] ?? 0,
+              })),
+            },
+          };
+          break;
+        }
         case "calendar_range_user": {
           const userId = ensureString(args.user_id, "user_id");
           const timeMin = ensureTimeMs(args.time_min, "time_min");

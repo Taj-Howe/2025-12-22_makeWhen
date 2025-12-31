@@ -5,10 +5,12 @@ import { UNGROUPED_PROJECT_ID, UNGROUPED_PROJECT_LABEL } from "./constants";
 import ListView from "./ListView";
 import CalendarView from "./CalendarView";
 import DashboardView from "./DashboardView";
+import GanttView from "./GanttView";
 import AddItemForm from "./AddItemForm";
 import RightSheet from "./RightSheet";
 import CommandPalette from "./CommandPalette";
 import ThemeSettings from "./ThemeSettings";
+import SampleDataPanel from "./SampleDataPanel";
 import { mutate, query } from "../rpc/clientSingleton";
 import type { ListItem } from "../domain/listTypes";
 
@@ -44,7 +46,7 @@ const App = () => {
   const [sheetFocusTitle, setSheetFocusTitle] = useState(false);
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [activeView, setActiveView] = useState<
-    "list" | "calendar" | "dashboard"
+    "list" | "calendar" | "gantt" | "dashboard"
   >("list");
   const [settingsOpen, setSettingsOpen] = useState(false);
 
@@ -225,6 +227,15 @@ const App = () => {
     setSheetOpen(true);
   }, []);
 
+  const handleSeededProject = useCallback(
+    (projectId: string) => {
+      setSelectedProjectId(projectId);
+      setScopeKind("project");
+      setActiveView("list");
+    },
+    []
+  );
+
   const handleSheetOpenChange = useCallback((open: boolean) => {
     setSheetOpen(open);
     if (!open) {
@@ -287,6 +298,17 @@ const App = () => {
                 >
                   Calendar
                 </button>
+                <button
+                  type="button"
+                  className={
+                    activeView === "gantt"
+                      ? "top-tab top-tab-active"
+                      : "top-tab"
+                  }
+                  onClick={() => setActiveView("gantt")}
+                >
+                  Gantt
+                </button>
               </div>
               <div className="top-title">
                 {activeView === "dashboard"
@@ -319,6 +341,10 @@ const App = () => {
           {settingsOpen ? (
             <div className="settings-panel">
               <ThemeSettings />
+              <SampleDataPanel
+                onSeeded={handleSeededProject}
+                onRefresh={triggerRefresh}
+              />
             </div>
           ) : null}
           {scopeKind === "project" && activeView !== "dashboard" ? (
@@ -354,7 +380,7 @@ const App = () => {
               onRefresh={triggerRefresh}
               onOpenItem={openTaskEditor}
             />
-          ) : (
+          ) : activeView === "calendar" ? (
             <CalendarView
               scope={
                 scopeKind === "user"
@@ -362,6 +388,17 @@ const App = () => {
                   : { kind: "project", projectId: selectedProjectId }
               }
               projectItems={projectItems}
+              refreshToken={refreshToken}
+              onRefresh={triggerRefresh}
+              onOpenItem={openTaskEditor}
+            />
+          ) : (
+            <GanttView
+              scope={
+                scopeKind === "user"
+                  ? { kind: "user", userId: selectedUserId ?? currentUser.user_id }
+                  : { kind: "project", projectId: selectedProjectId }
+              }
               refreshToken={refreshToken}
               onRefresh={triggerRefresh}
               onOpenItem={openTaskEditor}

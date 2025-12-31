@@ -449,6 +449,133 @@ body {
   background: var(--color-warning);
 }
 
+.kanban-root {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  color: var(--color-text);
+}
+
+.kanban-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.kanban-toolbar-left {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+}
+
+.kanban-toolbar label {
+  font-size: 12px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.kanban-toolbar select {
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius);
+  padding: 4px 6px;
+  background: var(--color-panel-2);
+  color: var(--color-text);
+}
+
+.kanban-toggle input {
+  margin-right: 4px;
+}
+
+.kanban-board {
+  display: grid;
+  gap: 16px;
+}
+
+.kanban-lane {
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius);
+  padding: 12px;
+  background: var(--color-panel);
+}
+
+.kanban-lane-title {
+  font-weight: 600;
+  margin-bottom: 8px;
+}
+
+.kanban-columns {
+  display: grid;
+  grid-auto-flow: column;
+  grid-auto-columns: minmax(220px, 1fr);
+  gap: 12px;
+  overflow-x: auto;
+  padding-bottom: 6px;
+}
+
+.kanban-column {
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius);
+  background: var(--color-panel-2);
+  display: flex;
+  flex-direction: column;
+  min-height: 220px;
+}
+
+.kanban-column-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 10px;
+  font-size: 12px;
+  border-bottom: 1px solid var(--color-border);
+  text-transform: capitalize;
+}
+
+.kanban-add {
+  border: none;
+  background: transparent;
+  color: var(--color-accent-text);
+  cursor: pointer;
+  font-size: 12px;
+}
+
+.kanban-column-body {
+  padding: 8px;
+  display: grid;
+  gap: 8px;
+}
+
+.kanban-card {
+  border: 1px solid var(--color-border);
+  border-radius: 12px;
+  padding: 8px;
+  background: var(--color-panel);
+  cursor: pointer;
+  display: grid;
+  gap: 6px;
+}
+
+.kanban-card-title {
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.kanban-card-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.kanban-chip {
+  font-size: 11px;
+  padding: 2px 6px;
+  border-radius: 999px;
+  border: 1px solid var(--color-border);
+  background: var(--color-panel-2);
+}
+
 .user-select {
   position: relative;
   display: inline-flex;

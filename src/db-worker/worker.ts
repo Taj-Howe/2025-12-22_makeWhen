@@ -3888,6 +3888,363 @@ const handleRequest = async (message: RpcRequest): Promise<RpcResponse> => {
           result = { ok: true, result: items };
           break;
         }
+        case "kanban_view": {
+          const scopeProjectId =
+            typeof args.scopeProjectId === "string" ? args.scopeProjectId : null;
+          const scopeUserId =
+            typeof args.scopeUserId === "string" ? args.scopeUserId : null;
+          const includeCompleted =
+            typeof args.includeCompleted === "boolean"
+              ? args.includeCompleted
+              : false;
+          const showCanceled =
+            typeof args.showCanceled === "boolean" ? args.showCanceled : false;
+          const swimlaneMode =
+            typeof args.swimlaneMode === "string" ? args.swimlaneMode : "none";
+
+          let hierarchyRows: Array<[string, string, string | null, string]> = [];
+          let taskRows: Array<
+            [
+              string,
+              string,
+              string,
+              string | null,
+              string,
+              number,
+              number | null,
+              string,
+              number
+            ]
+          > = [];
+
+          if (scopeProjectId) {
+            hierarchyRows = dbHandle.exec({
+              sql: `WITH RECURSIVE tree AS (
+                SELECT id, type, title, parent_id FROM items WHERE id = ?
+                UNION ALL
+                SELECT i.id, i.type, i.title, i.parent_id
+                FROM items i JOIN tree t ON i.parent_id = t.id
+              )
+              SELECT id, type, parent_id, title FROM tree;`,
+              rowMode: "array",
+              returnValue: "resultRows",
+              bind: [scopeProjectId],
+            }) as Array<[string, string, string | null, string]>;
+
+            if (scopeUserId) {
+              taskRows = dbHandle.exec({
+                sql: `WITH RECURSIVE tree AS (
+                  SELECT * FROM items WHERE id = ?
+                  UNION ALL
+                  SELECT i.* FROM items i JOIN tree t ON i.parent_id = t.id
+                )
+                SELECT i.id, i.type, i.title, i.parent_id, i.status, i.priority,
+                  i.due_at, i.health, i.updated_at
+                FROM tree i
+                JOIN item_assignees a ON a.item_id = i.id
+                WHERE i.type = 'task' AND a.assignee_id = ?
+                ORDER BY i.updated_at DESC;`,
+                rowMode: "array",
+                returnValue: "resultRows",
+                bind: [scopeProjectId, scopeUserId],
+              }) as Array<
+                [
+                  string,
+                  string,
+                  string,
+                  string | null,
+                  string,
+                  number,
+                  number | null,
+                  string,
+                  number
+                ]
+              >;
+            } else {
+              taskRows = dbHandle.exec({
+                sql: `WITH RECURSIVE tree AS (
+                  SELECT * FROM items WHERE id = ?
+                  UNION ALL
+                  SELECT i.* FROM items i JOIN tree t ON i.parent_id = t.id
+                )
+                SELECT id, type, title, parent_id, status, priority,
+                  due_at, health, updated_at
+                FROM tree
+                WHERE type = 'task'
+                ORDER BY updated_at DESC;`,
+                rowMode: "array",
+                returnValue: "resultRows",
+                bind: [scopeProjectId],
+              }) as Array<
+                [
+                  string,
+                  string,
+                  string,
+                  string | null,
+                  string,
+                  number,
+                  number | null,
+                  string,
+                  number
+                ]
+              >;
+            }
+          } else {
+            hierarchyRows = dbHandle.exec({
+              sql: "SELECT id, type, parent_id, title FROM items;",
+              rowMode: "array",
+              returnValue: "resultRows",
+            }) as Array<[string, string, string | null, string]>;
+
+            if (scopeUserId) {
+              taskRows = dbHandle.exec({
+                sql: `SELECT i.id, i.type, i.title, i.parent_id, i.status,
+                  i.priority, i.due_at, i.health, i.updated_at
+                FROM items i
+                JOIN item_assignees a ON a.item_id = i.id
+                WHERE i.type = 'task' AND a.assignee_id = ?
+                ORDER BY i.updated_at DESC;`,
+                rowMode: "array",
+                returnValue: "resultRows",
+                bind: [scopeUserId],
+              }) as Array<
+                [
+                  string,
+                  string,
+                  string,
+                  string | null,
+                  string,
+                  number,
+                  number | null,
+                  string,
+                  number
+                ]
+              >;
+            } else {
+              taskRows = dbHandle.exec({
+                sql: `SELECT id, type, title, parent_id, status,
+                  priority, due_at, health, updated_at
+                FROM items
+                WHERE type = 'task'
+                ORDER BY updated_at DESC;`,
+                rowMode: "array",
+                returnValue: "resultRows",
+              }) as Array<
+                [
+                  string,
+                  string,
+                  string,
+                  string | null,
+                  string,
+                  number,
+                  number | null,
+                  string,
+                  number
+                ]
+              >;
+            }
+          }
+
+          const hierarchyMapRows = hierarchyRows.map((row) => [
+            row[0],
+            row[1],
+            row[2],
+          ]) as Array<[string, string, string | null]>;
+          const { projectMap } = buildHierarchyMaps(
+            hierarchyMapRows,
+            scopeProjectId
+          );
+          const projectTitleMap = new Map<string, string>();
+          for (const row of hierarchyRows) {
+            if (row[1] === "project") {
+              projectTitleMap.set(row[0], row[3]);
+            }
+          }
+
+          const filteredTasks = taskRows.filter((row) => {
+            const status = row[4] || "backlog";
+            if (!includeCompleted && status === "done") {
+              return false;
+            }
+            if (!showCanceled && status === "canceled") {
+              return false;
+            }
+            return true;
+          });
+          const taskIds = filteredTasks.map((row) => row[0]);
+          const scheduleMap = getScheduleSummaryMap(dbHandle, taskIds);
+          const assigneesMap = getAssigneesMap(dbHandle, taskIds);
+          const userNameMap = getUserMap(dbHandle);
+
+          type CardItem = {
+            id: string;
+            title: string;
+            status: string;
+            priority: number;
+            due_at: number | null;
+            planned_start_at: number | null;
+            planned_end_at: number | null;
+            assignee_id: string | null;
+            assignee_name: string | null;
+            project_id: string | null;
+            project_title: string | null;
+            parent_id: string | null;
+            health: string;
+          };
+
+          const cards = filteredTasks.map((row) => {
+            const status = row[4] || "backlog";
+            const schedule = scheduleMap.get(row[0]) ?? {
+              start: null,
+              end: null,
+            };
+            const assigneeId = (assigneesMap.get(row[0]) ?? [])[0] ?? null;
+            const projectId = projectMap.get(row[0]) ?? null;
+            return {
+              id: row[0],
+              title: row[2],
+              status,
+              priority: Number(row[5]) || 0,
+              due_at: row[6],
+              planned_start_at: schedule.start,
+              planned_end_at: schedule.end,
+              assignee_id: assigneeId,
+              assignee_name: assigneeId
+                ? getUserDisplayName(assigneeId, userNameMap)
+                : null,
+              project_id: projectId,
+              project_title: projectId
+                ? projectTitleMap.get(projectId) ?? "Project"
+                : null,
+              parent_id: row[3],
+              health: row[7] ?? "unknown",
+            } as CardItem;
+          });
+
+          const statuses = [
+            "backlog",
+            "ready",
+            "in_progress",
+            "blocked",
+            "review",
+            "done",
+          ];
+          if (showCanceled) {
+            statuses.push("canceled");
+          }
+
+          const createLane = (laneId: string, laneTitle: string) => {
+            const columns: Record<string, CardItem[]> = {};
+            for (const status of statuses) {
+              columns[status] = [];
+            }
+            return {
+              lane_id: laneId,
+              lane_title: laneTitle,
+              columns,
+            };
+          };
+
+          const lanesMap = new Map<string, ReturnType<typeof createLane>>();
+          const laneOrder: string[] = [];
+
+          const getLaneKey = (card: CardItem) => {
+            if (swimlaneMode === "assignee") {
+              return card.assignee_id ?? "unassigned";
+            }
+            if (swimlaneMode === "project") {
+              return card.project_id ?? "no_project";
+            }
+            if (swimlaneMode === "health") {
+              return card.health ?? "unknown";
+            }
+            return "all";
+          };
+
+          const getLaneTitle = (card: CardItem, laneKey: string) => {
+            if (swimlaneMode === "assignee") {
+              if (laneKey === "unassigned") {
+                return "Unassigned";
+              }
+              return card.assignee_name ?? laneKey;
+            }
+            if (swimlaneMode === "project") {
+              return card.project_title ?? "No project";
+            }
+            if (swimlaneMode === "health") {
+              return laneKey
+                .split("_")
+                .map((part) => part[0]?.toUpperCase() + part.slice(1))
+                .join(" ");
+            }
+            return "All";
+          };
+
+          for (const card of cards) {
+            const laneKey = getLaneKey(card);
+            if (!lanesMap.has(laneKey)) {
+              const laneTitle = getLaneTitle(card, laneKey);
+              lanesMap.set(laneKey, createLane(laneKey, laneTitle));
+              laneOrder.push(laneKey);
+            }
+            const lane = lanesMap.get(laneKey)!;
+            const column = lane.columns[card.status] ?? lane.columns.backlog;
+            column.push(card);
+          }
+
+          const sortColumn = (list: CardItem[]) =>
+            list.sort((a, b) => {
+              if (a.priority !== b.priority) {
+                return b.priority - a.priority;
+              }
+              const aDue = a.due_at ?? Number.MAX_SAFE_INTEGER;
+              const bDue = b.due_at ?? Number.MAX_SAFE_INTEGER;
+              if (aDue !== bDue) {
+                return aDue - bDue;
+              }
+              const aPlan = a.planned_start_at ?? Number.MAX_SAFE_INTEGER;
+              const bPlan = b.planned_start_at ?? Number.MAX_SAFE_INTEGER;
+              if (aPlan !== bPlan) {
+                return aPlan - bPlan;
+              }
+              return a.title.localeCompare(b.title);
+            });
+
+          for (const lane of lanesMap.values()) {
+            for (const status of statuses) {
+              sortColumn(lane.columns[status]);
+            }
+          }
+
+          let lanes = laneOrder.map((id) => lanesMap.get(id)!);
+          if (swimlaneMode === "assignee") {
+            const unassigned = lanes.find((lane) => lane.lane_id === "unassigned");
+            const rest = lanes
+              .filter((lane) => lane.lane_id !== "unassigned")
+              .sort((a, b) => a.lane_title.localeCompare(b.lane_title));
+            lanes = unassigned ? [unassigned, ...rest] : rest;
+          } else if (swimlaneMode === "project") {
+            lanes = lanes.sort((a, b) => a.lane_title.localeCompare(b.lane_title));
+          } else if (swimlaneMode === "health") {
+            const order = ["behind", "at_risk", "on_track", "ahead", "unknown"];
+            lanes = lanes.sort(
+              (a, b) =>
+                order.indexOf(a.lane_id) - order.indexOf(b.lane_id)
+            );
+          }
+
+          if (lanes.length === 0) {
+            lanes = [createLane("all", "All")];
+          }
+
+          result = {
+            ok: true,
+            result: {
+              lanes,
+            },
+          };
+          break;
+        }
         case "searchItems": {
           const rawQuery = typeof args.q === "string" ? args.q : "";
           const normalized = rawQuery.trim().toLowerCase();

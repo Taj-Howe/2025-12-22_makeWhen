@@ -6,6 +6,7 @@ import ListView from "./ListView";
 import CalendarView from "./CalendarView";
 import DashboardView from "./DashboardView";
 import GanttView from "./GanttView";
+import KanbanView from "./KanbanView";
 import AddItemForm from "./AddItemForm";
 import RightSheet from "./RightSheet";
 import CommandPalette from "./CommandPalette";
@@ -46,7 +47,7 @@ const App = () => {
   const [sheetFocusTitle, setSheetFocusTitle] = useState(false);
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [activeView, setActiveView] = useState<
-    "list" | "calendar" | "gantt" | "dashboard"
+    "list" | "calendar" | "gantt" | "kanban" | "dashboard"
   >("list");
   const [settingsOpen, setSettingsOpen] = useState(false);
 
@@ -301,6 +302,17 @@ const App = () => {
                 <button
                   type="button"
                   className={
+                    activeView === "kanban"
+                      ? "top-tab top-tab-active"
+                      : "top-tab"
+                  }
+                  onClick={() => setActiveView("kanban")}
+                >
+                  Kanban
+                </button>
+                <button
+                  type="button"
+                  className={
                     activeView === "gantt"
                       ? "top-tab top-tab-active"
                       : "top-tab"
@@ -376,6 +388,17 @@ const App = () => {
           ) : activeView === "list" ? (
             <ListView
               selectedProjectId={selectedProjectId}
+              refreshToken={refreshToken}
+              onRefresh={triggerRefresh}
+              onOpenItem={openTaskEditor}
+            />
+          ) : activeView === "kanban" ? (
+            <KanbanView
+              scope={
+                scopeKind === "user"
+                  ? { kind: "user", userId: selectedUserId ?? currentUser.user_id }
+                  : { kind: "project", projectId: selectedProjectId }
+              }
               refreshToken={refreshToken}
               onRefresh={triggerRefresh}
               onOpenItem={openTaskEditor}

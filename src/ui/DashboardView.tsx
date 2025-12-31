@@ -3,6 +3,8 @@ import type { Scope } from "../domain/scope";
 import { query } from "../rpc/clientSingleton";
 import { formatDate } from "../domain/formatters";
 import { getTodayRange, getWeekRange } from "./dateWindow";
+import ContributionsHeatmap from "./ContributionsHeatmap";
+import { setStatus } from "./itemActions";
 
 type DashboardViewProps = {
   scope: Scope;
@@ -70,6 +72,7 @@ type BlockedViewResult = {
     item_id: string;
     title: string;
     blocked_reason: string;
+    status: string;
     due_at?: number | null;
     planned_start_at?: number | null;
     planned_end_at?: number | null;
@@ -81,6 +84,7 @@ type BlockedViewResult = {
     item_id: string;
     title: string;
     blocker_count: number;
+    status: string;
     due_at?: number | null;
     planned_start_at?: number | null;
     planned_end_at?: number | null;
@@ -91,6 +95,7 @@ type BlockedViewResult = {
   scheduled_but_blocked: Array<{
     item_id: string;
     title: string;
+    status: string;
     block_id?: string | null;
     start_at?: number | null;
     duration_minutes?: number | null;
@@ -104,6 +109,7 @@ type DueOverdueResult = {
   due_soon: Array<{
     item_id: string;
     title: string;
+    status: string;
     due_at: number;
     days_until_due: number;
     planned_end_at?: number | null;
@@ -114,6 +120,7 @@ type DueOverdueResult = {
   overdue: Array<{
     item_id: string;
     title: string;
+    status: string;
     due_at: number;
     days_overdue: number;
     planned_end_at?: number | null;
@@ -199,12 +206,27 @@ const DashboardView: FC<DashboardViewProps> = ({
     }
   }, [scope, windowRange]);
 
+  const handleToggleDone = useCallback(
+    async (itemId: string, checked: boolean) => {
+      setError(null);
+      try {
+        await setStatus(itemId, checked ? "done" : "ready");
+        await loadWidgets();
+      } catch (err) {
+        const message = err instanceof Error ? err.message : "Unknown error";
+        setError(message);
+      }
+    },
+    [loadWidgets]
+  );
+
   useEffect(() => {
     void loadWidgets();
   }, [loadWidgets, refreshToken]);
 
   return (
     <div className="dashboard-view">
+      <ContributionsHeatmap scope={scope} refreshToken={refreshToken} />
       <div className="dashboard-toolbar">
         <div className="dashboard-title">Dashboard</div>
         <div className="dashboard-toggle">
@@ -245,8 +267,22 @@ const DashboardView: FC<DashboardViewProps> = ({
                     onSelectItem(block.item_id, block.project_id ?? null)
                   }
                 >
-                  <span className="dashboard-time">
-                    {TIME_LABEL.format(new Date(block.start_at))}
+                  <span className="dashboard-leading">
+                    <input
+                      type="checkbox"
+                      className="task-checkbox task-checkbox--compact"
+                      checked={block.status === "done"}
+                      onChange={(event) =>
+                        void handleToggleDone(
+                          block.item_id,
+                          event.target.checked
+                        )
+                      }
+                      onClick={(event) => event.stopPropagation()}
+                    />
+                    <span className="dashboard-time">
+                      {TIME_LABEL.format(new Date(block.start_at))}
+                    </span>
                   </span>
                   <span className="dashboard-title-text">{block.title}</span>
                   <span className="dashboard-meta">
@@ -276,6 +312,20 @@ const DashboardView: FC<DashboardViewProps> = ({
                     onSelectItem(item.item_id, item.project_id ?? null)
                   }
                 >
+                  <span className="dashboard-leading">
+                    <input
+                      type="checkbox"
+                      className="task-checkbox task-checkbox--compact"
+                      checked={item.status === "done"}
+                      onChange={(event) =>
+                        void handleToggleDone(
+                          item.item_id,
+                          event.target.checked
+                        )
+                      }
+                      onClick={(event) => event.stopPropagation()}
+                    />
+                  </span>
                   <span className="dashboard-title-text">{item.title}</span>
                   <span className="dashboard-meta">
                     {item.project_title ?? "—"}
@@ -307,6 +357,20 @@ const DashboardView: FC<DashboardViewProps> = ({
                     onSelectItem(item.item_id, item.project_id ?? null)
                   }
                 >
+                  <span className="dashboard-leading">
+                    <input
+                      type="checkbox"
+                      className="task-checkbox task-checkbox--compact"
+                      checked={item.status === "done"}
+                      onChange={(event) =>
+                        void handleToggleDone(
+                          item.item_id,
+                          event.target.checked
+                        )
+                      }
+                      onClick={(event) => event.stopPropagation()}
+                    />
+                  </span>
                   <span className="dashboard-title-text">{item.title}</span>
                   <span className="dashboard-meta">
                     {item.project_title ?? "—"}
@@ -340,6 +404,20 @@ const DashboardView: FC<DashboardViewProps> = ({
                   className="dashboard-row"
                   onClick={() => onSelectItem(item.item_id, null)}
                 >
+                  <span className="dashboard-leading">
+                    <input
+                      type="checkbox"
+                      className="task-checkbox task-checkbox--compact"
+                      checked={item.status === "done"}
+                      onChange={(event) =>
+                        void handleToggleDone(
+                          item.item_id,
+                          event.target.checked
+                        )
+                      }
+                      onClick={(event) => event.stopPropagation()}
+                    />
+                  </span>
                   <span className="dashboard-title-text">{item.title}</span>
                   <span className="dashboard-meta">
                     {item.project_title ?? "—"}
@@ -360,6 +438,20 @@ const DashboardView: FC<DashboardViewProps> = ({
                   className="dashboard-row"
                   onClick={() => onSelectItem(item.item_id, null)}
                 >
+                  <span className="dashboard-leading">
+                    <input
+                      type="checkbox"
+                      className="task-checkbox task-checkbox--compact"
+                      checked={item.status === "done"}
+                      onChange={(event) =>
+                        void handleToggleDone(
+                          item.item_id,
+                          event.target.checked
+                        )
+                      }
+                      onClick={(event) => event.stopPropagation()}
+                    />
+                  </span>
                   <span className="dashboard-title-text">{item.title}</span>
                   <span className="dashboard-meta">
                     {item.blocker_count} blocker
@@ -383,6 +475,20 @@ const DashboardView: FC<DashboardViewProps> = ({
                   className="dashboard-row dashboard-row-warning"
                   onClick={() => onSelectItem(item.item_id, null)}
                 >
+                  <span className="dashboard-leading">
+                    <input
+                      type="checkbox"
+                      className="task-checkbox task-checkbox--compact"
+                      checked={item.status === "done"}
+                      onChange={(event) =>
+                        void handleToggleDone(
+                          item.item_id,
+                          event.target.checked
+                        )
+                      }
+                      onClick={(event) => event.stopPropagation()}
+                    />
+                  </span>
                   <span className="dashboard-title-text">{item.title}</span>
                   <span className="dashboard-meta">
                     {item.project_title ?? "—"}
@@ -407,6 +513,20 @@ const DashboardView: FC<DashboardViewProps> = ({
                   className="dashboard-row"
                   onClick={() => onSelectItem(item.item_id, null)}
                 >
+                  <span className="dashboard-leading">
+                    <input
+                      type="checkbox"
+                      className="task-checkbox task-checkbox--compact"
+                      checked={item.status === "done"}
+                      onChange={(event) =>
+                        void handleToggleDone(
+                          item.item_id,
+                          event.target.checked
+                        )
+                      }
+                      onClick={(event) => event.stopPropagation()}
+                    />
+                  </span>
                   <span className="dashboard-title-text">{item.title}</span>
                   <span className="dashboard-meta">
                     {formatDays(item.days_until_due)}
@@ -430,6 +550,20 @@ const DashboardView: FC<DashboardViewProps> = ({
                   className="dashboard-row dashboard-row-warning"
                   onClick={() => onSelectItem(item.item_id, null)}
                 >
+                  <span className="dashboard-leading">
+                    <input
+                      type="checkbox"
+                      className="task-checkbox task-checkbox--compact"
+                      checked={item.status === "done"}
+                      onChange={(event) =>
+                        void handleToggleDone(
+                          item.item_id,
+                          event.target.checked
+                        )
+                      }
+                      onClick={(event) => event.stopPropagation()}
+                    />
+                  </span>
                   <span className="dashboard-title-text">{item.title}</span>
                   <span className="dashboard-meta">
                     {formatDays(item.days_overdue)}

@@ -7,6 +7,7 @@ import sortOrderSql from "./migrations/0004_sort_order.sql?raw";
 import dueNullableSql from "./migrations/0005_due_at_nullable.sql?raw";
 import titleSearchSql from "./migrations/0006_title_search.sql?raw";
 import dependenciesTypeLagSql from "./migrations/0007_dependencies_type_lag.sql?raw";
+import completedAtSql from "./migrations/0008_completed_at.sql?raw";
 import {
   computeSlackMinutes,
   deriveEndAtFromDuration,
@@ -104,6 +105,10 @@ const migrations = [
     version: 7,
     sql: dependenciesTypeLagSql,
   },
+  {
+    version: 8,
+    sql: completedAtSql,
+  },
 ];
 
 const ensureString = (value: unknown, name: string) => {
@@ -194,6 +199,45 @@ const ensureTimeMs = (value: unknown, name: string) => {
     return parsed;
   }
   return ensureNumber(value, name);
+};
+
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+const parseLocalDayStart = (value: unknown, name: string) => {
+  if (typeof value !== "string") {
+    throw new Error(`${name} must be a YYYY-MM-DD string`);
+  }
+  const parts = value.split("-");
+  if (parts.length !== 3) {
+    throw new Error(`${name} must be a YYYY-MM-DD string`);
+  }
+  const year = Number(parts[0]);
+  const month = Number(parts[1]);
+  const day = Number(parts[2]);
+  if (
+    !Number.isInteger(year) ||
+    !Number.isInteger(month) ||
+    !Number.isInteger(day)
+  ) {
+    throw new Error(`${name} must be a valid date`);
+  }
+  const date = new Date(year, month - 1, day);
+  if (
+    date.getFullYear() !== year ||
+    date.getMonth() !== month - 1 ||
+    date.getDate() !== day
+  ) {
+    throw new Error(`${name} must be a valid date`);
+  }
+  date.setHours(0, 0, 0, 0);
+  return date.getTime();
+};
+
+const formatLocalDay = (value: Date) => {
+  const year = value.getFullYear();
+  const month = String(value.getMonth() + 1).padStart(2, "0");
+  const day = String(value.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
 };
 
 const ensurePositiveInteger = (value: unknown, name: string) => {
@@ -1116,6 +1160,7 @@ const handleMutate = (envelope: MutateEnvelope): MutateResult => {
               : "rollup";
           const status =
             typeof args.status === "string" ? args.status : "backlog";
+          const completedAt = status === "done" ? now : null;
           const priority =
             typeof args.priority === "number" ? args.priority : 0;
           const health =
@@ -1125,7 +1170,7 @@ const handleMutate = (envelope: MutateEnvelope): MutateResult => {
           const notes = typeof args.notes === "string" ? args.notes : null;
 
           dbHandle.exec(
-            "INSERT INTO items (id, type, title, parent_id, status, priority, due_at, estimate_mode, estimate_minutes, health, health_mode, notes, created_at, updated_at, sort_order) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);",
+            "INSERT INTO items (id, type, title, parent_id, status, priority, due_at, estimate_mode, estimate_minutes, health, health_mode, notes, created_at, updated_at, sort_order, completed_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);",
             {
               bind: [
                 id,
@@ -1143,6 +1188,7 @@ const handleMutate = (envelope: MutateEnvelope): MutateResult => {
                 now,
                 now,
                 sortOrder,
+                completedAt,
               ],
             }
           );
@@ -1250,10 +1296,22 @@ const handleMutate = (envelope: MutateEnvelope): MutateResult => {
               break;
             }
           }
+          const now = Date.now();
+          let completedAt: number | null = null;
+          if (status === "done") {
+            const completedRows = dbHandle.exec({
+              sql: "SELECT completed_at FROM items WHERE id = ?;",
+              rowMode: "array",
+              returnValue: "resultRows",
+              bind: [id],
+            }) as Array<[number | null]>;
+            const existing = completedRows[0]?.[0] ?? null;
+            completedAt = existing ?? now;
+          }
           dbHandle.exec(
-            "UPDATE items SET status = ?, updated_at = ? WHERE id = ?;",
+            "UPDATE items SET status = ?, updated_at = ?, completed_at = ? WHERE id = ?;",
             {
-              bind: [status, Date.now(), id],
+              bind: [status, now, completedAt, id],
             }
           );
           result = {
@@ -3276,7 +3334,7 @@ const handleRequest = async (message: RpcRequest): Promise<RpcResponse> => {
           >;
           const ids = rows.map((row) => row[0]);
           const rowMap = new Map(
-            rows.map((row) => [row[0], { updated_at: row[12], sort_order: row[13] }])
+            rows.map((row) => [row[0], { updated_at: row[11], sort_order: row[12] }])
           );
           const scheduleMap = getScheduleSummaryMap(dbHandle, ids);
           const blockedMap = getBlockedStatusMap(dbHandle, ids);
@@ -3531,7 +3589,7 @@ const handleRequest = async (message: RpcRequest): Promise<RpcResponse> => {
                 SELECT i.* FROM items i JOIN tree t ON i.parent_id = t.id
               )
               SELECT id, type, title, parent_id, status, priority, due_at,
-                estimate_mode, estimate_minutes, notes, created_at, updated_at, sort_order
+                estimate_mode, estimate_minutes, notes, created_at, updated_at, sort_order, completed_at
               FROM tree
               ORDER BY sort_order ASC,
                 CASE WHEN due_at IS NULL THEN 1 ELSE 0 END,
@@ -3554,7 +3612,8 @@ const handleRequest = async (message: RpcRequest): Promise<RpcResponse> => {
                 string | null,
                 number,
                 number,
-                number
+                number,
+                number | null
               ]
             >;
 
@@ -3566,7 +3625,7 @@ const handleRequest = async (message: RpcRequest): Promise<RpcResponse> => {
                 SELECT i.* FROM items i JOIN tree t ON i.parent_id = t.id
               )
               SELECT id, type, title, parent_id, status, priority, due_at,
-                estimate_mode, estimate_minutes, notes, created_at, updated_at, sort_order
+                estimate_mode, estimate_minutes, notes, created_at, updated_at, sort_order, completed_at
               FROM tree
               ORDER BY sort_order ASC,
                 CASE WHEN due_at IS NULL THEN 1 ELSE 0 END,
@@ -3588,14 +3647,15 @@ const handleRequest = async (message: RpcRequest): Promise<RpcResponse> => {
                 string | null,
                 number,
                 number,
-                number
+                number,
+                number | null
               ]
             >;
 
           const fetchAll = () =>
             dbHandle.exec({
               sql: `SELECT id, type, title, parent_id, status, priority, due_at,
-                estimate_mode, estimate_minutes, notes, created_at, updated_at, sort_order
+                estimate_mode, estimate_minutes, notes, created_at, updated_at, sort_order, completed_at
               FROM items
               ORDER BY sort_order ASC,
                 CASE WHEN due_at IS NULL THEN 1 ELSE 0 END,
@@ -3617,7 +3677,8 @@ const handleRequest = async (message: RpcRequest): Promise<RpcResponse> => {
                 string | null,
                 number,
                 number,
-                number
+                number,
+                number | null
               ]
             >;
 
@@ -3629,7 +3690,7 @@ const handleRequest = async (message: RpcRequest): Promise<RpcResponse> => {
                 SELECT i.* FROM items i JOIN tree t ON i.parent_id = t.id
               )
               SELECT i.id, i.type, i.title, i.parent_id, i.status, i.priority, i.due_at,
-                i.estimate_mode, i.estimate_minutes, i.notes, i.created_at, i.updated_at, i.sort_order
+                i.estimate_mode, i.estimate_minutes, i.notes, i.created_at, i.updated_at, i.sort_order, i.completed_at
               FROM tree i
               JOIN item_assignees a ON a.item_id = i.id
               WHERE a.assignee_id = ?
@@ -3654,7 +3715,8 @@ const handleRequest = async (message: RpcRequest): Promise<RpcResponse> => {
                 string | null,
                 number,
                 number,
-                number
+                number,
+                number | null
               ]
             >;
 
@@ -3666,7 +3728,7 @@ const handleRequest = async (message: RpcRequest): Promise<RpcResponse> => {
                 SELECT i.* FROM items i JOIN tree t ON i.parent_id = t.id
               )
               SELECT i.id, i.type, i.title, i.parent_id, i.status, i.priority, i.due_at,
-                i.estimate_mode, i.estimate_minutes, i.notes, i.created_at, i.updated_at, i.sort_order
+                i.estimate_mode, i.estimate_minutes, i.notes, i.created_at, i.updated_at, i.sort_order, i.completed_at
               FROM tree i
               JOIN item_assignees a ON a.item_id = i.id
               WHERE a.assignee_id = ?
@@ -3691,14 +3753,15 @@ const handleRequest = async (message: RpcRequest): Promise<RpcResponse> => {
                 string | null,
                 number,
                 number,
-                number
+                number,
+                number | null
               ]
             >;
 
           const fetchAllForUser = (userId: string) =>
             dbHandle.exec({
               sql: `SELECT i.id, i.type, i.title, i.parent_id, i.status, i.priority, i.due_at,
-                i.estimate_mode, i.estimate_minutes, i.notes, i.created_at, i.updated_at, i.sort_order
+                i.estimate_mode, i.estimate_minutes, i.notes, i.created_at, i.updated_at, i.sort_order, i.completed_at
               FROM items i
               JOIN item_assignees a ON a.item_id = i.id
               WHERE a.assignee_id = ?
@@ -3723,7 +3786,8 @@ const handleRequest = async (message: RpcRequest): Promise<RpcResponse> => {
                 string | null,
                 number,
                 number,
-                number
+                number,
+                number | null
               ]
             >;
 
@@ -3741,7 +3805,8 @@ const handleRequest = async (message: RpcRequest): Promise<RpcResponse> => {
               string | null,
               number,
               number,
-              number
+              number,
+              number | null
             ]
           > = [];
 
@@ -4083,7 +4148,7 @@ const handleRequest = async (message: RpcRequest): Promise<RpcResponse> => {
               item_type: row[1],
               parent_id: row[3],
               status: row[4],
-              completed_on: null,
+              completed_on: row[13] ?? null,
               due_at: row[6],
               rollup_estimate_minutes: rollupTotals?.totalEstimate ?? row[8],
               rollup_actual_minutes: rollupTotals?.totalActual ?? (timeMap.get(id) ?? 0),
@@ -4128,7 +4193,24 @@ const handleRequest = async (message: RpcRequest): Promise<RpcResponse> => {
             scopeUserId
           );
           if (itemIds.length === 0) {
-            result = { ok: true, result: { scheduled: [], unscheduled_ready: [] } };
+            result = {
+              ok: true,
+              result: {
+                scheduled: [],
+                actionable_now: [],
+                unscheduled_ready: [],
+                meta: {
+                  scheduled_total: 0,
+                  actionable_total: 0,
+                  unscheduled_total: 0,
+                  truncated: {
+                    scheduled: false,
+                    actionable_now: false,
+                    unscheduled_ready: false,
+                  },
+                },
+              },
+            };
             break;
           }
 
@@ -4521,6 +4603,7 @@ const handleRequest = async (message: RpcRequest): Promise<RpcResponse> => {
             const baseEntry = {
               item_id: row[0],
               title: row[1],
+              status: row[2],
               due_at: row[4],
               planned_start_at: schedule.start ?? null,
               planned_end_at: schedule.end ?? null,
@@ -4558,14 +4641,15 @@ const handleRequest = async (message: RpcRequest): Promise<RpcResponse> => {
                   : blocked.hasBlocker
                     ? "blockers"
                     : "status";
-              scheduledButBlocked.push({
-                item_id: row[0],
-                title: row[1],
-                block_id: block?.block_id ?? null,
-                start_at: block?.start_at ?? null,
-                duration_minutes: block?.duration_minutes ?? null,
-                blocked_reason: reason,
-                due_at: row[4],
+            scheduledButBlocked.push({
+              item_id: row[0],
+              title: row[1],
+              status: row[2],
+              block_id: block?.block_id ?? null,
+              start_at: block?.start_at ?? null,
+              duration_minutes: block?.duration_minutes ?? null,
+              blocked_reason: reason,
+              due_at: row[4],
                 project_title: projectTitleMap.get(projectId) ?? null,
               });
             }
@@ -4683,6 +4767,7 @@ const handleRequest = async (message: RpcRequest): Promise<RpcResponse> => {
             const entry = {
               item_id: row[0],
               title: row[1],
+              status: row[2],
               due_at: dueAt,
               planned_end_at: schedule.end ?? null,
               slack_minutes: slackMinutes,
@@ -4716,6 +4801,91 @@ const handleRequest = async (message: RpcRequest): Promise<RpcResponse> => {
               due_soon: dueSoon,
               overdue,
               projects,
+            },
+          };
+          break;
+        }
+        case "contributions_range": {
+          const { scopeProjectId, scopeUserId } = resolveScopeArgs(
+            args as Record<string, unknown>
+          );
+          const dayStart = parseLocalDayStart(
+            args.day_start_local,
+            "day_start_local"
+          );
+          const dayCountRaw = ensurePositiveInteger(args.day_count, "day_count");
+          const dayCount = Math.min(dayCountRaw, 730);
+          const endMs = dayStart + dayCount * DAY_MS;
+          const includeSubtasks = args.includeSubtasks !== false;
+          const includeMilestones = args.includeMilestones === true;
+          const includeProjects = args.includeProjects === true;
+
+          const itemIds = getScopeItemIds(
+            dbHandle,
+            scopeProjectId,
+            scopeUserId
+          );
+
+          const dayCounts = new Array<number>(dayCount).fill(0);
+          if (itemIds.length > 0) {
+            const placeholders = buildPlaceholders(itemIds.length);
+            const rows = dbHandle.exec({
+              sql: `SELECT id, type, parent_id, completed_at
+                FROM items
+                WHERE id IN (${placeholders})
+                  AND completed_at IS NOT NULL
+                  AND completed_at >= ?
+                  AND completed_at < ?;`,
+              rowMode: "array",
+              returnValue: "resultRows",
+              bind: [...itemIds, dayStart, endMs],
+            }) as Array<[string, string, string | null, number]>;
+
+            const hierarchyRows = getHierarchyRows(dbHandle);
+            const parentTypeMap = new Map(
+              hierarchyRows.map((row) => [row[0], row[1]])
+            );
+
+            for (const row of rows) {
+              const type = row[1];
+              const parentId = row[2];
+              if (type === "project" && !includeProjects) {
+                continue;
+              }
+              if (type === "milestone" && !includeMilestones) {
+                continue;
+              }
+              if (type === "task" && !includeSubtasks) {
+                const parentType = parentId ? parentTypeMap.get(parentId) : null;
+                if (parentType === "task") {
+                  continue;
+                }
+              }
+              const completedAt = row[3];
+              const dayIndex = Math.floor((completedAt - dayStart) / DAY_MS);
+              if (dayIndex < 0 || dayIndex >= dayCount) {
+                continue;
+              }
+              dayCounts[dayIndex] += 1;
+            }
+          }
+
+          let maxCount = 0;
+          const days = [];
+          for (let i = 0; i < dayCount; i += 1) {
+            const date = new Date(dayStart + i * DAY_MS);
+            const count = dayCounts[i] ?? 0;
+            if (count > maxCount) {
+              maxCount = count;
+            }
+            days.push({ day: formatLocalDay(date), completed_count: count });
+          }
+
+          result = {
+            ok: true,
+            result: {
+              days,
+              meta: { max_count: maxCount },
             },
           };
           break;
@@ -5092,7 +5262,7 @@ const handleRequest = async (message: RpcRequest): Promise<RpcResponse> => {
           const likePattern = `%${escaped}%`;
           const prefixPattern = `${escaped}%`;
           const prefixRows = dbHandle.exec({
-            sql: `SELECT id, title, type, parent_id, status, due_at, updated_at
+            sql: `SELECT id, title, type, parent_id, status, due_at, completed_at, updated_at
               FROM items
               WHERE type != 'project'
                 AND title LIKE ? ESCAPE '\\' COLLATE NOCASE
@@ -5109,6 +5279,7 @@ const handleRequest = async (message: RpcRequest): Promise<RpcResponse> => {
               string | null,
               string,
               number | null,
+              number | null,
               number
             ]
           >;
@@ -5122,7 +5293,7 @@ const handleRequest = async (message: RpcRequest): Promise<RpcResponse> => {
                 ? `AND id NOT IN (${buildPlaceholders(excludeIds.length)})`
                 : "";
             const substringRows = dbHandle.exec({
-              sql: `SELECT id, title, type, parent_id, status, due_at, updated_at
+              sql: `SELECT id, title, type, parent_id, status, due_at, completed_at, updated_at
                 FROM items
                 WHERE type != 'project'
                   AND title LIKE ? ESCAPE '\\' COLLATE NOCASE
@@ -5142,6 +5313,7 @@ const handleRequest = async (message: RpcRequest): Promise<RpcResponse> => {
                 string,
                 string | null,
                 string,
+                number | null,
                 number | null,
                 number
               ]
@@ -5189,7 +5361,7 @@ const handleRequest = async (message: RpcRequest): Promise<RpcResponse> => {
               _matchRank: matchRank,
               _sameProject: sameProject,
               _titleLength: row[1].length,
-              _updatedAt: row[6],
+              _updatedAt: row[7],
             };
           });
 

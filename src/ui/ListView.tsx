@@ -3,7 +3,6 @@ import {
   useCallback,
   useEffect,
   useMemo,
-  useRef,
   useState,
   type DragEvent,
   type FC,
@@ -55,6 +54,8 @@ type ListViewItem = ListItem & {
   slack_minutes: number | null;
 };
 
+const listViewCache = new Map<string, ListViewItem[]>();
+
 type Column = {
   key: string;
   label: string;
@@ -81,7 +82,6 @@ const ListView: FC<ListViewProps> = ({
   onOpenItem,
 }) => {
   const [items, setItems] = useState<ListViewItem[]>([]);
-  const itemsCacheRef = useRef<Map<string, ListViewItem[]>>(new Map());
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [dragging, setDragging] = useState<{
@@ -179,7 +179,7 @@ const ListView: FC<ListViewProps> = ({
       return;
     }
     let isMounted = true;
-    const cached = itemsCacheRef.current.get(cacheKey);
+    const cached = listViewCache.get(cacheKey);
     if (cached) {
       setItems(cached);
     } else {
@@ -193,7 +193,7 @@ const ListView: FC<ListViewProps> = ({
           return;
         }
         setItems(merged);
-        itemsCacheRef.current.set(cacheKey, merged);
+        listViewCache.set(cacheKey, merged);
       })
       .catch((err) => {
         if (!isMounted) {

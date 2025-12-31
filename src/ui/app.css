@@ -243,6 +243,121 @@ body {
   color: var(--color-text);
 }
 
+.heatmap {
+  --heatmap-cell: 12px;
+  --heatmap-gap: 4px;
+  --heatmap-label-width: 32px;
+  display: grid;
+  gap: 10px;
+  margin-bottom: 18px;
+  overflow-x: auto;
+}
+
+.heatmap-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+}
+
+.heatmap-title {
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.heatmap-range {
+  font-size: 12px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--color-muted-text);
+}
+
+.heatmap-range select {
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius);
+  padding: 2px 6px;
+  background: var(--color-panel-2);
+  color: var(--color-text);
+}
+
+.heatmap-grid-wrap {
+  display: grid;
+  gap: 6px;
+  width: max-content;
+}
+
+.heatmap-months {
+  display: grid;
+  grid-auto-flow: column;
+  grid-auto-columns: var(--heatmap-cell);
+  gap: var(--heatmap-gap);
+  padding-left: var(--heatmap-label-width);
+  font-size: 11px;
+  color: var(--color-muted-text);
+}
+
+.heatmap-month {
+  height: 14px;
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+}
+
+.heatmap-body {
+  display: grid;
+  grid-template-columns: var(--heatmap-label-width) auto;
+  gap: 8px;
+  align-items: start;
+}
+
+.heatmap-weekdays {
+  display: grid;
+  grid-template-rows: repeat(7, var(--heatmap-cell));
+  gap: var(--heatmap-gap);
+  font-size: 10px;
+  color: var(--color-muted-text);
+}
+
+.heatmap-weekday {
+  height: var(--heatmap-cell);
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+}
+
+.heatmap-grid {
+  display: grid;
+  grid-auto-flow: column;
+  grid-template-rows: repeat(7, var(--heatmap-cell));
+  grid-auto-columns: var(--heatmap-cell);
+  gap: var(--heatmap-gap);
+  width: max-content;
+}
+
+.heatmap-cell {
+  width: var(--heatmap-cell);
+  height: var(--heatmap-cell);
+  border-radius: 3px;
+  background: var(--color-panel-2);
+}
+
+.heatmap-level-1 {
+  background: var(--accent-3);
+}
+
+.heatmap-level-2 {
+  background: var(--accent-5);
+}
+
+.heatmap-level-3 {
+  background: var(--accent-7);
+}
+
+.heatmap-level-4 {
+  background: var(--accent-9);
+}
+
 .dashboard-toolbar {
   display: flex;
   justify-content: space-between;
@@ -295,7 +410,7 @@ body {
 
 .dashboard-row {
   display: grid;
-  grid-template-columns: auto 1fr auto;
+  grid-template-columns: auto 1fr auto auto;
   gap: 8px;
   align-items: center;
   text-align: left;
@@ -304,6 +419,12 @@ body {
   border: 1px solid transparent;
   background: transparent;
   cursor: pointer;
+}
+
+.dashboard-leading {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
 }
 
 .dashboard-row:hover {

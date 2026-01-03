@@ -8,6 +8,7 @@ import dueNullableSql from "./migrations/0005_due_at_nullable.sql?raw";
 import titleSearchSql from "./migrations/0006_title_search.sql?raw";
 import dependenciesTypeLagSql from "./migrations/0007_dependencies_type_lag.sql?raw";
 import completedAtSql from "./migrations/0008_completed_at.sql?raw";
+import archivedAtSql from "./migrations/0010_archived_at.sql?raw";
 import {
   computeSlackMinutes,
   deriveEndAtFromDuration,
@@ -109,6 +110,10 @@ const migrations = [
     version: 8,
     sql: completedAtSql,
   },
+  {
+    version: 9,
+    sql: archivedAtSql,
+  },
 ];
 
 const ensureString = (value: unknown, name: string) => {
@@ -130,6 +135,24 @@ const ensureInteger = (value: unknown, name: string) => {
     throw new Error(`${name} must be an integer`);
   }
   return value;
+};
+
+const normalizeArchiveFilter = (value: unknown) => {
+  if (value === "archived" || value === "all" || value === "active") {
+    return value;
+  }
+  return "active";
+};
+
+const buildArchiveWhere = (archiveFilter: string, alias?: string) => {
+  const column = alias ? `${alias}.archived_at` : "archived_at";
+  if (archiveFilter === "archived") {
+    return `${column} IS NOT NULL`;
+  }
+  if (archiveFilter === "all") {
+    return "1=1";
+  }
+  return `${column} IS NULL`;
 };
 
 const resolveDurationMinutes = (
@@ -592,7 +615,8 @@ const getScopeItemIds = (
       sql: `SELECT i.id
         FROM items i
         JOIN item_assignees a ON a.item_id = i.id
-        WHERE a.assignee_id = ?;`,
+        WHERE a.assignee_id = ?
+          AND i.archived_at IS NULL;`,
       rowMode: "array",
       returnValue: "resultRows",
       bind: [scopeUserId],
@@ -606,7 +630,7 @@ const getScopeItemIds = (
         UNION ALL
         SELECT i.* FROM items i JOIN tree t ON i.parent_id = t.id
       )
-      SELECT id FROM tree;`,
+      SELECT id FROM tree WHERE archived_at IS NULL;`,
       rowMode: "array",
       returnValue: "resultRows",
     }) as Array<[string]>;
@@ -619,7 +643,7 @@ const getScopeItemIds = (
         UNION ALL
         SELECT i.* FROM items i JOIN tree t ON i.parent_id = t.id
       )
-      SELECT id FROM tree;`,
+      SELECT id FROM tree WHERE archived_at IS NULL;`,
       rowMode: "array",
       returnValue: "resultRows",
       bind: [scopeProjectId],
@@ -627,11 +651,30 @@ const getScopeItemIds = (
     return rows.map((row) => row[0]);
   }
   const rows = db.exec({
-    sql: `SELECT id FROM items;`,
+    sql: `SELECT id FROM items WHERE archived_at IS NULL;`,
     rowMode: "array",
     returnValue: "resultRows",
   }) as Array<[string]>;
   return rows.map((row) => row[0]);
+};
+
+const getSubtreeIds = (db: any, seedIds: string[]) => {
+  if (seedIds.length === 0) {
+    return [];
+  }
+  const placeholders = buildPlaceholders(seedIds.length);
+  const rows = db.exec({
+    sql: `WITH RECURSIVE subtree AS (
+      SELECT id FROM items WHERE id IN (${placeholders})
+      UNION ALL
+      SELECT i.id FROM items i JOIN subtree s ON i.parent_id = s.id
+    )
+    SELECT id FROM subtree;`,
+    rowMode: "array",
+    returnValue: "resultRows",
+    bind: seedIds,
+  }) as Array<[string]>;
+  return Array.from(new Set(rows.map((row) => row[0])));
 };
 
 const getHierarchyRows = (db: any) =>
@@ -745,7 +788,7 @@ const getUserDisplayName = (userId: string, nameMap: Map<string, string>) => {
 
 const exportData = (db: any) => {
   const itemsRows = db.exec({
-    sql: "SELECT id, type, title, parent_id, status, priority, due_at, estimate_mode, estimate_minutes, health, health_mode, notes, created_at, updated_at FROM items;",
+    sql: "SELECT id, type, title, parent_id, status, priority, due_at, estimate_mode, estimate_minutes, health, health_mode, notes, created_at, updated_at, archived_at FROM items;",
     rowMode: "array",
     returnValue: "resultRows",
   }) as Array<
@@ -763,7 +806,8 @@ const exportData = (db: any) => {
       string,
       string | null,
       number,
-      number
+      number,
+      number | null
     ]
   >;
 
@@ -831,6 +875,7 @@ const exportData = (db: any) => {
       notes: row[11],
       created_at: row[12],
       updated_at: row[13],
+      archived_at: row[14],
     })),
     dependencies: dependencyRows.map((row) => ({
       item_id: row[0],
@@ -979,6 +1024,23 @@ const withTransaction = (db: any, fn: () => MutateResult) => {
   }
 };
 
+const enforceSingleScheduledBlock = (
+  db: any,
+  itemId: string,
+  keepBlockId?: string
+) => {
+  if (keepBlockId) {
+    db.exec(
+      "DELETE FROM scheduled_blocks WHERE item_id = ? AND block_id != ?;",
+      { bind: [itemId, keepBlockId] }
+    );
+  } else {
+    db.exec("DELETE FROM scheduled_blocks WHERE item_id = ?;", {
+      bind: [itemId],
+    });
+  }
+};
+
 const runMigrations = (db: any) => {
   db.exec("CREATE TABLE IF NOT EXISTS schema_version (version INTEGER NOT NULL);");
   const rows = db.exec({
@@ -1015,6 +1077,22 @@ const runMigrations = (db: any) => {
   if (dueAtRow && Number(dueAtRow[3]) === 1) {
     db.exec(dueNullableSql);
     currentVersion = Math.max(currentVersion, 5);
+    if (rows.length === 0) {
+      db.exec("INSERT INTO schema_version (version) VALUES (?);", {
+        bind: [currentVersion],
+      });
+      rows.push([currentVersion]);
+    } else {
+      db.exec("UPDATE schema_version SET version = ?;", {
+        bind: [currentVersion],
+      });
+    }
+  }
+
+  const archivedAtRow = tableInfo.find((row) => row[1] === "archived_at");
+  if (!archivedAtRow) {
+    db.exec(archivedAtSql);
+    currentVersion = Math.max(currentVersion, 9);
     if (rows.length === 0) {
       db.exec("INSERT INTO schema_version (version) VALUES (?);", {
         bind: [currentVersion],
@@ -1170,7 +1248,7 @@ const handleMutate = (envelope: MutateEnvelope): MutateResult => {
           const notes = typeof args.notes === "string" ? args.notes : null;
 
           dbHandle.exec(
-            "INSERT INTO items (id, type, title, parent_id, status, priority, due_at, estimate_mode, estimate_minutes, health, health_mode, notes, created_at, updated_at, sort_order, completed_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);",
+            "INSERT INTO items (id, type, title, parent_id, status, priority, due_at, estimate_mode, estimate_minutes, health, health_mode, notes, created_at, updated_at, sort_order, completed_at, archived_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);",
             {
               bind: [
                 id,
@@ -1189,6 +1267,7 @@ const handleMutate = (envelope: MutateEnvelope): MutateResult => {
                 now,
                 sortOrder,
                 completedAt,
+                null,
               ],
             }
           );
@@ -1270,6 +1349,9 @@ const handleMutate = (envelope: MutateEnvelope): MutateResult => {
           const id = ensureString(args.id, "id");
           const status = ensureString(args.status, "status");
           const override = args.override === true;
+          const settings = getSettings(dbHandle);
+          const autoArchive =
+            settings.get("ui.auto_archive_on_complete") === true;
           if (status === "in_progress") {
             const blockRows = dbHandle.exec({
               sql: `SELECT
@@ -1298,15 +1380,20 @@ const handleMutate = (envelope: MutateEnvelope): MutateResult => {
           }
           const now = Date.now();
           let completedAt: number | null = null;
+          let archivedAt: number | null = null;
           if (status === "done") {
             const completedRows = dbHandle.exec({
-              sql: "SELECT completed_at FROM items WHERE id = ?;",
+              sql: "SELECT completed_at, archived_at FROM items WHERE id = ?;",
               rowMode: "array",
               returnValue: "resultRows",
               bind: [id],
-            }) as Array<[number | null]>;
-            const existing = completedRows[0]?.[0] ?? null;
-            completedAt = existing ?? now;
+            }) as Array<[number | null, number | null]>;
+            const existingCompleted = completedRows[0]?.[0] ?? null;
+            const existingArchived = completedRows[0]?.[1] ?? null;
+            completedAt = existingCompleted ?? now;
+            if (autoArchive) {
+              archivedAt = existingArchived ?? now;
+            }
           }
           dbHandle.exec(
             "UPDATE items SET status = ?, updated_at = ?, completed_at = ? WHERE id = ?;",
@@ -1314,6 +1401,18 @@ const handleMutate = (envelope: MutateEnvelope): MutateResult => {
               bind: [status, now, completedAt, id],
             }
           );
+          if (status === "done" && autoArchive) {
+            const archiveIds = getSubtreeIds(dbHandle, [id]);
+            if (archiveIds.length > 0) {
+              const placeholders = buildPlaceholders(archiveIds.length);
+              dbHandle.exec(
+                `UPDATE items SET archived_at = ?, updated_at = ? WHERE id IN (${placeholders});`,
+                {
+                  bind: [archivedAt ?? now, now, ...archiveIds],
+                }
+              );
+            }
+          }
           result = {
             ok: true,
             result: { id },
@@ -1332,6 +1431,7 @@ const handleMutate = (envelope: MutateEnvelope): MutateResult => {
           const blockId = crypto.randomUUID();
           const locked = typeof args.locked === "number" ? args.locked : 0;
           const source = typeof args.source === "string" ? args.source : "manual";
+          enforceSingleScheduledBlock(dbHandle, itemId);
           dbHandle.exec(
             "INSERT INTO scheduled_blocks (block_id, item_id, start_at, duration_minutes, locked, source) VALUES (?, ?, ?, ?, ?, ?);",
             {
@@ -1390,6 +1490,7 @@ const handleMutate = (envelope: MutateEnvelope): MutateResult => {
             "UPDATE scheduled_blocks SET start_at = ?, duration_minutes = ? WHERE block_id = ?;",
             { bind: [nextStartAt, nextDuration, blockId] }
           );
+          enforceSingleScheduledBlock(dbHandle, current[0], blockId);
           result = {
             ok: true,
             result: { block_id: blockId, item_id: current[0] },
@@ -1431,6 +1532,7 @@ const handleMutate = (envelope: MutateEnvelope): MutateResult => {
           const blockId = crypto.randomUUID();
           const locked = typeof args.locked === "number" ? args.locked : 0;
           const source = typeof args.source === "string" ? args.source : "manual";
+          enforceSingleScheduledBlock(dbHandle, itemId);
           dbHandle.exec(
             "INSERT INTO scheduled_blocks (block_id, item_id, start_at, duration_minutes, locked, source) VALUES (?, ?, ?, ?, ?, ?);",
             {
@@ -1447,10 +1549,22 @@ const handleMutate = (envelope: MutateEnvelope): MutateResult => {
         case "move_block": {
           const blockId = ensureString(args.block_id, "block_id");
           const startAt = ensureNumber(args.start_at, "start_at");
+          const rows = dbHandle.exec({
+            sql: "SELECT item_id FROM scheduled_blocks WHERE block_id = ?;",
+            rowMode: "array",
+            returnValue: "resultRows",
+            bind: [blockId],
+          }) as Array<[string]>;
+          const itemId = rows[0]?.[0] ?? null;
+          if (!itemId) {
+            result = { ok: false, error: "scheduled block not found" };
+            break;
+          }
           dbHandle.exec(
             "UPDATE scheduled_blocks SET start_at = ? WHERE block_id = ?;",
             { bind: [startAt, blockId] }
           );
+          enforceSingleScheduledBlock(dbHandle, itemId, blockId);
           result = {
             ok: true,
             result: { block_id: blockId },
@@ -1464,10 +1578,22 @@ const handleMutate = (envelope: MutateEnvelope): MutateResult => {
             args.duration_minutes,
             "duration_minutes"
           );
+          const rows = dbHandle.exec({
+            sql: "SELECT item_id FROM scheduled_blocks WHERE block_id = ?;",
+            rowMode: "array",
+            returnValue: "resultRows",
+            bind: [blockId],
+          }) as Array<[string]>;
+          const itemId = rows[0]?.[0] ?? null;
+          if (!itemId) {
+            result = { ok: false, error: "scheduled block not found" };
+            break;
+          }
           dbHandle.exec(
             "UPDATE scheduled_blocks SET duration_minutes = ? WHERE block_id = ?;",
             { bind: [durationMinutes, blockId] }
           );
+          enforceSingleScheduledBlock(dbHandle, itemId, blockId);
           result = {
             ok: true,
             result: { block_id: blockId },
@@ -1484,6 +1610,114 @@ const handleMutate = (envelope: MutateEnvelope): MutateResult => {
             ok: true,
             result: { block_id: blockId },
             invalidate: ["blocks"],
+          };
+          break;
+        }
+        case "item.archive": {
+          const itemId = ensureString(args.item_id, "item_id");
+          const now =
+            typeof args.now_at === "number"
+              ? ensureInteger(args.now_at, "now_at")
+              : Date.now();
+          const archivedIds = getSubtreeIds(dbHandle, [itemId]);
+          if (archivedIds.length === 0) {
+            result = { ok: false, error: "item not found" };
+            break;
+          }
+          const placeholders = buildPlaceholders(archivedIds.length);
+          dbHandle.exec(
+            `UPDATE items SET archived_at = ?, updated_at = ? WHERE id IN (${placeholders});`,
+            {
+              bind: [now, now, ...archivedIds],
+            }
+          );
+          result = {
+            ok: true,
+            result: { archived_ids: archivedIds },
+            invalidate: ["items"],
+          };
+          break;
+        }
+        case "items.archive_many": {
+          const idsInput = ensureArray(args.ids, "ids")
+            .map((value, index) => ensureString(value, `ids[${index}]`))
+            .filter((value) => value.trim().length > 0);
+          const uniqueIds = Array.from(new Set(idsInput));
+          if (uniqueIds.length === 0) {
+            result = { ok: false, error: "ids must be a non-empty array" };
+            break;
+          }
+          const now =
+            typeof args.now_at === "number"
+              ? ensureInteger(args.now_at, "now_at")
+              : Date.now();
+          const archivedIds = getSubtreeIds(dbHandle, uniqueIds);
+          if (archivedIds.length === 0) {
+            result = { ok: false, error: "items not found" };
+            break;
+          }
+          const placeholders = buildPlaceholders(archivedIds.length);
+          dbHandle.exec(
+            `UPDATE items SET archived_at = ?, updated_at = ? WHERE id IN (${placeholders});`,
+            {
+              bind: [now, now, ...archivedIds],
+            }
+          );
+          result = {
+            ok: true,
+            result: { archived_ids: archivedIds },
+            invalidate: ["items"],
+          };
+          break;
+        }
+        case "item.restore": {
+          const itemId = ensureString(args.item_id, "item_id");
+          const now = Date.now();
+          const restoredIds = getSubtreeIds(dbHandle, [itemId]);
+          if (restoredIds.length === 0) {
+            result = { ok: false, error: "item not found" };
+            break;
+          }
+          const placeholders = buildPlaceholders(restoredIds.length);
+          dbHandle.exec(
+            `UPDATE items SET archived_at = NULL, updated_at = ? WHERE id IN (${placeholders});`,
+            {
+              bind: [now, ...restoredIds],
+            }
+          );
+          result = {
+            ok: true,
+            result: { restored_ids: restoredIds },
+            invalidate: ["items"],
+          };
+          break;
+        }
+        case "items.restore_many": {
+          const idsInput = ensureArray(args.ids, "ids")
+            .map((value, index) => ensureString(value, `ids[${index}]`))
+            .filter((value) => value.trim().length > 0);
+          const uniqueIds = Array.from(new Set(idsInput));
+          if (uniqueIds.length === 0) {
+            result = { ok: false, error: "ids must be a non-empty array" };
+            break;
+          }
+          const restoredIds = getSubtreeIds(dbHandle, uniqueIds);
+          if (restoredIds.length === 0) {
+            result = { ok: false, error: "items not found" };
+            break;
+          }
+          const now = Date.now();
+          const placeholders = buildPlaceholders(restoredIds.length);
+          dbHandle.exec(
+            `UPDATE items SET archived_at = NULL, updated_at = ? WHERE id IN (${placeholders});`,
+            {
+              bind: [now, ...restoredIds],
+            }
+          );
+          result = {
+            ok: true,
+            result: { restored_ids: restoredIds },
+            invalidate: ["items"],
           };
           break;
         }
@@ -2169,7 +2403,7 @@ const handleMutate = (envelope: MutateEnvelope): MutateResult => {
 
           for (const item of items) {
             dbHandle.exec(
-              "INSERT INTO items (id, type, title, parent_id, status, priority, due_at, estimate_mode, estimate_minutes, health, health_mode, notes, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);",
+              "INSERT INTO items (id, type, title, parent_id, status, priority, due_at, estimate_mode, estimate_minutes, health, health_mode, notes, created_at, updated_at, archived_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);",
               {
                 bind: [
                   item.id,
@@ -2186,6 +2420,7 @@ const handleMutate = (envelope: MutateEnvelope): MutateResult => {
                   item.notes,
                   item.created_at,
                   item.updated_at,
+                  (item as Record<string, unknown>).archived_at ?? null,
                 ],
               }
             );
@@ -3343,6 +3578,8 @@ const handleRequest = async (message: RpcRequest): Promise<RpcResponse> => {
           const projectId = isUngrouped ? null : projectIdArg;
           const statusArg = args.status;
           const healthArg = args.health;
+          const archiveFilter = normalizeArchiveFilter(args.archiveFilter);
+          const archiveWhere = buildArchiveWhere(archiveFilter);
           const assigneeId =
             typeof args.assigneeId === "string" ? args.assigneeId : null;
           const tagFilter =
@@ -3370,8 +3607,9 @@ const handleRequest = async (message: RpcRequest): Promise<RpcResponse> => {
                 )
                 SELECT * FROM (
                   SELECT id, type, title, parent_id, status, priority, due_at,
-                    estimate_mode, estimate_minutes, health, health_mode, notes, updated_at, sort_order
+                    estimate_mode, estimate_minutes, health, health_mode, notes, updated_at, sort_order, archived_at
                   FROM tree
+                  WHERE ${archiveWhere}
                 )
                 ORDER BY sort_order ASC,
                   CASE WHEN due_at IS NULL THEN 1 ELSE 0 END,
@@ -3385,16 +3623,18 @@ const handleRequest = async (message: RpcRequest): Promise<RpcResponse> => {
                   )
                   SELECT * FROM (
                     SELECT id, type, title, parent_id, status, priority, due_at,
-                      estimate_mode, estimate_minutes, health, health_mode, notes, updated_at, sort_order
+                      estimate_mode, estimate_minutes, health, health_mode, notes, updated_at, sort_order, archived_at
                     FROM tree
+                    WHERE ${archiveWhere}
                   )
                   ORDER BY sort_order ASC,
                     CASE WHEN due_at IS NULL THEN 1 ELSE 0 END,
                     due_at ASC,
                     title ASC;`
                 : `SELECT id, type, title, parent_id, status, priority, due_at,
-                    estimate_mode, estimate_minutes, health, health_mode, notes, updated_at, sort_order
+                    estimate_mode, estimate_minutes, health, health_mode, notes, updated_at, sort_order, archived_at
                   FROM items
+                  WHERE ${archiveWhere}
                   ORDER BY sort_order ASC,
                     CASE WHEN due_at IS NULL THEN 1 ELSE 0 END,
                     due_at ASC,
@@ -3417,12 +3657,13 @@ const handleRequest = async (message: RpcRequest): Promise<RpcResponse> => {
               string,
               string | null,
               number,
-              number
+              number,
+              number | null
             ]
           >;
           const ids = rows.map((row) => row[0]);
           const rowMap = new Map(
-            rows.map((row) => [row[0], { updated_at: row[11], sort_order: row[12] }])
+            rows.map((row) => [row[0], { updated_at: row[12], sort_order: row[13] }])
           );
           const scheduleMap = getScheduleSummaryMap(dbHandle, ids);
           const blockedMap = getBlockedStatusMap(dbHandle, ids);
@@ -3567,6 +3808,7 @@ const handleRequest = async (message: RpcRequest): Promise<RpcResponse> => {
               status: row[4],
               priority: row[5],
               due_at: row[6],
+              archived_at: row[14],
               estimate_mode: row[7],
               estimate_minutes: row[8],
               rollup_estimate_minutes: rollupEstimate,
@@ -3668,6 +3910,9 @@ const handleRequest = async (message: RpcRequest): Promise<RpcResponse> => {
             typeof args.includeCompleted === "boolean"
               ? args.includeCompleted
               : true;
+          const archiveFilter = normalizeArchiveFilter(args.archiveFilter);
+          const archiveWhere = buildArchiveWhere(archiveFilter);
+          const archiveWhereAlias = buildArchiveWhere(archiveFilter, "i");
 
           const fetchTree = (rootId: string) =>
             dbHandle.exec({
@@ -3679,6 +3924,7 @@ const handleRequest = async (message: RpcRequest): Promise<RpcResponse> => {
               SELECT id, type, title, parent_id, status, priority, due_at,
                 estimate_mode, estimate_minutes, notes, created_at, updated_at, sort_order, completed_at
               FROM tree
+              WHERE ${archiveWhere}
               ORDER BY sort_order ASC,
                 CASE WHEN due_at IS NULL THEN 1 ELSE 0 END,
                 due_at ASC,
@@ -3715,6 +3961,7 @@ const handleRequest = async (message: RpcRequest): Promise<RpcResponse> => {
               SELECT id, type, title, parent_id, status, priority, due_at,
                 estimate_mode, estimate_minutes, notes, created_at, updated_at, sort_order, completed_at
               FROM tree
+              WHERE ${archiveWhere}
               ORDER BY sort_order ASC,
                 CASE WHEN due_at IS NULL THEN 1 ELSE 0 END,
                 due_at ASC,
@@ -3745,6 +3992,7 @@ const handleRequest = async (message: RpcRequest): Promise<RpcResponse> => {
               sql: `SELECT id, type, title, parent_id, status, priority, due_at,
                 estimate_mode, estimate_minutes, notes, created_at, updated_at, sort_order, completed_at
               FROM items
+              WHERE ${archiveWhere}
               ORDER BY sort_order ASC,
                 CASE WHEN due_at IS NULL THEN 1 ELSE 0 END,
                 due_at ASC,
@@ -3782,6 +4030,7 @@ const handleRequest = async (message: RpcRequest): Promise<RpcResponse> => {
               FROM tree i
               JOIN item_assignees a ON a.item_id = i.id
               WHERE a.assignee_id = ?
+                AND ${archiveWhereAlias}
               ORDER BY i.sort_order ASC,
                 CASE WHEN i.due_at IS NULL THEN 1 ELSE 0 END,
                 i.due_at ASC,
@@ -3820,6 +4069,7 @@ const handleRequest = async (message: RpcRequest): Promise<RpcResponse> => {
               FROM tree i
               JOIN item_assignees a ON a.item_id = i.id
               WHERE a.assignee_id = ?
+                AND ${archiveWhereAlias}
               ORDER BY i.sort_order ASC,
                 CASE WHEN i.due_at IS NULL THEN 1 ELSE 0 END,
                 i.due_at ASC,
@@ -3853,6 +4103,7 @@ const handleRequest = async (message: RpcRequest): Promise<RpcResponse> => {
               FROM items i
               JOIN item_assignees a ON a.item_id = i.id
               WHERE a.assignee_id = ?
+                AND ${archiveWhereAlias}
               ORDER BY i.sort_order ASC,
                 CASE WHEN i.due_at IS NULL THEN 1 ELSE 0 END,
                 i.due_at ASC,
@@ -6389,17 +6640,21 @@ const handleRequest = async (message: RpcRequest): Promise<RpcResponse> => {
           }
 
           const blockSql = scopedIds
-            ? `SELECT block_id, item_id, start_at, duration_minutes
-                FROM scheduled_blocks
-                WHERE start_at < ?
-                  AND (start_at + duration_minutes * 60000) > ?
-                  AND item_id IN (${buildPlaceholders(scopedIds.length)})
-                ORDER BY start_at ASC;`
-            : `SELECT block_id, item_id, start_at, duration_minutes
-                FROM scheduled_blocks
-                WHERE start_at < ?
-                  AND (start_at + duration_minutes * 60000) > ?
-                ORDER BY start_at ASC;`;
+            ? `SELECT b.block_id, b.item_id, b.start_at, b.duration_minutes
+                FROM scheduled_blocks b
+                JOIN items i ON i.id = b.item_id
+                WHERE i.archived_at IS NULL
+                  AND b.start_at < ?
+                  AND (b.start_at + b.duration_minutes * 60000) > ?
+                  AND b.item_id IN (${buildPlaceholders(scopedIds.length)})
+                ORDER BY b.start_at ASC;`
+            : `SELECT b.block_id, b.item_id, b.start_at, b.duration_minutes
+                FROM scheduled_blocks b
+                JOIN items i ON i.id = b.item_id
+                WHERE i.archived_at IS NULL
+                  AND b.start_at < ?
+                  AND (b.start_at + b.duration_minutes * 60000) > ?
+                ORDER BY b.start_at ASC;`;
 
           const blockRows = dbHandle.exec({
             sql: blockSql,
@@ -6411,14 +6666,16 @@ const handleRequest = async (message: RpcRequest): Promise<RpcResponse> => {
           const itemSql = scopedIds
             ? `SELECT id, title, status, due_at, parent_id, type, priority
                 FROM items
-                WHERE due_at IS NOT NULL
+                WHERE archived_at IS NULL
+                  AND due_at IS NOT NULL
                   AND due_at >= ?
                   AND due_at < ?
                   AND id IN (${buildPlaceholders(scopedIds.length)})
                 ORDER BY due_at ASC;`
             : `SELECT id, title, status, due_at, parent_id, type, priority
                 FROM items
-                WHERE due_at IS NOT NULL
+                WHERE archived_at IS NULL
+                  AND due_at IS NOT NULL
                   AND due_at >= ?
                   AND due_at < ?
                 ORDER BY due_at ASC;`;

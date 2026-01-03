@@ -1,11 +1,20 @@
 import { parseEstimateMinutesInput } from "../domain/formatters";
 
 export type ParsedCommand = {
-  verb: "create" | "edit" | "delete";
+  verb:
+    | "create"
+    | "edit"
+    | "delete"
+    | "schedule"
+    | "archive"
+    | "restore"
+    | "open";
   type: "project" | "milestone" | "task" | "subtask";
   title?: string;
   target?: string;
   id?: string;
+  openProject?: string;
+  openView?: "list" | "calendar" | "kanban" | "gantt" | "dashboard";
   parentId?: string;
   inProject?: string;
   dueAt?: number;
@@ -35,8 +44,17 @@ type ParseResult =
   | { ok: true; value: ParsedCommand }
   | { ok: false; error: ParseError };
 
-const VERBS = new Set(["create", "edit", "delete"]);
+const VERBS = new Set([
+  "create",
+  "edit",
+  "delete",
+  "schedule",
+  "archive",
+  "restore",
+  "open",
+]);
 const TYPES = new Set(["project", "milestone", "task", "subtask"]);
+const VIEW_NAMES = new Set(["list", "calendar", "kanban", "gantt", "dashboard"]);
 const KEYS = new Set([
   "title",
   "parent",
@@ -89,6 +107,52 @@ export const parseCommand = (input: string): ParseResult => {
     index += 1;
     rawToken = tokens[index]?.toLowerCase();
   }
+  if (verb === "open") {
+    const remaining = tokens.slice(index);
+    if (remaining.length === 0) {
+      return {
+        ok: false,
+        error: { message: "open requires a project name or view" },
+      };
+    }
+    const hasKeyValue = remaining.some((token) => parseKeyValue(token));
+    if (hasKeyValue) {
+      return {
+        ok: false,
+        error: { message: "open does not accept key:value tokens" },
+      };
+    }
+    let openProject: string | undefined;
+    let openView: ParsedCommand["openView"];
+    const first = remaining[0].toLowerCase();
+    const second = remaining[1]?.toLowerCase();
+    if (VIEW_NAMES.has(first)) {
+      openView = first as ParsedCommand["openView"];
+    } else {
+      openProject = remaining[0];
+    }
+    if (second) {
+      if (!VIEW_NAMES.has(second)) {
+        return {
+          ok: false,
+          error: {
+            message:
+              "open accepts a project name and optional view (list/calendar/kanban/gantt/dashboard)",
+          },
+        };
+      }
+      openView = second as ParsedCommand["openView"];
+    }
+    return {
+      ok: true,
+      value: {
+        verb: "open",
+        type: "task",
+        openProject,
+        openView,
+      },
+    };
+  }
   if (!rawToken || !TYPES.has(rawToken)) {
     return {
       ok: false,
@@ -136,7 +200,9 @@ export const parseCommand = (input: string): ParseResult => {
     } else {
       return {
         ok: false,
-        error: { message: "Edit/delete requires an id or quoted title" },
+        error: {
+          message: "Edit/delete/schedule/archive/restore requires an id or quoted title",
+        },
       };
     }
   }
@@ -386,7 +452,9 @@ export const parseCommand = (input: string): ParseResult => {
   } else if (!id && !target) {
     return {
       ok: false,
-      error: { message: "Edit/delete requires an id or quoted title" },
+      error: {
+        message: "Edit/delete/schedule/archive/restore requires an id or quoted title",
+      },
     };
   }
 

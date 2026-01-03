@@ -932,6 +932,16 @@ body {
   gap: 8px;
 }
 
+.archive-actions {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+
+.archived-row {
+  opacity: 0.7;
+}
+
 
 .error {
   margin-bottom: 12px;
@@ -1433,9 +1443,17 @@ body {
   background: rgba(125, 132, 255, 0.16);
 }
 
+.row-selected td {
+  background: rgba(125, 132, 255, 0.16);
+}
+
 .row-active {
   outline: 1px solid rgba(125, 132, 255, 0.45);
   outline-offset: -2px;
+}
+
+.row-active td {
+  box-shadow: inset 0 0 0 1px rgba(125, 132, 255, 0.35);
 }
 
 .cell-title-text {

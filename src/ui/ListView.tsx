@@ -31,10 +31,14 @@ import {
 import {
   createDependencyEdge,
   createItem,
+  archiveItem,
+  archiveItems,
   deleteItem,
   deleteItems,
   deleteDependencyEdge,
   duplicateTaskFromItem,
+  restoreItem,
+  restoreItems,
   setItemAssignee,
   setItemTags,
   setStatus,
@@ -86,8 +90,13 @@ const ListView: FC<ListViewProps> = ({
   const [items, setItems] = useState<ListViewItem[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [archivedItems, setArchivedItems] = useState<ListViewItem[]>([]);
+  const [archivedLoading, setArchivedLoading] = useState(false);
+  const [archivedError, setArchivedError] = useState<string | null>(null);
+  const [archiveCollapsed, setArchiveCollapsed] = useState(true);
   const [dragging, setDragging] = useState<{
     itemId: string;
+    itemIds: string[];
     groupKey: string;
   } | null>(null);
   const [dragOver, setDragOver] = useState<{
@@ -180,6 +189,46 @@ const ListView: FC<ListViewProps> = ({
     return merged;
   }, [scope]);
 
+  const loadArchivedItems = useCallback(async () => {
+    if (scope.kind !== "project" || !scope.projectId) {
+      return [];
+    }
+    const [listData, completeData] = await Promise.all([
+      query<{ items: ListItem[] }>("listItems", {
+        projectId: scope.projectId,
+        includeDone: true,
+        includeCanceled: true,
+        orderBy: "updated_at",
+        orderDir: "desc",
+        archiveFilter: "archived",
+      }),
+      query<ItemGanttModel[]>("list_view_complete", {
+        scope,
+        scopeProjectId: scope.projectId,
+        includeUngrouped: false,
+        includeCompleted: true,
+        archiveFilter: "archived",
+      }),
+    ]);
+    const completeMap = new Map(
+      completeData.map((item) => [item.id, item])
+    );
+    return listData.items.map((item) => {
+      const extra = completeMap.get(item.id);
+      return {
+        ...item,
+        completed_on: extra?.completed_on ?? null,
+        actual_minutes: extra?.actual_minutes ?? null,
+        scheduled_blocks: extra?.scheduled_blocks ?? [],
+        dependencies_out: extra?.dependencies_out ?? [],
+        dependencies_in: extra?.dependencies_in ?? [],
+        blocked_by: extra?.blocked_by ?? [],
+        blocking: extra?.blocking ?? [],
+        slack_minutes: extra?.slack_minutes ?? null,
+      };
+    });
+  }, [scope]);
+
   const loadProjects = useCallback(async () => {
     setProjectsError(null);
     setProjectsLoading(true);
@@ -246,6 +295,40 @@ const ListView: FC<ListViewProps> = ({
     void loadProjects();
   }, [loadProjects, refreshToken]);
 
+  useEffect(() => {
+    if (scope.kind !== "project" || !scope.projectId) {
+      setArchivedItems([]);
+      setArchivedError(null);
+      setArchivedLoading(false);
+      return;
+    }
+    let isMounted = true;
+    setArchivedLoading(true);
+    setArchivedError(null);
+    loadArchivedItems()
+      .then((archived) => {
+        if (!isMounted) {
+          return;
+        }
+        setArchivedItems(archived);
+      })
+      .catch((err) => {
+        if (!isMounted) {
+          return;
+        }
+        const message = err instanceof Error ? err.message : "Unknown error";
+        setArchivedError(message);
+      })
+      .finally(() => {
+        if (isMounted) {
+          setArchivedLoading(false);
+        }
+      });
+    return () => {
+      isMounted = false;
+    };
+  }, [loadArchivedItems, refreshToken, scope]);
+
   const viewModel = useMemo(
     () =>
       buildListViewModel({
@@ -268,6 +351,190 @@ const ListView: FC<ListViewProps> = ({
     ungroupedParentId,
     getAllTasksUnderMilestone,
   } = viewModel;
+
+  const archivedItemById = useMemo(() => {
+    const map = new Map<string, ListViewItem>();
+    for (const item of archivedItems) {
+      map.set(item.id, item);
+    }
+    return map;
+  }, [archivedItems]);
+
+  const getItemRecord = useCallback(
+    (itemId: string) => itemById.get(itemId) ?? archivedItemById.get(itemId),
+    [archivedItemById, itemById]
+  );
+
+  const [collapsedMilestones, setCollapsedMilestones] = useState<Set<string>>(
+    () => new Set()
+  );
+  const [collapsedTasks, setCollapsedTasks] = useState<Set<string>>(
+    () => new Set()
+  );
+  const [collapsedUngrouped, setCollapsedUngrouped] = useState(false);
+
+  useEffect(() => {
+    setCollapsedMilestones((prev) => {
+      const milestoneIds = new Set(milestones.map((milestone) => milestone.id));
+      return new Set(Array.from(prev).filter((id) => milestoneIds.has(id)));
+    });
+  }, [milestones]);
+
+  useEffect(() => {
+    setCollapsedTasks((prev) => {
+      const taskIds = new Set(tasks.map((task) => task.id));
+      return new Set(Array.from(prev).filter((id) => taskIds.has(id)));
+    });
+  }, [tasks]);
+
+  const visibleRowIds = useMemo(() => {
+    const rows: string[] = [];
+    const pushTask = (task: ListViewItem) => {
+      rows.push(task.id);
+      if (!collapsedTasks.has(task.id)) {
+        const children = taskChildren.get(task.id) ?? [];
+        for (const child of children) {
+          rows.push(child.id);
+        }
+      }
+    };
+    if (!collapsedUngrouped) {
+      for (const task of ungroupedTasks) {
+        pushTask(task);
+      }
+    }
+    if (!isUserScope) {
+      for (const milestone of milestones) {
+        if (collapsedMilestones.has(milestone.id)) {
+          continue;
+        }
+        const tasksForMilestone = tasksUnderMilestone.get(milestone.id) ?? [];
+        for (const task of tasksForMilestone) {
+          pushTask(task);
+        }
+      }
+      if (!archiveCollapsed) {
+        for (const task of archivedItems) {
+          rows.push(task.id);
+        }
+      }
+    }
+    return rows;
+  }, [
+    archiveCollapsed,
+    archivedItems,
+    collapsedMilestones,
+    collapsedTasks,
+    collapsedUngrouped,
+    isUserScope,
+    milestones,
+    taskChildren,
+    tasksUnderMilestone,
+    ungroupedTasks,
+  ]);
+
+  const rowIndexMap = useMemo(() => {
+    const map = new Map<string, number>();
+    visibleRowIds.forEach((id, index) => {
+      map.set(id, index);
+    });
+    return map;
+  }, [visibleRowIds]);
+
+  useEffect(() => {
+    setSelectedIds((prev) => {
+      if (prev.size === 0) {
+        return prev;
+      }
+      const allowed = new Set(visibleRowIds);
+      const next = new Set(Array.from(prev).filter((id) => allowed.has(id)));
+      return next.size === prev.size ? prev : next;
+    });
+    setLastFocusedIndex((prev) => {
+      if (prev === null) {
+        return prev;
+      }
+      if (prev >= visibleRowIds.length) {
+        return visibleRowIds.length > 0 ? visibleRowIds.length - 1 : null;
+      }
+      return prev;
+    });
+  }, [visibleRowIds]);
+
+  const isInteractiveElement = (target: EventTarget | null) => {
+    if (!(target instanceof Element)) {
+      return false;
+    }
+    return Boolean(
+      target.closest(
+        "button, a, input, textarea, select, [role='button'], [contenteditable='true'], .context-menu-content, .drag-handle"
+      )
+    );
+  };
+
+  const clearSelection = useCallback(() => {
+    setSelectedIds(new Set());
+    setLastFocusedIndex(null);
+  }, []);
+
+  const handleRowClick = useCallback(
+    (event: React.MouseEvent, itemId: string) => {
+      if (event.button === 2) {
+        return;
+      }
+      if (dragging) {
+        return;
+      }
+      if (isInteractiveElement(event.target)) {
+        return;
+      }
+      event.preventDefault();
+      event.stopPropagation();
+      const rowIndex = rowIndexMap.get(itemId);
+      if (rowIndex === undefined) {
+        return;
+      }
+      setSelectedIds((prev) => {
+        const next = new Set(prev);
+        if (event.shiftKey && lastFocusedIndex !== null) {
+          next.clear();
+          const start = Math.min(lastFocusedIndex, rowIndex);
+          const end = Math.max(lastFocusedIndex, rowIndex);
+          for (let i = start; i <= end; i += 1) {
+            const id = visibleRowIds[i];
+            if (id) {
+              next.add(id);
+            }
+          }
+        } else if (event.metaKey || event.ctrlKey) {
+          if (next.has(itemId)) {
+            next.delete(itemId);
+          } else {
+            next.add(itemId);
+          }
+        } else {
+          next.clear();
+          next.add(itemId);
+        }
+        return next;
+      });
+      setLastFocusedIndex(rowIndex);
+    },
+    [dragging, lastFocusedIndex, rowIndexMap, visibleRowIds]
+  );
+
+  const handleBackgroundMouseDown = useCallback(
+    (event: React.MouseEvent) => {
+      if (isInteractiveElement(event.target)) {
+        return;
+      }
+      const target = event.target as Element;
+      if (!target.closest("tr")) {
+        clearSelection();
+      }
+    },
+    [clearSelection]
+  );
 
   const handleToggleTaskDone = useCallback(
     async (item: ListViewItem, checked: boolean) => {
@@ -357,6 +624,7 @@ const ListView: FC<ListViewProps> = ({
           projectId: targetProjectId,
           includeDone: true,
           includeCanceled: true,
+          archiveFilter: "active",
         });
         const siblingMax = list.items
           .filter((candidate) => candidate.parent_id === targetParentId)
@@ -511,6 +779,58 @@ const ListView: FC<ListViewProps> = ({
     }
     return parts.join("; ");
   };
+
+  const handleArchive = useCallback(
+    async (item: ListItem) => {
+      if (!confirm(`Archive ${item.title}? This hides its descendants.`)) {
+        return;
+      }
+      setError(null);
+      try {
+        await archiveItem(item.id);
+        onRefresh();
+      } catch (err) {
+        const message = err instanceof Error ? err.message : "Unknown error";
+        setError(message);
+      }
+    },
+    [onRefresh]
+  );
+
+  const handleRestore = useCallback(
+    async (item: ListItem) => {
+      setError(null);
+      try {
+        await restoreItem(item.id);
+        onRefresh();
+      } catch (err) {
+        const message = err instanceof Error ? err.message : "Unknown error";
+        setError(message);
+      }
+    },
+    [onRefresh]
+  );
+
+  const handleDeletePermanent = useCallback(
+    async (item: ListItem) => {
+      if (
+        !confirm(
+          `Delete ${item.title} permanently? This removes all descendants.`
+        )
+      ) {
+        return;
+      }
+      setError(null);
+      try {
+        await deleteItem(item.id);
+        onRefresh();
+      } catch (err) {
+        const message = err instanceof Error ? err.message : "Unknown error";
+        setError(message);
+      }
+    },
+    [onRefresh]
+  );
 
   const columns = useMemo<Column[]>(
     () => [
@@ -738,16 +1058,36 @@ const ListView: FC<ListViewProps> = ({
         key: "delete",
         label: "",
         minWidth: 80,
-        render: (item: ListViewItem) => (
-          <AppButton
-            type="button"
-            size="1"
-            variant="ghost"
-            onClick={() => handleDelete(item)}
-          >
-            Delete
-          </AppButton>
-        ),
+        render: (item: ListViewItem) =>
+          item.archived_at ? (
+            <div className="archive-actions">
+              <AppButton
+                type="button"
+                size="1"
+                variant="ghost"
+                onClick={() => handleRestore(item)}
+              >
+                Restore
+              </AppButton>
+              <AppButton
+                type="button"
+                size="1"
+                variant="ghost"
+                onClick={() => handleDeletePermanent(item)}
+              >
+                Delete
+              </AppButton>
+            </div>
+          ) : (
+            <AppButton
+              type="button"
+              size="1"
+              variant="ghost"
+              onClick={() => handleArchive(item)}
+            >
+              Archive
+            </AppButton>
+          ),
       },
     ],
     [
@@ -758,182 +1098,44 @@ const ListView: FC<ListViewProps> = ({
       formatSlackMinutes,
       editingAssigneeId,
       handleAssigneeChange,
+      handleArchive,
+      handleDeletePermanent,
+      handleRestore,
     ]
   );
 
-  const [collapsedMilestones, setCollapsedMilestones] = useState<Set<string>>(
-    () => new Set()
-  );
-  const [collapsedTasks, setCollapsedTasks] = useState<Set<string>>(
-    () => new Set()
-  );
-  const [collapsedUngrouped, setCollapsedUngrouped] = useState(false);
-
-  useEffect(() => {
-    setCollapsedMilestones((prev) => {
-      const milestoneIds = new Set(milestones.map((milestone) => milestone.id));
-      return new Set(Array.from(prev).filter((id) => milestoneIds.has(id)));
-    });
-  }, [milestones]);
-
-  useEffect(() => {
-    setCollapsedTasks((prev) => {
-      const taskIds = new Set(tasks.map((task) => task.id));
-      return new Set(Array.from(prev).filter((id) => taskIds.has(id)));
-    });
-  }, [tasks]);
-
-  const visibleRowIds = useMemo(() => {
-    const rows: string[] = [];
-    const pushTask = (task: ListViewItem) => {
-      rows.push(task.id);
-      if (!collapsedTasks.has(task.id)) {
-        const children = taskChildren.get(task.id) ?? [];
-        for (const child of children) {
-          rows.push(child.id);
-        }
-      }
-    };
-    if (!collapsedUngrouped) {
-      for (const task of ungroupedTasks) {
-        pushTask(task);
-      }
-    }
-    if (!isUserScope) {
-      for (const milestone of milestones) {
-        if (collapsedMilestones.has(milestone.id)) {
-          continue;
-        }
-        const tasksForMilestone = tasksUnderMilestone.get(milestone.id) ?? [];
-        for (const task of tasksForMilestone) {
-          pushTask(task);
-        }
-      }
-    }
-    return rows;
-  }, [
-    collapsedMilestones,
-    collapsedTasks,
-    collapsedUngrouped,
-    isUserScope,
-    milestones,
-    taskChildren,
-    tasksUnderMilestone,
-    ungroupedTasks,
-  ]);
-
-  const rowIndexMap = useMemo(() => {
-    const map = new Map<string, number>();
-    visibleRowIds.forEach((id, index) => {
-      map.set(id, index);
-    });
-    return map;
-  }, [visibleRowIds]);
-
-  useEffect(() => {
-    setSelectedIds((prev) => {
-      if (prev.size === 0) {
-        return prev;
-      }
-      const allowed = new Set(visibleRowIds);
-      const next = new Set(
-        Array.from(prev).filter((id) => allowed.has(id))
-      );
-      return next.size === prev.size ? prev : next;
-    });
-    setLastFocusedIndex((prev) => {
-      if (prev === null) {
-        return prev;
-      }
-      if (prev >= visibleRowIds.length) {
-        return visibleRowIds.length > 0 ? visibleRowIds.length - 1 : null;
-      }
-      return prev;
-    });
-  }, [visibleRowIds]);
-
-  const isInteractiveElement = (target: EventTarget | null) => {
-    if (!(target instanceof Element)) {
-      return false;
-    }
-    return Boolean(
-      target.closest(
-        "button, a, input, textarea, select, [role='button'], [contenteditable='true'], .context-menu-content, .drag-handle"
-      )
-    );
-  };
-
-  const clearSelection = useCallback(() => {
-    setSelectedIds(new Set());
-    setLastFocusedIndex(null);
-  }, []);
-
-  const handleRowClick = useCallback(
-    (event: React.MouseEvent, itemId: string) => {
-      if (event.button === 2) {
-        return;
-      }
-      if (dragging) {
-        return;
-      }
-      if (isInteractiveElement(event.target)) {
-        return;
-      }
-      const rowIndex = rowIndexMap.get(itemId);
-      if (rowIndex === undefined) {
-        return;
-      }
-      setSelectedIds((prev) => {
-        const next = new Set(prev);
-        if (event.shiftKey && lastFocusedIndex !== null) {
-          next.clear();
-          const start = Math.min(lastFocusedIndex, rowIndex);
-          const end = Math.max(lastFocusedIndex, rowIndex);
-          for (let i = start; i <= end; i += 1) {
-            const id = visibleRowIds[i];
-            if (id) {
-              next.add(id);
-            }
-          }
-        } else if (event.metaKey || event.ctrlKey) {
-          if (next.has(itemId)) {
-            next.delete(itemId);
-          } else {
-            next.add(itemId);
-          }
-        } else {
-          next.clear();
-          next.add(itemId);
-        }
-        return next;
-      });
-      setLastFocusedIndex(rowIndex);
-    },
-    [dragging, lastFocusedIndex, rowIndexMap, visibleRowIds]
-  );
-
-  const handleBackgroundMouseDown = useCallback(
-    (event: React.MouseEvent) => {
-      if (isInteractiveElement(event.target)) {
-        return;
-      }
-      const target = event.target as Element;
-      if (!target.closest("tr")) {
-        clearSelection();
-      }
-    },
-    [clearSelection]
-  );
-
-  const handleBulkDelete = useCallback(async () => {
+  const handleBulkArchive = useCallback(async () => {
     if (selectedIds.size === 0) {
       return;
     }
     const count = selectedIds.size;
     const confirmText =
       count === 1
-        ? "Delete this item? This removes all descendants."
-        : `Delete ${count} items? This removes all descendants.`;
+        ? "Archive this item? This hides its descendants."
+        : `Archive ${count} items? This hides their descendants.`;
+    if (!confirm(confirmText)) {
+      return;
+    }
+    setError(null);
+    try {
+      await archiveItems(Array.from(selectedIds));
+      clearSelection();
+      onRefresh();
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Unknown error";
+      setError(message);
+    }
+  }, [clearSelection, onRefresh, selectedIds]);
+
+  const handleBulkDeletePermanent = useCallback(async () => {
+    if (selectedIds.size === 0) {
+      return;
+    }
+    const count = selectedIds.size;
+    const confirmText =
+      count === 1
+        ? "Delete permanently? This removes all descendants."
+        : `Delete ${count} items permanently? This removes all descendants.`;
     if (!confirm(confirmText)) {
       return;
     }
@@ -948,6 +1150,64 @@ const ListView: FC<ListViewProps> = ({
     }
   }, [clearSelection, onRefresh, selectedIds]);
 
+  const getActionIds = useCallback(
+    (itemId: string) =>
+      selectedIds.has(itemId) ? Array.from(selectedIds) : [itemId],
+    [selectedIds]
+  );
+
+  const handleContextArchive = useCallback(
+    async (item: ListViewItem) => {
+      const ids = getActionIds(item.id);
+      const count = ids.length;
+      const confirmText =
+        count === 1
+          ? "Archive this item? This hides its descendants."
+          : `Archive ${count} items? This hides their descendants.`;
+      if (!confirm(confirmText)) {
+        return;
+      }
+      setError(null);
+      try {
+        await archiveItems(ids);
+        if (ids.length > 1) {
+          clearSelection();
+        }
+        onRefresh();
+      } catch (err) {
+        const message = err instanceof Error ? err.message : "Unknown error";
+        setError(message);
+      }
+    },
+    [clearSelection, getActionIds, onRefresh]
+  );
+
+  const handleContextDeletePermanent = useCallback(
+    async (item: ListViewItem) => {
+      const ids = getActionIds(item.id);
+      const count = ids.length;
+      const confirmText =
+        count === 1
+          ? "Delete permanently? This removes all descendants."
+          : `Delete ${count} items permanently? This removes all descendants.`;
+      if (!confirm(confirmText)) {
+        return;
+      }
+      setError(null);
+      try {
+        await deleteItems(ids);
+        if (ids.length > 1) {
+          clearSelection();
+        }
+        onRefresh();
+      } catch (err) {
+        const message = err instanceof Error ? err.message : "Unknown error";
+        setError(message);
+      }
+    },
+    [clearSelection, getActionIds, onRefresh]
+  );
+
   useEffect(() => {
     const handler = (event: KeyboardEvent) => {
       const target = event.target as Element | null;
@@ -961,7 +1221,7 @@ const ListView: FC<ListViewProps> = ({
       if (event.key === "Backspace" || event.key === "Delete") {
         if (selectedIds.size > 0) {
           event.preventDefault();
-          void handleBulkDelete();
+          void handleBulkArchive();
         }
         return;
       }
@@ -977,21 +1237,7 @@ const ListView: FC<ListViewProps> = ({
     return () => {
       window.removeEventListener("keydown", handler);
     };
-  }, [clearSelection, handleBulkDelete, selectedIds, visibleRowIds]);
-
-  const handleDelete = async (item: ListItem) => {
-    if (!confirm(`Delete ${item.title}? This removes all descendants.`)) {
-      return;
-    }
-    setError(null);
-    try {
-      await deleteItem(item.id);
-      onRefresh();
-    } catch (err) {
-      const message = err instanceof Error ? err.message : "Unknown error";
-      setError(message);
-    }
-  };
+  }, [clearSelection, handleBulkArchive, selectedIds, visibleRowIds]);
 
   const handleRename = async (item: ListItem) => {
     const nextTitle = prompt("Rename item", item.title);
@@ -1874,7 +2120,7 @@ const ListView: FC<ListViewProps> = ({
 
   const canMoveTaskToParent = useCallback(
     (itemId: string, targetParentId: string | null) => {
-      const item = itemById.get(itemId);
+      const item = getItemRecord(itemId);
       if (!item || item.type !== "task") {
         return false;
       }
@@ -1886,7 +2132,47 @@ const ListView: FC<ListViewProps> = ({
       }
       return true;
     },
-    [isDescendant, itemById]
+    [getItemRecord, isDescendant]
+  );
+
+  const getDragItemIds = useCallback(
+    (itemId: string) => {
+      const record = getItemRecord(itemId);
+      if (!record || record.type !== "task") {
+        return [itemId];
+      }
+      if (!selectedIds.has(itemId)) {
+        return [itemId];
+      }
+      const selectedTasks = Array.from(selectedIds).filter((id) => {
+        const entry = getItemRecord(id);
+        return entry?.type === "task";
+      });
+      return selectedTasks.length > 0 ? selectedTasks : [itemId];
+    },
+    [getItemRecord, selectedIds]
+  );
+
+  const sortDragIds = useCallback(
+    (itemIds: string[]) =>
+      [...itemIds].sort((a, b) => {
+        const aIndex = rowIndexMap.get(a) ?? 0;
+        const bIndex = rowIndexMap.get(b) ?? 0;
+        return aIndex - bIndex;
+      }),
+    [rowIndexMap]
+  );
+
+  const restoreArchivedItemsIfNeeded = useCallback(
+    async (itemIds: string[]) => {
+      const archivedIds = itemIds.filter(
+        (id) => getItemRecord(id)?.archived_at
+      );
+      if (archivedIds.length > 0) {
+        await restoreItems(archivedIds);
+      }
+    },
+    [getItemRecord]
   );
 
   const handleMoveToParent = async (
@@ -1895,6 +2181,7 @@ const ListView: FC<ListViewProps> = ({
   ) => {
     setError(null);
     try {
+      await restoreArchivedItemsIfNeeded([itemId]);
       await updateItemFields(itemId, { parent_id: targetParentId });
       onRefresh();
     } catch (err) {
@@ -1916,6 +2203,7 @@ const ListView: FC<ListViewProps> = ({
 
     setError(null);
     try {
+      await restoreArchivedItemsIfNeeded([itemId]);
       await updateItemFields(itemId, {
         parent_id: targetParentId,
         sort_order: nextSort,
@@ -1937,6 +2225,7 @@ const ListView: FC<ListViewProps> = ({
     const nextSort = maxSort + 1;
     setError(null);
     try {
+      await restoreArchivedItemsIfNeeded([itemId]);
       await updateItemFields(itemId, {
         parent_id: targetParentId,
         sort_order: nextSort,
@@ -1955,10 +2244,43 @@ const ListView: FC<ListViewProps> = ({
   ) => {
     setError(null);
     try {
+      await restoreArchivedItemsIfNeeded([itemId]);
       await updateItemFields(itemId, {
         parent_id: targetParentId,
         sort_order: sortOrder,
       });
+      onRefresh();
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Unknown error";
+      setError(message);
+    }
+  };
+
+  const handleMoveMany = async (
+    itemIds: string[],
+    targetParentId: string | null,
+    startSortOrder?: number
+  ) => {
+    if (itemIds.length === 0) {
+      return;
+    }
+    const orderedIds = sortDragIds(itemIds);
+    const siblings = targetParentId
+      ? taskChildren.get(targetParentId) ?? []
+      : [];
+    const sortOrders = siblings.map((task) => task.sort_order);
+    const baseSort =
+      startSortOrder ??
+      (sortOrders.length > 0 ? Math.max(...sortOrders) + 1 : 1);
+    setError(null);
+    try {
+      await restoreArchivedItemsIfNeeded(orderedIds);
+      for (let i = 0; i < orderedIds.length; i += 1) {
+        await updateItemFields(orderedIds[i], {
+          parent_id: targetParentId,
+          sort_order: baseSort + i,
+        });
+      }
       onRefresh();
     } catch (err) {
       const message = err instanceof Error ? err.message : "Unknown error";
@@ -1971,7 +2293,7 @@ const ListView: FC<ListViewProps> = ({
   ) => {
     event.dataTransfer.effectAllowed = "move";
     event.dataTransfer.setData("text/plain", itemId);
-    setDragging({ itemId, groupKey });
+    setDragging({ itemId, itemIds: getDragItemIds(itemId), groupKey });
   };
 
   const handleDragEnd = () => {
@@ -1987,18 +2309,21 @@ const ListView: FC<ListViewProps> = ({
     if (dragging.groupKey === groupKey) {
       return true;
     }
-    const targetItem = itemById.get(itemId);
+    const targetItem = getItemRecord(itemId);
     if (!targetItem) {
       return false;
     }
+    const canMoveAll = dragging.itemIds.every((id) =>
+      canMoveTaskToParent(id, targetItem.type === "task" ? itemId : targetItem.parent_id ?? null)
+    );
     if (
       targetItem.type === "task" &&
-      canMoveTaskToParent(dragging.itemId, targetItem.id)
+      canMoveAll
     ) {
       return true;
     }
     const targetParentId = targetItem.parent_id ?? null;
-    return canMoveTaskToParent(dragging.itemId, targetParentId);
+    return dragging.itemIds.every((id) => canMoveTaskToParent(id, targetParentId));
   };
 
   const handleDragOverRow = (itemId: string, groupKey: string) => (
@@ -2012,12 +2337,12 @@ const ListView: FC<ListViewProps> = ({
     const midpoint = rect.top + rect.height / 2;
     const upperZone = rect.top + rect.height * 0.25;
     const lowerZone = rect.top + rect.height * 0.75;
-    const targetItem = itemById.get(itemId);
+    const targetItem = getItemRecord(itemId);
     const canNestInto =
       dragging &&
       targetItem?.type === "task" &&
       dragging.groupKey !== groupKey &&
-      canMoveTaskToParent(dragging.itemId, itemId);
+      dragging.itemIds.every((id) => canMoveTaskToParent(id, itemId));
     if (canNestInto && event.clientY > upperZone && event.clientY < lowerZone) {
       setDragOver({ itemId, groupKey, position: "into" });
       return;
@@ -2033,7 +2358,7 @@ const ListView: FC<ListViewProps> = ({
     if (!dragging) {
       return;
     }
-    if (!canMoveTaskToParent(dragging.itemId, targetParentId)) {
+    if (!dragging.itemIds.every((id) => canMoveTaskToParent(id, targetParentId))) {
       return;
     }
     event.preventDefault();
@@ -2050,11 +2375,15 @@ const ListView: FC<ListViewProps> = ({
     if (!dragging) {
       return;
     }
-    if (!canMoveTaskToParent(dragging.itemId, targetParentId)) {
+    if (!dragging.itemIds.every((id) => canMoveTaskToParent(id, targetParentId))) {
       return;
     }
     event.preventDefault();
-    void handleMoveToParent(dragging.itemId, targetParentId);
+    if (dragging.itemIds.length > 1) {
+      void handleMoveMany(dragging.itemIds, targetParentId ?? null);
+    } else {
+      void handleMoveToParent(dragging.itemId, targetParentId);
+    }
     setDragOver(null);
   };
 
@@ -2066,11 +2395,11 @@ const ListView: FC<ListViewProps> = ({
       handleDragOverRow(milestoneId, "milestones")(event);
       return;
     }
-    const draggingItem = itemById.get(dragging.itemId);
+    const draggingItem = getItemRecord(dragging.itemId);
     if (!draggingItem || draggingItem.type !== "task") {
       return;
     }
-    if (!canMoveTaskToParent(dragging.itemId, milestoneId)) {
+    if (!dragging.itemIds.every((id) => canMoveTaskToParent(id, milestoneId))) {
       return;
     }
     event.preventDefault();
@@ -2091,11 +2420,23 @@ const ListView: FC<ListViewProps> = ({
     }
     if (milestoneDrop?.milestoneId === milestoneId) {
       event.preventDefault();
-      void handleMoveToParentAtPosition(
-        dragging.itemId,
-        milestoneId,
-        milestoneDrop.position
-      );
+      if (dragging.itemIds.length > 1) {
+        const siblings = taskChildren.get(milestoneId) ?? [];
+        const sortOrders = siblings.map((task) => task.sort_order);
+        const minSort = sortOrders.length > 0 ? Math.min(...sortOrders) : 0;
+        const maxSort = sortOrders.length > 0 ? Math.max(...sortOrders) : 0;
+        const baseSort =
+          milestoneDrop.position === "top"
+            ? minSort - dragging.itemIds.length
+            : maxSort + 1;
+        void handleMoveMany(dragging.itemIds, milestoneId, baseSort);
+      } else {
+        void handleMoveToParentAtPosition(
+          dragging.itemId,
+          milestoneId,
+          milestoneDrop.position
+        );
+      }
       setMilestoneDrop(null);
       return;
     }
@@ -2113,18 +2454,28 @@ const ListView: FC<ListViewProps> = ({
       return;
     }
     event.preventDefault();
-    const targetItem = itemById.get(itemId);
+    const targetItem = getItemRecord(itemId);
     const parentId = targetItem?.parent_id ?? null;
-    if (dragging.itemId === itemId) {
+    if (dragging.itemIds.includes(itemId)) {
       return;
     }
     if (dragging.groupKey === groupKey) {
-      void handleMove(dragging.itemId, parentId, itemId, undefined);
+      if (dragging.itemIds.length > 1) {
+        const targetSort = targetItem?.sort_order ?? 0;
+        const startSort = targetSort - dragging.itemIds.length;
+        void handleMoveMany(dragging.itemIds, parentId, startSort);
+      } else {
+        void handleMove(dragging.itemId, parentId, itemId, undefined);
+      }
       setDragOver(null);
       return;
     }
     const targetSort = targetItem?.sort_order ?? 0;
-    void handleMoveAcrossParents(dragging.itemId, parentId, targetSort - 1);
+    if (dragging.itemIds.length > 1) {
+      void handleMoveMany(dragging.itemIds, parentId, targetSort - dragging.itemIds.length);
+    } else {
+      void handleMoveAcrossParents(dragging.itemId, parentId, targetSort - 1);
+    }
     setDragOver(null);
   };
 
@@ -2138,18 +2489,27 @@ const ListView: FC<ListViewProps> = ({
       return;
     }
     event.preventDefault();
-    const targetItem = itemById.get(itemId);
+    const targetItem = getItemRecord(itemId);
     const parentId = targetItem?.parent_id ?? null;
-    if (dragging.itemId === itemId) {
+    if (dragging.itemIds.includes(itemId)) {
       return;
     }
     if (dragging.groupKey === groupKey) {
-      void handleMove(dragging.itemId, parentId, undefined, itemId);
+      if (dragging.itemIds.length > 1) {
+        const targetSort = targetItem?.sort_order ?? 0;
+        void handleMoveMany(dragging.itemIds, parentId, targetSort + 1);
+      } else {
+        void handleMove(dragging.itemId, parentId, undefined, itemId);
+      }
       setDragOver(null);
       return;
     }
     const targetSort = targetItem?.sort_order ?? 0;
-    void handleMoveAcrossParents(dragging.itemId, parentId, targetSort + 1);
+    if (dragging.itemIds.length > 1) {
+      void handleMoveMany(dragging.itemIds, parentId, targetSort + 1);
+    } else {
+      void handleMoveAcrossParents(dragging.itemId, parentId, targetSort + 1);
+    }
     setDragOver(null);
   };
 
@@ -2158,8 +2518,12 @@ const ListView: FC<ListViewProps> = ({
   ) => {
     if (dragOver?.position === "into") {
       event.preventDefault();
-      if (dragging && canMoveTaskToParent(dragging.itemId, itemId)) {
-        void handleMoveToParentAppend(dragging.itemId, itemId);
+      if (dragging && dragging.itemIds.every((id) => canMoveTaskToParent(id, itemId))) {
+        if (dragging.itemIds.length > 1) {
+          void handleMoveMany(dragging.itemIds, itemId);
+        } else {
+          void handleMoveToParentAppend(dragging.itemId, itemId);
+        }
       }
       setDragOver(null);
       return;
@@ -2182,7 +2546,7 @@ const ListView: FC<ListViewProps> = ({
     const allowDrop =
       dragging.groupKey === groupKey ||
       (groupKey !== "milestones" &&
-        canMoveTaskToParent(dragging.itemId, parentId));
+        dragging.itemIds.every((id) => canMoveTaskToParent(id, parentId)));
     if (!allowDrop) {
       return;
     }
@@ -2245,8 +2609,15 @@ const ListView: FC<ListViewProps> = ({
         <div className="bulk-action-bar">
           <div>{selectedIds.size} selected</div>
           <div className="bulk-action-buttons">
-            <AppButton type="button" variant="surface" onClick={handleBulkDelete}>
-              Delete
+            <AppButton type="button" variant="surface" onClick={handleBulkArchive}>
+              Archive
+            </AppButton>
+            <AppButton
+              type="button"
+              variant="ghost"
+              onClick={handleBulkDeletePermanent}
+            >
+              Delete permanently
             </AppButton>
             <AppButton type="button" variant="ghost" onClick={clearSelection}>
               Clear
@@ -2390,9 +2761,15 @@ const ListView: FC<ListViewProps> = ({
                                   </ContextMenu.Item>
                                   <ContextMenu.Item
                                     className="context-menu-item"
-                                    onSelect={() => handleDelete(item)}
+                                    onSelect={() => handleContextArchive(item)}
                                   >
-                                    Delete task
+                                    Archive task
+                                  </ContextMenu.Item>
+                                  <ContextMenu.Item
+                                    className="context-menu-item"
+                                    onSelect={() => handleContextDeletePermanent(item)}
+                                  >
+                                    Delete permanently
                                   </ContextMenu.Item>
                                   <ContextMenu.Item
                                     className="context-menu-item"
@@ -2472,9 +2849,17 @@ const ListView: FC<ListViewProps> = ({
                                         </ContextMenu.Item>
                                         <ContextMenu.Item
                                           className="context-menu-item"
-                                          onSelect={() => handleDelete(child)}
+                                          onSelect={() => handleContextArchive(child)}
                                         >
-                                          Delete task
+                                          Archive task
+                                        </ContextMenu.Item>
+                                        <ContextMenu.Item
+                                          className="context-menu-item"
+                                          onSelect={() =>
+                                            handleContextDeletePermanent(child)
+                                          }
+                                        >
+                                          Delete permanently
                                         </ContextMenu.Item>
                                         <ContextMenu.Item
                                           className="context-menu-item"
@@ -2577,7 +2962,7 @@ const ListView: FC<ListViewProps> = ({
                       <ContextMenu.Root>
                         <ContextMenu.Trigger asChild>
                           <tr
-                            className={
+                            className={[
                               dragOver &&
                               ((dragOver.groupKey === "milestones" &&
                                 dragOver.itemId === milestone.id) ||
@@ -2587,10 +2972,15 @@ const ListView: FC<ListViewProps> = ({
                                   ? milestoneDrop.position === "top"
                                     ? "group-row milestone-drop-top"
                                     : "group-row milestone-drop-bottom"
-                                  : "group-row"
-                            }
+                                  : "group-row",
+                              selectedIds.has(milestone.id) ? "row-selected" : "",
+                              activeRowId === milestone.id ? "row-active" : "",
+                            ]
+                              .filter(Boolean)
+                              .join(" ")}
                             onDragOver={handleMilestoneDragOver(milestone.id)}
                             onDrop={handleMilestoneDrop(milestone.id)}
+                            onClick={(event) => handleRowClick(event, milestone.id)}
                           >
                             {columns.map((column) => (
                               <td key={`${milestone.id}-${column.key}`}>
@@ -2622,9 +3012,17 @@ const ListView: FC<ListViewProps> = ({
                             <ContextMenu.Separator className="context-menu-separator" />
                             <ContextMenu.Item
                               className="context-menu-item"
-                              onSelect={() => handleDelete(milestone)}
+                              onSelect={() => handleContextArchive(milestone)}
                             >
-                              Delete milestone
+                              Archive milestone
+                            </ContextMenu.Item>
+                            <ContextMenu.Item
+                              className="context-menu-item"
+                              onSelect={() =>
+                                handleContextDeletePermanent(milestone)
+                              }
+                            >
+                              Delete permanently
                             </ContextMenu.Item>
                           </ContextMenu.Content>
                         </ContextMenu.Portal>
@@ -2667,7 +3065,7 @@ const ListView: FC<ListViewProps> = ({
                                 <ContextMenu.Root>
                                   <ContextMenu.Trigger asChild>
                                     <tr
-                                      className={
+                                      className={[
                                         dragOver?.itemId === item.id &&
                                         dragOver.groupKey === groupKey
                                           ? dragOver.position === "into"
@@ -2675,8 +3073,13 @@ const ListView: FC<ListViewProps> = ({
                                             : dragOver.position === "after"
                                               ? "drag-over-bottom"
                                               : "drag-over-top"
-                                          : undefined
-                                      }
+                                          : "",
+                                        selectedIds.has(item.id) ? "row-selected" : "",
+                                        activeRowId === item.id ? "row-active" : "",
+                                      ]
+                                        .filter(Boolean)
+                                        .join(" ")}
+                                      onClick={(event) => handleRowClick(event, item.id)}
                                       onDragOver={handleDragOverRow(item.id, groupKey)}
                                       onDrop={handleDropOnRow(item.id, groupKey)}
                                     >
@@ -2709,9 +3112,17 @@ const ListView: FC<ListViewProps> = ({
                                       </ContextMenu.Item>
                                       <ContextMenu.Item
                                         className="context-menu-item"
-                                        onSelect={() => handleDelete(item)}
+                                        onSelect={() => handleContextArchive(item)}
                                       >
-                                        Delete task
+                                        Archive task
+                                      </ContextMenu.Item>
+                                      <ContextMenu.Item
+                                        className="context-menu-item"
+                                        onSelect={() =>
+                                          handleContextDeletePermanent(item)
+                                        }
+                                      >
+                                        Delete permanently
                                       </ContextMenu.Item>
                                       <ContextMenu.Item
                                         className="context-menu-item"
@@ -2732,7 +3143,7 @@ const ListView: FC<ListViewProps> = ({
                                         <ContextMenu.Root key={child.id}>
                                           <ContextMenu.Trigger asChild>
                                             <tr
-                                              className={
+                                              className={[
                                                 dragOver?.itemId === child.id &&
                                                 dragOver.groupKey === childGroupKey
                                                   ? dragOver.position === "into"
@@ -2740,7 +3151,16 @@ const ListView: FC<ListViewProps> = ({
                                                     : dragOver.position === "after"
                                                       ? "drag-over-bottom"
                                                       : "drag-over-top"
-                                                  : undefined
+                                                  : "",
+                                                selectedIds.has(child.id)
+                                                  ? "row-selected"
+                                                  : "",
+                                                activeRowId === child.id ? "row-active" : "",
+                                              ]
+                                                .filter(Boolean)
+                                                .join(" ")}
+                                              onClick={(event) =>
+                                                handleRowClick(event, child.id)
                                               }
                                               onDragOver={handleDragOverRow(
                                                 child.id,
@@ -2787,9 +3207,19 @@ const ListView: FC<ListViewProps> = ({
                                               </ContextMenu.Item>
                                               <ContextMenu.Item
                                                 className="context-menu-item"
-                                                onSelect={() => handleDelete(child)}
+                                                onSelect={() =>
+                                                  handleContextArchive(child)
+                                                }
                                               >
-                                                Delete task
+                                                Archive task
+                                              </ContextMenu.Item>
+                                              <ContextMenu.Item
+                                                className="context-menu-item"
+                                                onSelect={() =>
+                                                  handleContextDeletePermanent(child)
+                                                }
+                                              >
+                                                Delete permanently
                                               </ContextMenu.Item>
                                               <ContextMenu.Item
                                                 className="context-menu-item"
@@ -2859,6 +3289,90 @@ const ListView: FC<ListViewProps> = ({
                     </Fragment>
                   );
                 })}
+                {!isUserScope ? (
+                  <>
+                    <tr className="group-row archive-row">
+                      <td colSpan={columns.length}>
+                        <AppButton
+                          type="button"
+                          size="1"
+                          variant="ghost"
+                          className="group-toggle"
+                          onClick={() => setArchiveCollapsed((prev) => !prev)}
+                        >
+                          {archiveCollapsed ? "▶" : "▼"} Archive (
+                          {archivedItems.length})
+                        </AppButton>
+                      </td>
+                    </tr>
+                    {archiveCollapsed ? null : archivedLoading ? (
+                      <tr>
+                        <td colSpan={columns.length} className="list-empty">
+                          Loading archived…
+                        </td>
+                      </tr>
+                    ) : archivedError ? (
+                      <tr>
+                        <td colSpan={columns.length} className="error">
+                          {archivedError}
+                        </td>
+                      </tr>
+                    ) : archivedItems.length === 0 ? (
+                      <tr>
+                        <td colSpan={columns.length} className="list-empty">
+                          Archive is empty
+                        </td>
+                      </tr>
+                    ) : (
+                      archivedItems.map((item) => (
+                        <ContextMenu.Root key={item.id}>
+                          <ContextMenu.Trigger asChild>
+                            <tr
+                              className={[
+                                "archived-row",
+                                selectedIds.has(item.id) ? "row-selected" : "",
+                                activeRowId === item.id ? "row-active" : "",
+                              ]
+                                .filter(Boolean)
+                                .join(" ")}
+                              onClick={(event) => handleRowClick(event, item.id)}
+                            >
+                              {columns.map((column) => (
+                                <td key={`${item.id}-${column.key}`}>
+                                  {renderCell(
+                                    item,
+                                    column,
+                                    item.depth * 16,
+                                    item.type === "task"
+                                      ? renderDragHandle(item.id, "archived")
+                                      : null,
+                                    undefined
+                                  )}
+                                </td>
+                              ))}
+                            </tr>
+                          </ContextMenu.Trigger>
+                          <ContextMenu.Portal>
+                            <ContextMenu.Content className="context-menu-content">
+                              <ContextMenu.Item
+                                className="context-menu-item"
+                                onSelect={() => handleRestore(item)}
+                              >
+                                Restore
+                              </ContextMenu.Item>
+                              <ContextMenu.Item
+                                className="context-menu-item"
+                                onSelect={() => handleDeletePermanent(item)}
+                              >
+                                Delete permanently
+                              </ContextMenu.Item>
+                            </ContextMenu.Content>
+                          </ContextMenu.Portal>
+                        </ContextMenu.Root>
+                      ))
+                    )}
+                  </>
+                ) : null}
               </>
             )}
           </tbody>

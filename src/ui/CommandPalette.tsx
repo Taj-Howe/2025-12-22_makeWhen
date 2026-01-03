@@ -12,6 +12,8 @@ type CommandPaletteProps = {
   onOpenChange: (open: boolean) => void;
   selectedProjectId: string | null;
   onCreated: () => void;
+  onOpenProject?: (projectId: string) => void;
+  onOpenView?: (view: "list" | "calendar" | "kanban" | "gantt" | "dashboard") => void;
 };
 
 
@@ -20,6 +22,8 @@ const CommandPalette: FC<CommandPaletteProps> = ({
   onOpenChange,
   selectedProjectId,
   onCreated,
+  onOpenProject,
+  onOpenView,
 }) => {
   const [inputValue, setInputValue] = useState("");
   const [submitError, setSubmitError] = useState<string | null>(null);
@@ -65,7 +69,12 @@ const CommandPalette: FC<CommandPaletteProps> = ({
     if (token && COMMAND_HELP[token]) {
       return { kind: "command" as const, command: token };
     }
-    if (token && ["create", "edit", "delete"].includes(token)) {
+    if (
+      token &&
+      ["create", "edit", "delete", "schedule", "archive", "restore", "open"].includes(
+        token
+      )
+    ) {
       return { kind: "command" as const, command: token };
     }
     return { kind: "general" as const };
@@ -324,6 +333,114 @@ const CommandPalette: FC<CommandPaletteProps> = ({
       return;
     }
     const value = result.value;
+    if (value.verb === "open") {
+      const nextView = value.openView ?? "list";
+      if (value.openProject) {
+        try {
+          const projectId = await resolveProjectId(value.openProject);
+          onOpenProject?.(projectId);
+        } catch (err) {
+          const message = err instanceof Error ? err.message : "Unknown error";
+          setSubmitError(message);
+          return;
+        }
+      }
+      onOpenView?.(nextView);
+      setSubmitError(null);
+      setInputValue("");
+      onOpenChange(false);
+      return;
+    }
+    if (value.verb === "archive" || value.verb === "restore") {
+      let projectScopeId: string | null = null;
+      if (value.inProject) {
+        try {
+          projectScopeId = await resolveProjectId(value.inProject);
+        } catch (err) {
+          const message = err instanceof Error ? err.message : "Unknown error";
+          setSubmitError(message);
+          return;
+        }
+      }
+      const targetId =
+        value.id ??
+        (value.target
+          ? await resolveTargetId(value.type, value.target, projectScopeId)
+          : null);
+      if (!targetId) {
+        setSubmitError(`${value.verb} requires an id or title`);
+        return;
+      }
+      try {
+        await mutate(value.verb === "archive" ? "item.archive" : "item.restore", {
+          item_id: targetId,
+        });
+        setSubmitError(null);
+        setInputValue("");
+        onOpenChange(false);
+        onCreated();
+      } catch (err) {
+        const message = err instanceof Error ? err.message : "Unknown error";
+        setSubmitError(message);
+      }
+      return;
+    }
+
+    if (value.verb === "schedule") {
+      let projectScopeId: string | null = null;
+      if (value.inProject) {
+        try {
+          projectScopeId = await resolveProjectId(value.inProject);
+        } catch (err) {
+          const message = err instanceof Error ? err.message : "Unknown error";
+          setSubmitError(message);
+          return;
+        }
+      }
+      const targetId =
+        value.id ??
+        (value.target
+          ? await resolveTargetId(value.type, value.target, projectScopeId)
+          : null);
+      if (!targetId) {
+        setSubmitError("Schedule requires an id or title");
+        return;
+      }
+      if (!value.scheduledFor || !value.scheduledDurationMinutes) {
+        setSubmitError("Schedule requires start and duration.");
+        return;
+      }
+      try {
+        const details = await query<{
+          primary_block_id?: string | null;
+        }>("getItemDetails", { itemId: targetId });
+        const blockId = details?.primary_block_id ?? null;
+        if (blockId) {
+          await mutate("scheduled_block.update", {
+            block_id: blockId,
+            start_at: value.scheduledFor,
+            duration_minutes: Math.round(value.scheduledDurationMinutes),
+          });
+        } else {
+          await mutate("scheduled_block.create", {
+            item_id: targetId,
+            start_at: value.scheduledFor,
+            duration_minutes: Math.round(value.scheduledDurationMinutes),
+            locked: 0,
+            source: "manual",
+          });
+        }
+        setSubmitError(null);
+        setInputValue("");
+        onOpenChange(false);
+        onCreated();
+      } catch (err) {
+        const message = err instanceof Error ? err.message : "Unknown error";
+        setSubmitError(message);
+      }
+      return;
+    }
+
     if (value.verb === "delete") {
       let projectScopeId: string | null = null;
       if (value.inProject) {
@@ -834,6 +951,49 @@ const COMMAND_HELP: Record<string, CommandHelpData> = {
       'delete milestone 01H...',
     ],
   },
+  schedule: {
+    title: "schedule",
+    description: "Create or update the primary scheduled block.",
+    props: [
+      "type",
+      "id or \"title\"",
+      "in",
+      "start/start_at",
+      "duration/dur",
+    ],
+    examples: [
+      'schedule task 01H... start:"2026-01-03 09:00" dur:"45m"',
+      'schedule task "Fix bug" in:"Sample Project" start:"2026-01-03 09:00" dur:"45m"',
+    ],
+  },
+  archive: {
+    title: "archive",
+    description: "Archive by id or exact title match.",
+    props: ["type", "id or \"title\"", "in"],
+    examples: [
+      'archive task 01H...',
+      'archive task "Old task" in:"Sample Project"',
+    ],
+  },
+  restore: {
+    title: "restore",
+    description: "Restore an archived item by id or exact title match.",
+    props: ["type", "id or \"title\"", "in"],
+    examples: [
+      'restore task 01H...',
+      'restore task "Old task" in:"Sample Project"',
+    ],
+  },
+  open: {
+    title: "open",
+    description: "Switch view and/or project scope.",
+    props: ["\"project name\" (optional)", "view (optional)"],
+    examples: [
+      'open "Sample Project"',
+      'open "calendar"',
+      'open "Sample Project" "kanban"',
+    ],
+  },
   project: {
     title: "project (alias)",
     description: "Alias for create project.",
@@ -945,29 +1105,36 @@ type CommandHelpData = {
   examples: string[];
 };
 
-const GeneralHelp = () => {
-  return (
-    <div className="palette-help-block">
-      <div className="palette-help-title">Commands</div>
-      <ul className="palette-help-list">
-        <li>create</li>
-        <li>edit</li>
-        <li>delete</li>
-        <li>project (alias)</li>
-        <li>milestone (alias)</li>
-        <li>task (alias)</li>
-        <li>subtask (alias)</li>
-      </ul>
-      <div className="palette-help-title">Examples</div>
-      <ul className="palette-help-list">
-        <li>create task "Write outline" due:"2026-01-03 17:00"</li>
-        <li>create task "Plan sprint" start:"2026-01-03 09:00" dur:"90m"</li>
-        <li>edit task 01H... title:"New title"</li>
-        <li>delete task 01H...</li>
-      </ul>
-    </div>
-  );
-};
+  const GeneralHelp = () => {
+    return (
+      <div className="palette-help-block">
+        <div className="palette-help-title">Commands</div>
+        <ul className="palette-help-list">
+          <li>create</li>
+          <li>edit</li>
+          <li>delete</li>
+          <li>schedule</li>
+          <li>archive</li>
+          <li>restore</li>
+          <li>open</li>
+          <li>project (alias)</li>
+          <li>milestone (alias)</li>
+          <li>task (alias)</li>
+          <li>subtask (alias)</li>
+        </ul>
+        <div className="palette-help-title">Examples</div>
+        <ul className="palette-help-list">
+          <li>create task "Write outline" due:"2026-01-03 17:00"</li>
+          <li>create task "Plan sprint" start:"2026-01-03 09:00" dur:"90m"</li>
+          <li>edit task 01H... title:"New title"</li>
+          <li>delete task 01H...</li>
+          <li>schedule task "Fix bug" start:"2026-01-03 09:00" dur:"45m"</li>
+          <li>archive task "Old task"</li>
+          <li>open "Sample Project" "kanban"</li>
+        </ul>
+      </div>
+    );
+  };
 
 const CommandHelp = ({ command }: { command: string }) => {
   const data = COMMAND_HELP[command];

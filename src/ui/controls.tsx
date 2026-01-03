@@ -5,7 +5,6 @@ import {
   Select,
   Switch,
   TextArea,
-  TextField,
   type ButtonProps,
   type CheckboxProps,
   type IconButtonProps,
@@ -13,6 +12,7 @@ import {
   type SwitchProps,
   type TextAreaProps,
 } from "@radix-ui/themes";
+import * as RadixThemes from "@radix-ui/themes";
 import { forwardRef, type CSSProperties, type ComponentPropsWithoutRef } from "react";
 
 type AppButtonProps = ButtonProps;
@@ -21,13 +21,13 @@ const AppButton = (props: AppButtonProps) => <Button {...props} />;
 type AppIconButtonProps = IconButtonProps;
 const AppIconButton = (props: AppIconButtonProps) => <IconButton {...props} />;
 
-type AppInputProps = ComponentPropsWithoutRef<typeof TextField.Root> & {
+type AppInputProps = ComponentPropsWithoutRef<typeof RadixThemes.TextField.Root> & {
   rootClassName?: string;
   rootStyle?: CSSProperties;
 };
 const AppInput = forwardRef<HTMLInputElement, AppInputProps>(
   ({ rootClassName, rootStyle, className, style, ...props }, ref) => (
-    <TextField.Root
+    <RadixThemes.TextField.Root
       ref={ref}
       className={[className, rootClassName].filter(Boolean).join(" ")}
       style={{ ...(style ?? {}), ...(rootStyle ?? {}) }}
@@ -51,17 +51,31 @@ type AppSelectProps = Omit<SelectProps, "value" | "onValueChange"> & {
   options: AppSelectOption[];
   placeholder?: string;
 };
+const EMPTY_SELECT_VALUE = "__empty__";
+
 const AppSelect = ({
   value,
   onChange,
   options,
   placeholder,
   ...props
-}: AppSelectProps) => (
-  <Select.Root value={value} onValueChange={onChange} {...props}>
+}: AppSelectProps) => {
+  const safeValue =
+    value === undefined ? undefined : value === "" ? EMPTY_SELECT_VALUE : value;
+  const safeOptions = options.map((option) => ({
+    ...option,
+    value: option.value === "" ? EMPTY_SELECT_VALUE : option.value,
+  }));
+  const handleChange = (nextValue: string) => {
+    if (!onChange) return;
+    onChange(nextValue === EMPTY_SELECT_VALUE ? "" : nextValue);
+  };
+
+  return (
+    <Select.Root value={safeValue} onValueChange={handleChange} {...props}>
     <Select.Trigger placeholder={placeholder} />
     <Select.Content>
-      {options.map((option) => (
+      {safeOptions.map((option) => (
         <Select.Item
           key={option.value}
           value={option.value}
@@ -72,7 +86,8 @@ const AppSelect = ({
       ))}
     </Select.Content>
   </Select.Root>
-);
+  );
+};
 
 type AppSwitchProps = SwitchProps;
 const AppSwitch = (props: AppSwitchProps) => <Switch {...props} />;

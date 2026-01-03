@@ -8,14 +8,15 @@ All commands are parsed strictly; unknown keys are errors.
 ```
 [verb] <type> <title?> <key:value>...
 
-verb  := create | edit | delete
+verb  := create | edit | delete | schedule | archive | restore | open
 type  := project | milestone | task | subtask
 title := "Quoted Title" | title:"Quoted Title"
 ```
 
 Notes:
 - If the verb is omitted, it defaults to `create`.
-- For `edit` and `delete`, the target must be:
+- `open` switches view/project scope and does not accept key:value tokens.
+- For `edit`, `delete`, `schedule`, `archive`, and `restore`, the target must be:
   - an id token (first bare token after type), OR
   - `id:<value>`, OR
   - a quoted title (exact match).
@@ -55,6 +56,35 @@ Other:
 - `blockers:` comma list of blocker texts
 - `blocker_kind:` optional kind for added blockers (default `general`)
 
+## ListView field coverage (current)
+
+This CLI supports most *writable* fields shown in the ListView. Some columns are
+computed/read‑only or require separate UI actions.
+
+Writable via CLI:
+- `title` (create/edit)
+- `status` (edit)
+- `priority` (create/edit)
+- `due_at` (create/edit)
+- `estimate_mode`, `estimate_minutes` (create/edit)
+- `tags` (create/edit via `set_item_tags`)
+- `assignee` (create/edit, single‑assignee)
+- `notes` (create/edit)
+- `health`, `health_mode` (create/edit)
+- `dependencies` (create/edit via `dep:` list)
+- `blockers` (create/edit via `blocker:` / `blockers:`)
+- `schedule` (create/edit via `start:` + `dur:`; creates a ScheduledBlock)
+
+Read‑only / computed in ListView (not writable via CLI):
+- `completed_on` (derived from status transitions)
+- `slack` (derived from due_at vs scheduled blocks)
+- `blocked_by` / `blocking` (computed projections from dependency edges)
+- `actual_minutes` (from time entries)
+
+Not supported in CLI (yet):
+- Scheduled block edits (move/resize/delete blocks beyond primary block)
+- Multiple block creation in a single command
+
 ## Date/time formats
 
 - ISO or browser‑parseable date/time strings are accepted:
@@ -67,10 +97,23 @@ Other:
 ## Scheduling rules
 
 - Scheduling creates a `ScheduledBlock` using `{ start_at, duration_minutes }`.
+- Each item can have **only one** scheduled block; scheduling replaces the previous block.
 - If `start` is provided without `dur`, the CLI falls back to
-  `estimate_minutes`. If no estimate is available, it errors.
+  `estimate_minutes` **only for create/edit**. The `schedule` verb requires both.
 - There is no end‑time input; end is derived as `start + duration`.
 - Dependency type defaults to `FS` when not specified.
+
+Schedule verb behavior:
+- `schedule` updates the *primary* scheduled block if one exists, otherwise creates one.
+- Requires both `start` and `dur`.
+
+## Open command
+
+Use `open` to switch views and/or projects:
+- `open "calendar"` switches to the Calendar view for the current scope.
+- `open "Sample Project"` switches to that project and opens the List view.
+- `open "Sample Project" "kanban"` switches project + view.
+- Supported views: list, calendar, kanban, gantt, dashboard.
 
 ## Examples
 
@@ -85,12 +128,25 @@ Edit:
 - `edit task "Weekly sync" in:"Sample Project" priority:2`
 - `edit milestone 01H... due:"2026-01-03 17:00"`
 
+Schedule:
+- `schedule task 01H... start:"2026-01-03 09:00" dur:"45m"`
+- `schedule task "Fix bug" in:"Sample Project" start:"2026-01-03 09:00" dur:"45m"`
+
 Dependencies:
 - `edit task 01H... dep:01A...,01B... dep_type:FS lag:30m`
 
 Delete:
 - `delete task 01H...`
 - `delete task "Old task" in:"Sample Project"`
+
+Archive / restore:
+- `archive task 01H...`
+- `restore task 01H...`
+
+Open:
+- `open "Sample Project"`
+- `open "calendar"`
+- `open "Sample Project" "kanban"`
 
 ## Error behavior (summary)
 

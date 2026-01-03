@@ -15,6 +15,18 @@ export const deleteItem = (id: string) =>
 export const deleteItems = (ids: string[]) =>
   mutate("items.delete_many", { ids });
 
+export const archiveItem = (id: string) =>
+  mutate("item.archive", { item_id: id });
+
+export const archiveItems = (ids: string[]) =>
+  mutate("items.archive_many", { ids });
+
+export const restoreItem = (id: string) =>
+  mutate("item.restore", { item_id: id });
+
+export const restoreItems = (ids: string[]) =>
+  mutate("items.restore_many", { ids });
+
 export const createItem = (args: Record<string, unknown>) =>
   mutate("create_item", args);
 

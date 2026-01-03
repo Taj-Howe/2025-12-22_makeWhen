@@ -642,11 +642,28 @@ const AddItemForm: FC<AddItemFormProps> = ({
     }
   };
 
+  const handleArchiveItem = async () => {
+    if (mode !== "edit" || !selectedItemId) {
+      return;
+    }
+    if (!confirm("Archive this item? This hides its descendants from the list.")) {
+      return;
+    }
+    try {
+      await mutate("item.archive", { item_id: selectedItemId });
+      onRefresh();
+      onDeleted?.();
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Unknown error";
+      setError(message);
+    }
+  };
+
   const handleDeleteItem = async () => {
     if (mode !== "edit" || !selectedItemId) {
       return;
     }
-    if (!confirm("Delete this item? This also deletes its descendants.")) {
+    if (!confirm("Delete permanently? This removes all descendants.")) {
       return;
     }
     try {
@@ -1068,9 +1085,14 @@ const AddItemForm: FC<AddItemFormProps> = ({
       {error ? <div className="error">{error}</div> : null}
       <div className="form-actions">
         {mode === "edit" ? (
-          <AppButton type="button" variant="surface" onClick={handleDeleteItem}>
-            Delete
-          </AppButton>
+          <>
+            <AppButton type="button" variant="surface" onClick={handleArchiveItem}>
+              Archive
+            </AppButton>
+            <AppButton type="button" variant="ghost" onClick={handleDeleteItem}>
+              Delete permanently
+            </AppButton>
+          </>
         ) : null}
         <AppButton
           type="submit"

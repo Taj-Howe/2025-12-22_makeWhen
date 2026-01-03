@@ -330,6 +330,11 @@ const App = () => {
     }
   }, []);
 
+  const handleOpenProjectFromCommand = useCallback((projectId: string) => {
+    setSelectedProjectId(projectId);
+    setScope({ kind: "project", projectId });
+  }, []);
+
   return (
     <ScopeProvider scope={activeScope} setScope={setScope}>
       <div className="app-root">
@@ -477,6 +482,8 @@ const App = () => {
             onOpenChange={setPaletteOpen}
             selectedProjectId={selectedProjectId}
             onCreated={triggerRefresh}
+            onOpenProject={handleOpenProjectFromCommand}
+            onOpenView={setActiveView}
           />
         </main>
         </div>

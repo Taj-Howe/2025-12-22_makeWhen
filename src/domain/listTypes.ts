@@ -7,6 +7,7 @@ export type ListItem = {
   project_id: string;
   sort_order: number;
   due_at: number | null;
+  archived_at?: number | null;
   estimate_mode?: string;
   status: string;
   priority: number;

@@ -1,3 +1,4 @@
+import { SegmentedControl } from "@radix-ui/themes";
 import { useCallback, useEffect, useMemo, useState, type FC } from "react";
 import { query, mutate } from "../rpc/clientSingleton";
 import type {
@@ -7,6 +8,7 @@ import type {
   GanttRangeResult,
 } from "../domain/ganttTypes";
 import type { Scope } from "../domain/scope";
+import { AppButton, AppInput, AppSelect } from "./controls";
 
 type GanttViewProps = {
   scope: Scope;
@@ -321,32 +323,21 @@ const GanttView: FC<GanttViewProps> = ({
     <div className="gantt-root">
       <div className="gantt-toolbar">
         <div className="gantt-toolbar-left">
-          <button
-            type="button"
-            className={viewMode === "week" ? "button is-active" : "button"}
-            onClick={() => setViewMode("week")}
+          <SegmentedControl.Root
+            value={viewMode}
+            onValueChange={(value) =>
+              setViewMode(value as typeof viewMode)
+            }
           >
-            Week
-          </button>
-          <button
-            type="button"
-            className={viewMode === "month" ? "button is-active" : "button"}
-            onClick={() => setViewMode("month")}
-          >
-            Month
-          </button>
-          <button
-            type="button"
-            className={viewMode === "quarter" ? "button is-active" : "button"}
-            onClick={() => setViewMode("quarter")}
-          >
-            Quarter
-          </button>
+            <SegmentedControl.Item value="week">Week</SegmentedControl.Item>
+            <SegmentedControl.Item value="month">Month</SegmentedControl.Item>
+            <SegmentedControl.Item value="quarter">Quarter</SegmentedControl.Item>
+          </SegmentedControl.Root>
         </div>
         <div className="gantt-toolbar-right">
-          <button
+          <AppButton
             type="button"
-            className={dependencyMode ? "button is-active" : "button"}
+            variant={dependencyMode ? "solid" : "surface"}
             onClick={() => {
               setDependencyMode((prev) => !prev);
               setPendingEdge(null);
@@ -354,7 +345,7 @@ const GanttView: FC<GanttViewProps> = ({
             }}
           >
             Dependency Mode
-          </button>
+          </AppButton>
         </div>
       </div>
 
@@ -369,28 +360,29 @@ const GanttView: FC<GanttViewProps> = ({
           <div className="gantt-edge-controls">
             <label>
               Type
-              <select
+              <AppSelect
                 value={edgeDraft.type}
-                onChange={(event) =>
+                onChange={(value) =>
                   setEdgeDraft((prev) =>
                     prev
                       ? {
                           ...prev,
-                          type: event.target.value as GanttEdge["type"],
+                          type: value as GanttEdge["type"],
                         }
                       : prev
                   )
                 }
-              >
-                <option value="FS">FS</option>
-                <option value="SS">SS</option>
-                <option value="FF">FF</option>
-                <option value="SF">SF</option>
-              </select>
+                options={[
+                  { value: "FS", label: "FS" },
+                  { value: "SS", label: "SS" },
+                  { value: "FF", label: "FF" },
+                  { value: "SF", label: "SF" },
+                ]}
+              />
             </label>
             <label>
               Lag (min)
-              <input
+              <AppInput
                 type="number"
                 min={0}
                 value={edgeDraft.lagMinutes}
@@ -409,16 +401,16 @@ const GanttView: FC<GanttViewProps> = ({
                 }
               />
             </label>
-            <button type="button" className="button" onClick={handleCreateEdge}>
+            <AppButton type="button" variant="surface" onClick={handleCreateEdge}>
               Add
-            </button>
-            <button
+            </AppButton>
+            <AppButton
               type="button"
-              className="button button-ghost"
+              variant="ghost"
               onClick={() => setEdgeDraft(null)}
             >
               Cancel
-            </button>
+            </AppButton>
           </div>
         </div>
       ) : null}
@@ -454,13 +446,15 @@ const GanttView: FC<GanttViewProps> = ({
                   style={{ paddingLeft: row.depth * 16 }}
                 >
                   {childrenCount > 0 ? (
-                    <button
+                    <AppButton
                       type="button"
+                      size="1"
+                      variant="ghost"
                       className="gantt-disclosure"
                       onClick={() => handleToggleCollapse(item.id)}
                     >
                       {isCollapsed ? "▶" : "▼"}
-                    </button>
+                    </AppButton>
                   ) : (
                     <span className="gantt-disclosure-spacer" />
                   )}
@@ -531,8 +525,9 @@ const GanttView: FC<GanttViewProps> = ({
                     style={{ top: rowTop, height: ROW_HEIGHT }}
                   >
                     {start !== null && end !== null ? (
-                      <button
+                      <AppButton
                         type="button"
+                        variant="ghost"
                         className={
                           dependencyMode && pendingEdge === item.id
                             ? "gantt-bar is-pending"
@@ -545,21 +540,22 @@ const GanttView: FC<GanttViewProps> = ({
                         onClick={() => handleBarClick(item.id)}
                       >
                         {item.title}
-                      </button>
+                      </AppButton>
                     ) : (
                       <span className="gantt-unscheduled">—</span>
                     )}
                     {dueX !== null &&
                     dueX >= 0 &&
                     dueX <= timelineWidth ? (
-                      <button
+                      <AppButton
                         type="button"
+                        variant="ghost"
                         className="gantt-due-marker"
                         style={{ left: dueX }}
                         onClick={() => onOpenItem(item.id)}
                       >
                         <span className="gantt-due-dot" />
-                      </button>
+                      </AppButton>
                     ) : null}
                   </div>
                 );

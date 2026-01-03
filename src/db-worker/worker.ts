@@ -1544,6 +1544,94 @@ const handleMutate = (envelope: MutateEnvelope): MutateResult => {
           };
           break;
         }
+        case "items.delete_many": {
+          const idsInput = ensureArray(args.ids, "ids")
+            .map((value, index) => ensureString(value, `ids[${index}]`))
+            .filter((value) => value.trim().length > 0);
+          const uniqueIds = Array.from(new Set(idsInput));
+          if (uniqueIds.length === 0) {
+            result = { ok: false, error: "ids must be a non-empty array" };
+            break;
+          }
+          const seedPlaceholders = buildPlaceholders(uniqueIds.length);
+          const idsRows = dbHandle.exec({
+            sql: `WITH RECURSIVE subtree AS (
+              SELECT id FROM items WHERE id IN (${seedPlaceholders})
+              UNION ALL
+              SELECT i.id FROM items i JOIN subtree s ON i.parent_id = s.id
+            )
+            SELECT id FROM subtree;`,
+            rowMode: "array",
+            returnValue: "resultRows",
+            bind: uniqueIds,
+          }) as Array<[string]>;
+          const deletedIds = Array.from(
+            new Set(idsRows.map((row) => row[0]))
+          );
+          if (deletedIds.length === 0) {
+            result = { ok: false, error: "items not found" };
+            break;
+          }
+          const placeholders = buildPlaceholders(deletedIds.length);
+          dbHandle.exec(
+            `DELETE FROM dependencies WHERE item_id IN (${placeholders}) OR depends_on_id IN (${placeholders});`,
+            {
+              bind: [...deletedIds, ...deletedIds],
+            }
+          );
+          dbHandle.exec(
+            `DELETE FROM blockers WHERE item_id IN (${placeholders});`,
+            {
+              bind: deletedIds,
+            }
+          );
+          dbHandle.exec(
+            `DELETE FROM scheduled_blocks WHERE item_id IN (${placeholders});`,
+            {
+              bind: deletedIds,
+            }
+          );
+          dbHandle.exec(
+            `DELETE FROM time_entries WHERE item_id IN (${placeholders});`,
+            {
+              bind: deletedIds,
+            }
+          );
+          dbHandle.exec(
+            `DELETE FROM running_timers WHERE item_id IN (${placeholders});`,
+            {
+              bind: deletedIds,
+            }
+          );
+          dbHandle.exec(
+            `DELETE FROM item_tags WHERE item_id IN (${placeholders});`,
+            {
+              bind: deletedIds,
+            }
+          );
+          dbHandle.exec(
+            `DELETE FROM item_assignees WHERE item_id IN (${placeholders});`,
+            {
+              bind: deletedIds,
+            }
+          );
+          dbHandle.exec(`DELETE FROM items WHERE id IN (${placeholders});`, {
+            bind: deletedIds,
+          });
+          result = {
+            ok: true,
+            result: { deleted_ids: deletedIds },
+            invalidate: [
+              "items",
+              "dependencies",
+              "blockers",
+              "blocks",
+              "time_entries",
+              "running_timers",
+            ],
+          };
+          break;
+        }
         case "reorder_item": {
           const itemId = ensureString(args.item_id, "item_id");
           const direction = ensureString(args.direction, "direction");

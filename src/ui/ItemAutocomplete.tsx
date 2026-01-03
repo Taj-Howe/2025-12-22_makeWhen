@@ -6,6 +6,7 @@ import {
   type KeyboardEvent,
 } from "react";
 import { query } from "../rpc/clientSingleton";
+import { AppButton, AppInput } from "./controls";
 
 export type ItemLite = {
   id: string;
@@ -147,8 +148,8 @@ export const ItemAutocomplete: FC<ItemAutocompleteProps> = ({
 
   return (
     <div className={`autocomplete ${className ?? ""}`.trim()} ref={containerRef}>
-      <input
-        className="autocomplete-input"
+      <AppInput
+        rootClassName="autocomplete-input"
         value={value}
         onChange={(event) => setValue(event.target.value)}
         onKeyDown={handleKeyDown}
@@ -160,9 +161,10 @@ export const ItemAutocomplete: FC<ItemAutocompleteProps> = ({
           {items.map((item, index) => {
             const isActive = index === activeIndex;
             return (
-              <button
+              <AppButton
                 key={item.id}
                 type="button"
+                variant="ghost"
                 className={`autocomplete-option ${isActive ? "is-active" : ""}`}
                 role="option"
                 aria-selected={isActive}
@@ -174,7 +176,7 @@ export const ItemAutocomplete: FC<ItemAutocompleteProps> = ({
               >
                 <span className="autocomplete-title">{item.title}</span>
                 <span className="autocomplete-meta">{item.item_type}</span>
-              </button>
+              </AppButton>
             );
           })}
         </div>

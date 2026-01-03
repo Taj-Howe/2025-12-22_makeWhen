@@ -1,3 +1,4 @@
+import { Tabs } from "@radix-ui/themes";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import "./app.css";
 import SidebarProjects from "./SidebarProjects";
@@ -12,6 +13,7 @@ import RightSheet from "./RightSheet";
 import CommandPalette from "./CommandPalette";
 import ThemeSettings from "./ThemeSettings";
 import SampleDataPanel from "./SampleDataPanel";
+import { AppButton } from "./controls";
 import { mutate, query } from "../rpc/clientSingleton";
 import type { ListItem } from "../domain/listTypes";
 import type { Scope } from "../domain/scope";
@@ -348,63 +350,20 @@ const App = () => {
         <main className="main">
           <div className="top-bar">
             <div className="top-bar-left">
-              <div className="top-tabs">
-                <button
-                  type="button"
-                  className={
-                    activeView === "dashboard"
-                      ? "top-tab top-tab-active"
-                      : "top-tab"
-                  }
-                  onClick={() => setActiveView("dashboard")}
-                >
-                  Dashboard
-                </button>
-                <button
-                  type="button"
-                  className={
-                    activeView === "list"
-                      ? "top-tab top-tab-active"
-                      : "top-tab"
-                  }
-                  onClick={() => setActiveView("list")}
-                >
-                  List
-                </button>
-                <button
-                  type="button"
-                  className={
-                    activeView === "calendar"
-                      ? "top-tab top-tab-active"
-                      : "top-tab"
-                  }
-                  onClick={() => setActiveView("calendar")}
-                >
-                  Calendar
-                </button>
-                <button
-                  type="button"
-                  className={
-                    activeView === "kanban"
-                      ? "top-tab top-tab-active"
-                      : "top-tab"
-                  }
-                  onClick={() => setActiveView("kanban")}
-                >
-                  Kanban
-                </button>
-                <button
-                  type="button"
-                  className={
-                    activeView === "gantt"
-                      ? "top-tab top-tab-active"
-                      : "top-tab"
-                  }
-                  onClick={() => setActiveView("gantt")}
-                >
-                  Gantt
-                </button>
-              </div>
+              <Tabs.Root
+                value={activeView}
+                onValueChange={(value) =>
+                  setActiveView(value as typeof activeView)
+                }
+              >
+                <Tabs.List className="top-tabs">
+                  <Tabs.Trigger value="dashboard">Dashboard</Tabs.Trigger>
+                  <Tabs.Trigger value="list">List</Tabs.Trigger>
+                  <Tabs.Trigger value="calendar">Calendar</Tabs.Trigger>
+                  <Tabs.Trigger value="kanban">Kanban</Tabs.Trigger>
+                  <Tabs.Trigger value="gantt">Gantt</Tabs.Trigger>
+                </Tabs.List>
+              </Tabs.Root>
               <div className="top-title">
                 {activeView === "dashboard"
                   ? "Dashboard"
@@ -424,13 +383,13 @@ const App = () => {
                   {currentUser.display_name}
                 </span>
               </div>
-              <button
+              <AppButton
                 type="button"
-                className="button"
+                variant="surface"
                 onClick={() => setSettingsOpen((prev) => !prev)}
               >
                 Settings
-              </button>
+              </AppButton>
             </div>
           </div>
           {settingsOpen ? (
@@ -444,13 +403,13 @@ const App = () => {
           ) : null}
           {activeScope.kind === "project" && activeView !== "dashboard" ? (
             <div className="title-actions">
-              <button
+              <AppButton
                 type="button"
-                className="button"
+                variant="surface"
                 onClick={() => openSheet("milestone")}
               >
                 New Milestone
-              </button>
+              </AppButton>
             </div>
           ) : null}
           {deleteError ? <div className="error">{deleteError}</div> : null}
@@ -506,6 +465,9 @@ const App = () => {
               initialItemId={sheetItemId}
               autoFocusTitle={sheetFocusTitle}
               onCreated={() => {
+                handleSheetOpenChange(false);
+              }}
+              onDeleted={() => {
                 handleSheetOpenChange(false);
               }}
             />

@@ -10,7 +10,7 @@ import {
 } from "react";
 import * as ContextMenu from "@radix-ui/react-context-menu";
 import { query, mutate } from "../rpc/clientSingleton";
-import { UNGROUPED_PROJECT_ID } from "./constants";
+import { UNGROUPED_PROJECT_ID, UNGROUPED_PROJECT_LABEL } from "./constants";
 import { scopeKey } from "../domain/scope";
 import type {
   DependencyProjectionLite,
@@ -32,6 +32,7 @@ import {
   createDependencyEdge,
   createItem,
   deleteItem,
+  deleteItems,
   deleteDependencyEdge,
   duplicateTaskFromItem,
   setItemAssignee,
@@ -42,6 +43,7 @@ import {
 } from "./itemActions";
 import { ItemAutocomplete } from "./ItemAutocomplete";
 import UserSelect from "./UserSelect";
+import { AppButton, AppCheckbox, AppInput, AppSelect } from "./controls";
 
 type ListViewItem = ListItem & {
   completed_on: number | null;
@@ -107,10 +109,17 @@ const ListView: FC<ListViewProps> = ({
   const [editingAssigneeId, setEditingAssigneeId] = useState<string | null>(
     null
   );
+  const [projects, setProjects] = useState<Array<{ id: string; title: string }>>(
+    []
+  );
+  const [projectsLoading, setProjectsLoading] = useState(false);
+  const [projectsError, setProjectsError] = useState<string | null>(null);
   const [milestoneDrop, setMilestoneDrop] = useState<{
     milestoneId: string;
     position: "top" | "bottom";
   } | null>(null);
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(() => new Set());
+  const [lastFocusedIndex, setLastFocusedIndex] = useState<number | null>(null);
 
   const getLastVisibleId = (groupItems: ListViewItem[]) => {
     if (groupItems.length === 0) {
@@ -171,6 +180,27 @@ const ListView: FC<ListViewProps> = ({
     return merged;
   }, [scope]);
 
+  const loadProjects = useCallback(async () => {
+    setProjectsError(null);
+    setProjectsLoading(true);
+    try {
+      const data = await query<{ items: ListItem[] }>("listItems", {
+        includeDone: true,
+        includeCanceled: true,
+      });
+      const list = data.items
+        .filter((item) => item.type === "project")
+        .map((item) => ({ id: item.id, title: item.title }));
+      setProjects(list);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Unknown error";
+      setProjects([]);
+      setProjectsError(message);
+    } finally {
+      setProjectsLoading(false);
+    }
+  }, []);
+
   useEffect(() => {
     if (scope.kind === "project" && !scope.projectId) {
       setItems([]);
@@ -211,6 +241,10 @@ const ListView: FC<ListViewProps> = ({
       isMounted = false;
     };
   }, [cacheKey, loadItems, refreshToken, scope]);
+
+  useEffect(() => {
+    void loadProjects();
+  }, [loadProjects, refreshToken]);
 
   const viewModel = useMemo(
     () =>
@@ -300,6 +334,95 @@ const ListView: FC<ListViewProps> = ({
       }
     },
     [onRefresh]
+  );
+
+  const projectOptions = useMemo(
+    () => [
+      { id: UNGROUPED_PROJECT_ID, title: UNGROUPED_PROJECT_LABEL },
+      ...projects,
+    ],
+    [projects]
+  );
+
+  const handleMoveToProject = useCallback(
+    async (item: ListViewItem, targetProjectId: string) => {
+      const targetParentId =
+        targetProjectId === UNGROUPED_PROJECT_ID ? null : targetProjectId;
+      if (item.parent_id === targetParentId) {
+        return;
+      }
+      setError(null);
+      try {
+        const list = await query<{ items: ListItem[] }>("listItems", {
+          projectId: targetProjectId,
+          includeDone: true,
+          includeCanceled: true,
+        });
+        const siblingMax = list.items
+          .filter((candidate) => candidate.parent_id === targetParentId)
+          .reduce(
+            (max, candidate) =>
+              Math.max(
+                max,
+                typeof candidate.sort_order === "number"
+                  ? candidate.sort_order
+                  : 0
+              ),
+            0
+          );
+        await updateItemFields(item.id, {
+          parent_id: targetParentId,
+          sort_order: siblingMax + 1,
+        });
+        onRefresh();
+      } catch (err) {
+        const message = err instanceof Error ? err.message : "Unknown error";
+        setError(message);
+      }
+    },
+    [onRefresh]
+  );
+
+  const renderMoveToMenu = useCallback(
+    (item: ListViewItem) => (
+      <ContextMenu.Sub>
+        <ContextMenu.SubTrigger className="context-menu-item">
+          Move to…
+        </ContextMenu.SubTrigger>
+        <ContextMenu.Portal>
+          <ContextMenu.SubContent className="context-menu-content">
+            {projectsLoading ? (
+              <ContextMenu.Item className="context-menu-item" disabled>
+                Loading projects…
+              </ContextMenu.Item>
+            ) : null}
+            {projectsError ? (
+              <ContextMenu.Item className="context-menu-item" disabled>
+                Unable to load projects
+              </ContextMenu.Item>
+            ) : null}
+            {!projectsLoading && !projectsError
+              ? projectOptions.map((project) => {
+                  const targetParentId =
+                    project.id === UNGROUPED_PROJECT_ID ? null : project.id;
+                  const isCurrentParent = item.parent_id === targetParentId;
+                  return (
+                    <ContextMenu.Item
+                      key={project.id}
+                      className="context-menu-item"
+                      disabled={isCurrentParent}
+                      onSelect={() => handleMoveToProject(item, project.id)}
+                    >
+                      {project.title}
+                    </ContextMenu.Item>
+                  );
+                })
+              : null}
+          </ContextMenu.SubContent>
+        </ContextMenu.Portal>
+      </ContextMenu.Sub>
+    ),
+    [handleMoveToProject, projectOptions, projectsError, projectsLoading]
   );
 
   const formatSlackMinutes = (value: number | null) => {
@@ -405,12 +528,11 @@ const ListView: FC<ListViewProps> = ({
             <span className="cell-title-text">
               {item.type === "task" ? (
                 <span className="task-checkbox-wrap">
-                  <input
-                    type="checkbox"
+                  <AppCheckbox
                     className="task-checkbox"
                     checked={item.status === "done"}
-                    onChange={(event) =>
-                      void handleToggleTaskDone(item, event.target.checked)
+                    onCheckedChange={(checked) =>
+                      void handleToggleTaskDone(item, checked === true)
                     }
                     onClick={(event) => event.stopPropagation()}
                   />
@@ -444,8 +566,10 @@ const ListView: FC<ListViewProps> = ({
             );
           }
           return (
-            <button
+            <AppButton
               type="button"
+              size="1"
+              variant="ghost"
               className="assignee-pill"
               onClick={(event) => {
                 event.stopPropagation();
@@ -453,7 +577,7 @@ const ListView: FC<ListViewProps> = ({
               }}
             >
               {currentName}
-            </button>
+            </AppButton>
           );
         },
       },
@@ -615,13 +739,14 @@ const ListView: FC<ListViewProps> = ({
         label: "",
         minWidth: 80,
         render: (item: ListViewItem) => (
-          <button
+          <AppButton
             type="button"
-            className="button button-ghost"
+            size="1"
+            variant="ghost"
             onClick={() => handleDelete(item)}
           >
             Delete
-          </button>
+          </AppButton>
         ),
       },
     ],
@@ -657,6 +782,202 @@ const ListView: FC<ListViewProps> = ({
       return new Set(Array.from(prev).filter((id) => taskIds.has(id)));
     });
   }, [tasks]);
+
+  const visibleRowIds = useMemo(() => {
+    const rows: string[] = [];
+    const pushTask = (task: ListViewItem) => {
+      rows.push(task.id);
+      if (!collapsedTasks.has(task.id)) {
+        const children = taskChildren.get(task.id) ?? [];
+        for (const child of children) {
+          rows.push(child.id);
+        }
+      }
+    };
+    if (!collapsedUngrouped) {
+      for (const task of ungroupedTasks) {
+        pushTask(task);
+      }
+    }
+    if (!isUserScope) {
+      for (const milestone of milestones) {
+        if (collapsedMilestones.has(milestone.id)) {
+          continue;
+        }
+        const tasksForMilestone = tasksUnderMilestone.get(milestone.id) ?? [];
+        for (const task of tasksForMilestone) {
+          pushTask(task);
+        }
+      }
+    }
+    return rows;
+  }, [
+    collapsedMilestones,
+    collapsedTasks,
+    collapsedUngrouped,
+    isUserScope,
+    milestones,
+    taskChildren,
+    tasksUnderMilestone,
+    ungroupedTasks,
+  ]);
+
+  const rowIndexMap = useMemo(() => {
+    const map = new Map<string, number>();
+    visibleRowIds.forEach((id, index) => {
+      map.set(id, index);
+    });
+    return map;
+  }, [visibleRowIds]);
+
+  useEffect(() => {
+    setSelectedIds((prev) => {
+      if (prev.size === 0) {
+        return prev;
+      }
+      const allowed = new Set(visibleRowIds);
+      const next = new Set(
+        Array.from(prev).filter((id) => allowed.has(id))
+      );
+      return next.size === prev.size ? prev : next;
+    });
+    setLastFocusedIndex((prev) => {
+      if (prev === null) {
+        return prev;
+      }
+      if (prev >= visibleRowIds.length) {
+        return visibleRowIds.length > 0 ? visibleRowIds.length - 1 : null;
+      }
+      return prev;
+    });
+  }, [visibleRowIds]);
+
+  const isInteractiveElement = (target: EventTarget | null) => {
+    if (!(target instanceof Element)) {
+      return false;
+    }
+    return Boolean(
+      target.closest(
+        "button, a, input, textarea, select, [role='button'], [contenteditable='true'], .context-menu-content, .drag-handle"
+      )
+    );
+  };
+
+  const clearSelection = useCallback(() => {
+    setSelectedIds(new Set());
+    setLastFocusedIndex(null);
+  }, []);
+
+  const handleRowClick = useCallback(
+    (event: React.MouseEvent, itemId: string) => {
+      if (event.button === 2) {
+        return;
+      }
+      if (dragging) {
+        return;
+      }
+      if (isInteractiveElement(event.target)) {
+        return;
+      }
+      const rowIndex = rowIndexMap.get(itemId);
+      if (rowIndex === undefined) {
+        return;
+      }
+      setSelectedIds((prev) => {
+        const next = new Set(prev);
+        if (event.shiftKey && lastFocusedIndex !== null) {
+          next.clear();
+          const start = Math.min(lastFocusedIndex, rowIndex);
+          const end = Math.max(lastFocusedIndex, rowIndex);
+          for (let i = start; i <= end; i += 1) {
+            const id = visibleRowIds[i];
+            if (id) {
+              next.add(id);
+            }
+          }
+        } else if (event.metaKey || event.ctrlKey) {
+          if (next.has(itemId)) {
+            next.delete(itemId);
+          } else {
+            next.add(itemId);
+          }
+        } else {
+          next.clear();
+          next.add(itemId);
+        }
+        return next;
+      });
+      setLastFocusedIndex(rowIndex);
+    },
+    [dragging, lastFocusedIndex, rowIndexMap, visibleRowIds]
+  );
+
+  const handleBackgroundMouseDown = useCallback(
+    (event: React.MouseEvent) => {
+      if (isInteractiveElement(event.target)) {
+        return;
+      }
+      const target = event.target as Element;
+      if (!target.closest("tr")) {
+        clearSelection();
+      }
+    },
+    [clearSelection]
+  );
+
+  const handleBulkDelete = useCallback(async () => {
+    if (selectedIds.size === 0) {
+      return;
+    }
+    const count = selectedIds.size;
+    const confirmText =
+      count === 1
+        ? "Delete this item? This removes all descendants."
+        : `Delete ${count} items? This removes all descendants.`;
+    if (!confirm(confirmText)) {
+      return;
+    }
+    setError(null);
+    try {
+      await deleteItems(Array.from(selectedIds));
+      clearSelection();
+      onRefresh();
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Unknown error";
+      setError(message);
+    }
+  }, [clearSelection, onRefresh, selectedIds]);
+
+  useEffect(() => {
+    const handler = (event: KeyboardEvent) => {
+      const target = event.target as Element | null;
+      if (isInteractiveElement(target)) {
+        return;
+      }
+      if (event.key === "Escape") {
+        clearSelection();
+        return;
+      }
+      if (event.key === "Backspace" || event.key === "Delete") {
+        if (selectedIds.size > 0) {
+          event.preventDefault();
+          void handleBulkDelete();
+        }
+        return;
+      }
+      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "a") {
+        if (visibleRowIds.length > 0) {
+          event.preventDefault();
+          setSelectedIds(new Set(visibleRowIds));
+          setLastFocusedIndex(visibleRowIds.length - 1);
+        }
+      }
+    };
+    window.addEventListener("keydown", handler);
+    return () => {
+      window.removeEventListener("keydown", handler);
+    };
+  }, [clearSelection, handleBulkDelete, selectedIds, visibleRowIds]);
 
   const handleDelete = async (item: ListItem) => {
     if (!confirm(`Delete ${item.title}? This removes all descendants.`)) {
@@ -906,7 +1227,7 @@ const ListView: FC<ListViewProps> = ({
     }
   };
 
-  const commitEdit = async () => {
+  const commitEdit = async (overrideValue?: string) => {
     if (!editing) {
       return;
     }
@@ -915,7 +1236,7 @@ const ListView: FC<ListViewProps> = ({
       cancelEdit();
       return;
     }
-    const value = editValue.trim();
+    const value = (overrideValue ?? editValue).trim();
     if (editing.field === "estimate_minutes") {
       const parsed = parseEstimateMinutesInput(value);
       if (parsed === null) {
@@ -1014,8 +1335,9 @@ const ListView: FC<ListViewProps> = ({
       return <div className="cell-editing">{editor}</div>;
     }
     return (
-      <button
+      <AppButton
         type="button"
+        variant="ghost"
         className="cell-button"
         onClick={(event) => {
           event.stopPropagation();
@@ -1023,7 +1345,7 @@ const ListView: FC<ListViewProps> = ({
         }}
       >
         {display}
-      </button>
+      </AppButton>
     );
   };
 
@@ -1064,47 +1386,49 @@ const ListView: FC<ListViewProps> = ({
               return (
                 <div key={edgeId} className="dependency-row">
                   <span className="dependency-title">{title}</span>
-                <select
+                <AppSelect
                   value={dep.type}
-                  onChange={(event) =>
+                  onChange={(value) =>
                     void handleUpdateDependencyEdge(edgeId, {
-                      type: event.target.value,
+                      type: value,
                     })
                   }
-                >
-                  <option value="FS">FS</option>
-                  <option value="SS">SS</option>
-                  <option value="FF">FF</option>
-                  <option value="SF">SF</option>
-                </select>
+                  options={[
+                    { value: "FS", label: "FS" },
+                    { value: "SS", label: "SS" },
+                    { value: "FF", label: "FF" },
+                    { value: "SF", label: "SF" },
+                  ]}
+                />
                 <span className="dependency-label">Lag (min)</span>
-                <input
+                <AppInput
                   key={`${edgeId}-${lagValue}`}
                   type="number"
                   min={0}
                   placeholder="Lag (min)"
                   aria-label="Lag minutes"
-                    defaultValue={lagValue}
-                    onBlur={(event) => {
-                      const next = Number(event.currentTarget.value);
-                      if (!Number.isFinite(next) || next < 0) {
-                        return;
-                      }
-                      if (next !== lagValue) {
-                        void handleUpdateDependencyEdge(edgeId, {
-                          lag_minutes: Math.floor(next),
-                        });
-                      }
-                    }}
-                  />
-                  <span className="dependency-status">{status}</span>
-                  <button
+                  defaultValue={lagValue}
+                  onBlur={(event) => {
+                    const next = Number(event.currentTarget.value);
+                    if (!Number.isFinite(next) || next < 0) {
+                      return;
+                    }
+                    if (next !== lagValue) {
+                      void handleUpdateDependencyEdge(edgeId, {
+                        lag_minutes: Math.floor(next),
+                      });
+                    }
+                  }}
+                />
+                <span className="dependency-status">{status}</span>
+                  <AppButton
                     type="button"
-                    className="button button-ghost"
+                    size="1"
+                    variant="ghost"
                     onClick={() => void handleDeleteDependencyEdge(edgeId)}
                   >
                     Remove
-                  </button>
+                  </AppButton>
                 </div>
               );
             })
@@ -1133,47 +1457,49 @@ const ListView: FC<ListViewProps> = ({
               return (
                 <div key={edgeId} className="dependency-row">
                   <span className="dependency-title">{title}</span>
-                <select
+                <AppSelect
                   value={dep.type}
-                  onChange={(event) =>
+                  onChange={(value) =>
                     void handleUpdateDependencyEdge(edgeId, {
-                      type: event.target.value,
+                      type: value,
                     })
                   }
-                >
-                  <option value="FS">FS</option>
-                  <option value="SS">SS</option>
-                  <option value="FF">FF</option>
-                  <option value="SF">SF</option>
-                </select>
+                  options={[
+                    { value: "FS", label: "FS" },
+                    { value: "SS", label: "SS" },
+                    { value: "FF", label: "FF" },
+                    { value: "SF", label: "SF" },
+                  ]}
+                />
                 <span className="dependency-label">Lag (min)</span>
-                <input
+                <AppInput
                   key={`${edgeId}-${lagValue}`}
                   type="number"
                   min={0}
                   placeholder="Lag (min)"
                   aria-label="Lag minutes"
-                    defaultValue={lagValue}
-                    onBlur={(event) => {
-                      const next = Number(event.currentTarget.value);
-                      if (!Number.isFinite(next) || next < 0) {
-                        return;
-                      }
-                      if (next !== lagValue) {
-                        void handleUpdateDependencyEdge(edgeId, {
-                          lag_minutes: Math.floor(next),
-                        });
-                      }
-                    }}
-                  />
-                  <span className="dependency-status">{status}</span>
-                  <button
+                  defaultValue={lagValue}
+                  onBlur={(event) => {
+                    const next = Number(event.currentTarget.value);
+                    if (!Number.isFinite(next) || next < 0) {
+                      return;
+                    }
+                    if (next !== lagValue) {
+                      void handleUpdateDependencyEdge(edgeId, {
+                        lag_minutes: Math.floor(next),
+                      });
+                    }
+                  }}
+                />
+                <span className="dependency-status">{status}</span>
+                  <AppButton
                     type="button"
-                    className="button button-ghost"
+                    size="1"
+                    variant="ghost"
                     onClick={() => void handleDeleteDependencyEdge(edgeId)}
                   >
                     Remove
-                  </button>
+                  </AppButton>
                 </div>
               );
             })
@@ -1187,13 +1513,9 @@ const ListView: FC<ListViewProps> = ({
             }
           />
         </div>
-        <button
-          type="button"
-          className="button button-ghost"
-          onClick={cancelEdit}
-        >
+        <AppButton type="button" size="1" variant="ghost" onClick={cancelEdit}>
           Done
-        </button>
+        </AppButton>
       </div>
     );
   };
@@ -1210,7 +1532,7 @@ const ListView: FC<ListViewProps> = ({
       if (isEditing) {
         return (
           <div className="cell-editing">
-            <input
+            <AppInput
               value={editValue}
               onChange={(event) => setEditValue(event.target.value)}
               onBlur={() => void commitEdit()}
@@ -1249,30 +1571,22 @@ const ListView: FC<ListViewProps> = ({
         item,
         "status",
         column.render(item, 0, null),
-        <select
+        <AppSelect
           value={editValue}
-          onChange={(event) => setEditValue(event.target.value)}
-          onBlur={() => void commitEdit()}
-          onKeyDown={(event) => {
-            if (event.key === "Enter") {
-              event.preventDefault();
-              void commitEdit();
-            }
-            if (event.key === "Escape") {
-              event.preventDefault();
-              cancelEdit();
-            }
+          onChange={(value) => {
+            setEditValue(value);
+            void commitEdit(value);
           }}
-          autoFocus
-        >
-          <option value="backlog">backlog</option>
-          <option value="ready">ready</option>
-          <option value="in_progress">in_progress</option>
-          <option value="blocked">blocked</option>
-          <option value="review">review</option>
-          <option value="done">done</option>
-          <option value="canceled">canceled</option>
-        </select>,
+          options={[
+            { value: "backlog", label: "backlog" },
+            { value: "ready", label: "ready" },
+            { value: "in_progress", label: "in_progress" },
+            { value: "blocked", label: "blocked" },
+            { value: "review", label: "review" },
+            { value: "done", label: "done" },
+            { value: "canceled", label: "canceled" },
+          ]}
+        />,
         item.status ?? ""
       );
     }
@@ -1281,7 +1595,7 @@ const ListView: FC<ListViewProps> = ({
         item,
         "priority",
         column.render(item, 0, null),
-        <input
+        <AppInput
           type="number"
           value={editValue}
           onChange={(event) => setEditValue(event.target.value)}
@@ -1308,25 +1622,17 @@ const ListView: FC<ListViewProps> = ({
         item,
         "estimate_mode",
         column.render(item, 0, null),
-        <select
+        <AppSelect
           value={editValue}
-          onChange={(event) => setEditValue(event.target.value)}
-          onBlur={() => void commitEdit()}
-          onKeyDown={(event) => {
-            if (event.key === "Enter") {
-              event.preventDefault();
-              void commitEdit();
-            }
-            if (event.key === "Escape") {
-              event.preventDefault();
-              cancelEdit();
-            }
+          onChange={(value) => {
+            setEditValue(value);
+            void commitEdit(value);
           }}
-          autoFocus
-        >
-          <option value="manual">manual</option>
-          <option value="rollup">rollup</option>
-        </select>,
+          options={[
+            { value: "manual", label: "manual" },
+            { value: "rollup", label: "rollup" },
+          ]}
+        />,
         initial
       );
     }
@@ -1338,7 +1644,7 @@ const ListView: FC<ListViewProps> = ({
         item,
         "estimate_minutes",
         column.render(item, 0, null),
-        <input
+        <AppInput
           type="text"
           value={editValue}
           onChange={(event) => setEditValue(event.target.value)}
@@ -1363,7 +1669,7 @@ const ListView: FC<ListViewProps> = ({
         item,
         "due_at",
         column.render(item, 0, null),
-        <input
+        <AppInput
           type="datetime-local"
           value={editValue}
           onChange={(event) => setEditValue(event.target.value)}
@@ -1390,7 +1696,7 @@ const ListView: FC<ListViewProps> = ({
         return (
           <div className="cell-editing dependency-editor">
             <div className="dependency-row">
-              <input
+              <AppInput
                 type="datetime-local"
                 value={editValue}
                 onChange={(event) => setEditValue(event.target.value)}
@@ -1412,8 +1718,9 @@ const ListView: FC<ListViewProps> = ({
         );
       }
       return (
-        <button
+        <AppButton
           type="button"
+          variant="ghost"
           className="cell-button"
           onClick={(event) => {
             event.stopPropagation();
@@ -1421,7 +1728,7 @@ const ListView: FC<ListViewProps> = ({
           }}
         >
           {column.render(item, 0, null)}
-        </button>
+        </AppButton>
       );
     }
     if (column.key === "tags") {
@@ -1429,7 +1736,7 @@ const ListView: FC<ListViewProps> = ({
         item,
         "tags",
         column.render(item, 0, null),
-        <input
+        <AppInput
           value={editValue}
           onChange={(event) => setEditValue(event.target.value)}
           onBlur={() => void commitEdit()}
@@ -1455,8 +1762,9 @@ const ListView: FC<ListViewProps> = ({
         return renderDependenciesEditor(item);
       }
       return (
-        <button
+        <AppButton
           type="button"
+          variant="ghost"
           className="cell-button"
           onClick={(event) => {
             event.stopPropagation();
@@ -1464,7 +1772,7 @@ const ListView: FC<ListViewProps> = ({
           }}
         >
           {column.render(item, 0, null)}
-        </button>
+        </AppButton>
       );
     }
     if (column.key === "notes") {
@@ -1472,7 +1780,7 @@ const ListView: FC<ListViewProps> = ({
         item,
         "notes",
         column.render(item, 0, null),
-        <input
+        <AppInput
           value={editValue}
           onChange={(event) => setEditValue(event.target.value)}
           onBlur={() => void commitEdit()}
@@ -1496,28 +1804,20 @@ const ListView: FC<ListViewProps> = ({
         item,
         "health",
         column.render(item, 0, null),
-        <select
+        <AppSelect
           value={editValue}
-          onChange={(event) => setEditValue(event.target.value)}
-          onBlur={() => void commitEdit()}
-          onKeyDown={(event) => {
-            if (event.key === "Enter") {
-              event.preventDefault();
-              void commitEdit();
-            }
-            if (event.key === "Escape") {
-              event.preventDefault();
-              cancelEdit();
-            }
+          onChange={(value) => {
+            setEditValue(value);
+            void commitEdit(value);
           }}
-          autoFocus
-        >
-          <option value="on_track">on_track</option>
-          <option value="at_risk">at_risk</option>
-          <option value="behind">behind</option>
-          <option value="ahead">ahead</option>
-          <option value="unknown">unknown</option>
-        </select>,
+          options={[
+            { value: "on_track", label: "on_track" },
+            { value: "at_risk", label: "at_risk" },
+            { value: "behind", label: "behind" },
+            { value: "ahead", label: "ahead" },
+            { value: "unknown", label: "unknown" },
+          ]}
+        />,
         item.health ?? "unknown"
       );
     }
@@ -1930,6 +2230,8 @@ const ListView: FC<ListViewProps> = ({
 
   const showLoading = loading && items.length === 0;
   const ungroupedLabel = isUserScope ? "Assigned tasks" : "Ungrouped";
+  const activeRowId =
+    lastFocusedIndex !== null ? visibleRowIds[lastFocusedIndex] : null;
 
   if (scope.kind === "project" && !scope.projectId) {
     return (
@@ -1939,9 +2241,22 @@ const ListView: FC<ListViewProps> = ({
 
   return (
     <div className="list-view list-view-container">
+      {selectedIds.size > 0 ? (
+        <div className="bulk-action-bar">
+          <div>{selectedIds.size} selected</div>
+          <div className="bulk-action-buttons">
+            <AppButton type="button" variant="surface" onClick={handleBulkDelete}>
+              Delete
+            </AppButton>
+            <AppButton type="button" variant="ghost" onClick={clearSelection}>
+              Clear
+            </AppButton>
+          </div>
+        </div>
+      ) : null}
       {showLoading ? <div className="list-empty">Loading…</div> : null}
       {error ? <div className="error">{error}</div> : null}
-      <div className="list-scroll">
+      <div className="list-scroll" onMouseDown={handleBackgroundMouseDown}>
         <table className="list-table list-table-wide">
           <thead>
             <tr>
@@ -1978,13 +2293,15 @@ const ListView: FC<ListViewProps> = ({
                   onDrop={handleDropOnGroup(ungroupedParentId)}
                 >
                   <td colSpan={columns.length}>
-                    <button
+                    <AppButton
                       type="button"
+                      size="1"
+                      variant="ghost"
                       className="group-toggle"
                       onClick={() => setCollapsedUngrouped((prev) => !prev)}
                     >
                       {collapsedUngrouped ? "▶" : "▼"} {ungroupedLabel}
-                    </button>
+                    </AppButton>
                   </td>
                 </tr>
                 {collapsedUngrouped
@@ -1998,8 +2315,10 @@ const ListView: FC<ListViewProps> = ({
                         <span className="cell-title-controls">
                           {renderDragHandle(item.id, groupKey)}
                           {children.length > 0 ? (
-                            <button
+                            <AppButton
                               type="button"
+                              size="1"
+                              variant="ghost"
                               className="group-toggle"
                               onClick={(event) => {
                                 event.stopPropagation();
@@ -2015,7 +2334,7 @@ const ListView: FC<ListViewProps> = ({
                               }}
                             >
                               {isTaskCollapsed ? "▶" : "▼"}
-                            </button>
+                            </AppButton>
                           ) : null}
                         </span>
                       );
@@ -2024,7 +2343,7 @@ const ListView: FC<ListViewProps> = ({
                             <ContextMenu.Root>
                               <ContextMenu.Trigger asChild>
                                 <tr
-                                  className={
+                                  className={[
                                     dragOver?.itemId === item.id &&
                                     dragOver.groupKey === groupKey
                                       ? dragOver.position === "into"
@@ -2032,8 +2351,13 @@ const ListView: FC<ListViewProps> = ({
                                         : dragOver.position === "after"
                                           ? "drag-over-bottom"
                                           : "drag-over-top"
-                                      : undefined
-                                  }
+                                      : "",
+                                    selectedIds.has(item.id) ? "row-selected" : "",
+                                    activeRowId === item.id ? "row-active" : "",
+                                  ]
+                                    .filter(Boolean)
+                                    .join(" ")}
+                                  onClick={(event) => handleRowClick(event, item.id)}
                                   onDragOver={handleDragOverRow(item.id, groupKey)}
                                   onDrop={handleDropOnRow(item.id, groupKey)}
                                 >
@@ -2076,12 +2400,7 @@ const ListView: FC<ListViewProps> = ({
                                   >
                                     Duplicate task
                                   </ContextMenu.Item>
-                                  <ContextMenu.Item
-                                    className="context-menu-item"
-                                    disabled
-                                  >
-                                    Move to…
-                                  </ContextMenu.Item>
+                                  {renderMoveToMenu(item)}
                                 </ContextMenu.Content>
                               </ContextMenu.Portal>
                             </ContextMenu.Root>
@@ -2094,7 +2413,7 @@ const ListView: FC<ListViewProps> = ({
                                   <ContextMenu.Root key={child.id}>
                                     <ContextMenu.Trigger asChild>
                                       <tr
-                                        className={
+                                        className={[
                                           dragOver?.itemId === child.id &&
                                           dragOver.groupKey === childGroupKey
                                             ? dragOver.position === "into"
@@ -2102,7 +2421,18 @@ const ListView: FC<ListViewProps> = ({
                                               : dragOver.position === "after"
                                                 ? "drag-over-bottom"
                                                 : "drag-over-top"
-                                            : undefined
+                                            : "",
+                                          selectedIds.has(child.id)
+                                            ? "row-selected"
+                                            : "",
+                                          activeRowId === child.id
+                                            ? "row-active"
+                                            : "",
+                                        ]
+                                          .filter(Boolean)
+                                          .join(" ")}
+                                        onClick={(event) =>
+                                          handleRowClick(event, child.id)
                                         }
                                         onDragOver={handleDragOverRow(
                                           child.id,
@@ -2154,12 +2484,7 @@ const ListView: FC<ListViewProps> = ({
                                         >
                                           Duplicate task
                                         </ContextMenu.Item>
-                                        <ContextMenu.Item
-                                          className="context-menu-item"
-                                          disabled
-                                        >
-                                          Move to…
-                                        </ContextMenu.Item>
+                                        {renderMoveToMenu(child)}
                                       </ContextMenu.Content>
                                     </ContextMenu.Portal>
                                   </ContextMenu.Root>
@@ -2185,8 +2510,8 @@ const ListView: FC<ListViewProps> = ({
                       )}
                     >
                     {inlineAdd?.groupKey === "ungrouped" ? (
-                      <input
-                        className="add-row-input"
+                      <AppInput
+                        rootClassName="add-row-input"
                         value={inlineTitle}
                         onChange={(event) => setInlineTitle(event.target.value)}
                         onKeyDown={(event) => {
@@ -2203,13 +2528,17 @@ const ListView: FC<ListViewProps> = ({
                         autoFocus
                       />
                     ) : (
-                      <button
+                      <AppButton
                         type="button"
+                        size="1"
+                        variant="ghost"
                         className="add-row-button"
-                        onClick={() => startInlineAdd("ungrouped", ungroupedParentId)}
+                        onClick={() =>
+                          startInlineAdd("ungrouped", ungroupedParentId)
+                        }
                       >
                         Add task…
-                      </button>
+                      </AppButton>
                     )}
                     </div>
                   </td>
@@ -2222,8 +2551,10 @@ const ListView: FC<ListViewProps> = ({
                   const milestoneDragHandle = (
                     <span className="cell-title-controls">
                       {renderDragHandle(milestone.id, "milestones")}
-                      <button
+                      <AppButton
                         type="button"
+                        size="1"
+                        variant="ghost"
                         className="group-toggle"
                         onClick={() =>
                           setCollapsedMilestones((prev) => {
@@ -2238,7 +2569,7 @@ const ListView: FC<ListViewProps> = ({
                         }
                       >
                         {isCollapsed ? "▶" : "▼"}
-                      </button>
+                      </AppButton>
                     </span>
                   );
                   return (
@@ -2308,8 +2639,10 @@ const ListView: FC<ListViewProps> = ({
                               <span className="cell-title-controls">
                                 {renderDragHandle(item.id, groupKey)}
                                 {children.length > 0 ? (
-                                  <button
+                                  <AppButton
                                     type="button"
+                                    size="1"
+                                    variant="ghost"
                                     className="group-toggle"
                                     onClick={(event) => {
                                       event.stopPropagation();
@@ -2325,7 +2658,7 @@ const ListView: FC<ListViewProps> = ({
                                     }}
                                   >
                                     {isTaskCollapsed ? "▶" : "▼"}
-                                  </button>
+                                  </AppButton>
                                 ) : null}
                               </span>
                             );
@@ -2386,12 +2719,7 @@ const ListView: FC<ListViewProps> = ({
                                       >
                                         Duplicate task
                                       </ContextMenu.Item>
-                                      <ContextMenu.Item
-                                        className="context-menu-item"
-                                        disabled
-                                      >
-                                        Move to…
-                                      </ContextMenu.Item>
+                                      {renderMoveToMenu(item)}
                                     </ContextMenu.Content>
                                   </ContextMenu.Portal>
                                 </ContextMenu.Root>
@@ -2471,12 +2799,7 @@ const ListView: FC<ListViewProps> = ({
                                               >
                                                 Duplicate task
                                               </ContextMenu.Item>
-                                              <ContextMenu.Item
-                                                className="context-menu-item"
-                                                disabled
-                                              >
-                                                Move to…
-                                              </ContextMenu.Item>
+                                              {renderMoveToMenu(child)}
                                             </ContextMenu.Content>
                                           </ContextMenu.Portal>
                                         </ContextMenu.Root>
@@ -2502,8 +2825,8 @@ const ListView: FC<ListViewProps> = ({
                             )}
                           >
                           {inlineAdd?.groupKey === groupKey ? (
-                            <input
-                              className="add-row-input"
+                            <AppInput
+                              rootClassName="add-row-input"
                               value={inlineTitle}
                               onChange={(event) => setInlineTitle(event.target.value)}
                               onKeyDown={(event) => {
@@ -2520,13 +2843,15 @@ const ListView: FC<ListViewProps> = ({
                               autoFocus
                             />
                           ) : (
-                            <button
+                            <AppButton
                               type="button"
+                              size="1"
+                              variant="ghost"
                               className="add-row-button"
                               onClick={() => startInlineAdd(groupKey, milestone.id)}
                             >
                               Add task…
-                            </button>
+                            </AppButton>
                           )}
                           </div>
                         </td>

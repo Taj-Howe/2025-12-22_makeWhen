@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState, type FC } from "react";
 import type { Scope } from "../domain/scope";
 import { query } from "../rpc/clientSingleton";
+import { AppSelect } from "./controls";
 import { addDays, startOfDay } from "./dateWindow";
 
 type ContributionDay = {
@@ -151,16 +152,14 @@ const ContributionsHeatmap: FC<ContributionsHeatmapProps> = ({
         <div className="heatmap-title">Contributions</div>
         <label className="heatmap-range">
           Range
-          <select
-            value={dayCount}
-            onChange={(event) => setDayCount(Number(event.target.value))}
-          >
-            {RANGE_OPTIONS.map((value) => (
-              <option key={value} value={value}>
-                {value} days
-              </option>
-            ))}
-          </select>
+          <AppSelect
+            value={String(dayCount)}
+            onChange={(value) => setDayCount(Number(value))}
+            options={RANGE_OPTIONS.map((value) => ({
+              value: String(value),
+              label: `${value} days`,
+            }))}
+          />
         </label>
       </div>
       {error ? <div className="error">{error}</div> : null}

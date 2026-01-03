@@ -8,12 +8,14 @@ import {
   type KeyboardEvent as ReactKeyboardEvent,
   type MouseEvent as ReactMouseEvent,
 } from "react";
+import { SegmentedControl } from "@radix-ui/themes";
 import * as ContextMenu from "@radix-ui/react-context-menu";
 import { mutate, query } from "../rpc/clientSingleton";
 import { UNGROUPED_PROJECT_ID } from "./constants";
 import type { ListItem } from "../domain/listTypes";
 import type { Scope } from "../domain/scope";
 import { addDays, startOfDay, startOfWeek } from "./dateWindow";
+import { AppButton, AppCheckbox } from "./controls";
 
 type CalendarViewProps = {
   scope: Scope;
@@ -963,40 +965,23 @@ const CalendarView: FC<CalendarViewProps> = ({
       {error ? <div className="error">{error}</div> : null}
       <div className="calendar-toolbar">
         <div className="calendar-nav">
-          <button type="button" className="button" onClick={handlePrev}>
+          <AppButton type="button" variant="surface" onClick={handlePrev}>
             Prev
-          </button>
-          <button type="button" className="button" onClick={handleToday}>
+          </AppButton>
+          <AppButton type="button" variant="surface" onClick={handleToday}>
             Today
-          </button>
-          <button type="button" className="button" onClick={handleNext}>
+          </AppButton>
+          <AppButton type="button" variant="surface" onClick={handleNext}>
             Next
-          </button>
+          </AppButton>
         </div>
-        <div className="calendar-toggle">
-          <button
-            type="button"
-            className={
-              viewMode === "week"
-                ? "calendar-toggle-button calendar-toggle-active"
-                : "calendar-toggle-button"
-            }
-            onClick={() => setViewMode("week")}
-          >
-            Week
-          </button>
-          <button
-            type="button"
-            className={
-              viewMode === "month"
-                ? "calendar-toggle-button calendar-toggle-active"
-                : "calendar-toggle-button"
-            }
-            onClick={() => setViewMode("month")}
-          >
-            Month
-          </button>
-        </div>
+        <SegmentedControl.Root
+          value={viewMode}
+          onValueChange={(value) => setViewMode(value as "week" | "month")}
+        >
+          <SegmentedControl.Item value="week">Week</SegmentedControl.Item>
+          <SegmentedControl.Item value="month">Month</SegmentedControl.Item>
+        </SegmentedControl.Root>
       </div>
       {loading && blocks.length === 0 && calendarItems.length === 0 ? (
         <div className="list-empty">Loading…</div>
@@ -1141,14 +1126,13 @@ const CalendarView: FC<CalendarViewProps> = ({
                               onKeyDown={handleOpenKey(block.item_id)}
                             >
                               <div className="calendar-block-header">
-                                <input
-                                  type="checkbox"
+                                <AppCheckbox
                                   className="task-checkbox task-checkbox--compact"
                                   checked={isDone}
-                                  onChange={(event) =>
+                                  onCheckedChange={(checked) =>
                                     void handleToggleDone(
                                       block.item_id,
-                                      event.target.checked
+                                      checked === true
                                     )
                                   }
                                   onClick={(event) => event.stopPropagation()}
@@ -1262,14 +1246,13 @@ const CalendarView: FC<CalendarViewProps> = ({
                           onContextMenu={handleBlockContextMenu}
                           onKeyDown={handleOpenKey(block.item_id)}
                         >
-                          <input
-                            type="checkbox"
+                          <AppCheckbox
                             className="task-checkbox task-checkbox--compact"
                             checked={isDone}
-                            onChange={(event) =>
+                            onCheckedChange={(checked) =>
                               void handleToggleDone(
                                 block.item_id,
-                                event.target.checked
+                                checked === true
                               )
                             }
                             onClick={(event) => event.stopPropagation()}

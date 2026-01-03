@@ -1,5 +1,6 @@
 import { useState, type FC } from "react";
 import { mutate, query } from "../rpc/clientSingleton";
+import { AppButton } from "./controls";
 
 type SampleDataPanelProps = {
   onSeeded: (projectId: string) => void;
@@ -332,14 +333,14 @@ const SampleDataPanel: FC<SampleDataPanelProps> = ({ onSeeded, onRefresh }) => {
         Creates a project with milestones, tasks, subtasks, dependencies, blocks,
         tags, assignees, and blockers.
       </p>
-      <button
+      <AppButton
         type="button"
-        className="button"
+        variant="surface"
         onClick={() => void handleSeed()}
         disabled={loading}
       >
         {loading ? "Creating…" : "Create Sample Project"}
-      </button>
+      </AppButton>
       {error ? <div className="error">{error}</div> : null}
       {success ? <div className="success">{success}</div> : null}
     </div>

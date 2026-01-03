@@ -11,6 +11,7 @@ import { UNGROUPED_PROJECT_ID } from "./constants";
 import { toDateTimeLocal } from "../domain/formatters";
 import { ItemAutocomplete } from "./ItemAutocomplete";
 import UserSelect from "./UserSelect";
+import { AppButton, AppInput, AppSelect, AppTextArea } from "./controls";
 
 type ItemType = "project" | "milestone" | "task";
 
@@ -71,6 +72,7 @@ type AddItemFormProps = {
   initialItemId?: string | null;
   autoFocusTitle?: boolean;
   onCreated?: () => void;
+  onDeleted?: () => void;
 };
 
 const formatOptionLabel = (item: ItemRow, parentType: ItemType | null) => {
@@ -78,6 +80,8 @@ const formatOptionLabel = (item: ItemRow, parentType: ItemType | null) => {
     item.type === "task" && parentType === "task" ? "Subtask" : item.type;
   return `${" ".repeat(item.depth * 2)}${item.title} (${labelType})`;
 };
+
+const EMPTY_SELECT_VALUE = "__none__";
 
 const AddItemForm: FC<AddItemFormProps> = ({
   selectedProjectId,
@@ -88,6 +92,7 @@ const AddItemForm: FC<AddItemFormProps> = ({
   initialItemId,
   autoFocusTitle,
   onCreated,
+  onDeleted,
 }) => {
   const [mode, setMode] = useState<"create" | "edit">(
     initialMode ?? "create"
@@ -637,38 +642,56 @@ const AddItemForm: FC<AddItemFormProps> = ({
     }
   };
 
+  const handleDeleteItem = async () => {
+    if (mode !== "edit" || !selectedItemId) {
+      return;
+    }
+    if (!confirm("Delete this item? This also deletes its descendants.")) {
+      return;
+    }
+    try {
+      await mutate("delete_item", { item_id: selectedItemId });
+      onRefresh();
+      onDeleted?.();
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Unknown error";
+      setError(message);
+    }
+  };
+
   return (
     <form className="add-form" onSubmit={handleSubmit}>
       <div className="form-row">
         <label>
           Mode
-          <select
+          <AppSelect
             value={mode}
-            onChange={(event) => {
-              const next = event.target.value as "create" | "edit";
+            onChange={(value) => {
+              const next = value as "create" | "edit";
               setMode(next);
               setSelectedItemId("");
               resetForm();
             }}
-          >
-            <option value="create">Create</option>
-            <option value="edit">Edit</option>
-          </select>
+            options={[
+              { value: "create", label: "Create" },
+              { value: "edit", label: "Edit" },
+            ]}
+          />
         </label>
         {mode === "edit" ? (
           <label>
             Select item
-            <select
-              value={selectedItemId}
-              onChange={(event) => setSelectedItemId(event.target.value)}
-            >
-              <option value="">Select item</option>
-              {editableItems.map((item) => (
-                <option key={item.id} value={item.id}>
-                  {item.title}
-                </option>
-              ))}
-            </select>
+            <AppSelect
+              value={selectedItemId || undefined}
+              onChange={(value) => setSelectedItemId(value)}
+              placeholder="Select item"
+              options={[
+                ...editableItems.map((item) => ({
+                  value: item.id,
+                  label: item.title,
+                })),
+              ]}
+            />
           </label>
         ) : null}
         {mode === "edit" && loadingDetails ? (
@@ -679,28 +702,29 @@ const AddItemForm: FC<AddItemFormProps> = ({
       <div className="form-row">
         <label>
           What are you adding? *
-          <select
+          <AppSelect
             value={type}
-            onChange={(event) => {
-              const next = event.target.value as ItemType;
+            onChange={(value) => {
+              const next = value as ItemType;
               setType(next);
               if (next !== "task") {
                 setParentId(null);
               }
             }}
             disabled={mode === "edit"}
-          >
-            <option value="project">Project</option>
-            <option value="milestone">Milestone</option>
-            <option value="task">Task / Subtask</option>
-          </select>
+            options={[
+              { value: "project", label: "Project" },
+              { value: "milestone", label: "Milestone" },
+              { value: "task", label: "Task / Subtask" },
+            ]}
+          />
           {mode === "edit" ? (
             <span className="hint">Type cannot be changed</span>
           ) : null}
         </label>
         <label>
           Title *
-          <input
+          <AppInput
             ref={titleInputRef}
             value={title}
             onChange={(event) => setTitle(event.target.value)}
@@ -710,7 +734,7 @@ const AddItemForm: FC<AddItemFormProps> = ({
         </label>
         <label>
           Deadline
-          <input
+          <AppInput
             type="datetime-local"
             value={dueAt}
             onChange={(event) => setDueAt(event.target.value)}
@@ -718,23 +742,24 @@ const AddItemForm: FC<AddItemFormProps> = ({
         </label>
         <label>
           Estimate mode *
-          <select
+          <AppSelect
             value={estimateMode}
-            onChange={(event) => {
-              const next = event.target.value as "manual" | "rollup";
+            onChange={(value) => {
+              const next = value as "manual" | "rollup";
               setEstimateMode(next);
               if (next === "rollup") {
                 setEstimateMinutes("0");
               }
             }}
-          >
-            <option value="manual">Manual</option>
-            <option value="rollup">Rollup</option>
-          </select>
+            options={[
+              { value: "manual", label: "Manual" },
+              { value: "rollup", label: "Rollup" },
+            ]}
+          />
         </label>
         <label>
           Estimate minutes {estimateMode === "manual" ? "*" : ""}
-          <input
+          <AppInput
             type="number"
             min={0}
             inputMode="numeric"
@@ -749,11 +774,11 @@ const AddItemForm: FC<AddItemFormProps> = ({
         </label>
         <label>
           Estimate confidence
-          <input disabled value="Not supported yet" />
+          <AppInput disabled value="Not supported yet" />
         </label>
         <label>
           Notes
-          <textarea
+          <AppTextArea
             rows={2}
             value={notes}
             onChange={(event) => setNotes(event.target.value)}
@@ -765,7 +790,7 @@ const AddItemForm: FC<AddItemFormProps> = ({
       <div className="form-row">
         <label>
           Start time
-          <input
+          <AppInput
             type="datetime-local"
             value={scheduledFor}
             onChange={(event) => setScheduledFor(event.target.value)}
@@ -778,7 +803,7 @@ const AddItemForm: FC<AddItemFormProps> = ({
         <label>
           Parent
           {type === "milestone" ? (
-            <input
+            <AppInput
               value={
                 selectedProjectId === UNGROUPED_PROJECT_ID
                   ? "Ungrouped (no project)"
@@ -789,81 +814,85 @@ const AddItemForm: FC<AddItemFormProps> = ({
               disabled
             />
           ) : (
-            <select
-              value={parentId ?? ""}
-              onChange={(event) =>
-                setParentId(event.target.value ? event.target.value : null)
+            <AppSelect
+              value={parentId ?? EMPTY_SELECT_VALUE}
+              onChange={(value) =>
+                setParentId(value === EMPTY_SELECT_VALUE ? null : value)
               }
               disabled={type === "project" || !selectedProjectId}
-            >
-              {selectedProjectId === UNGROUPED_PROJECT_ID ? (
-                <option value="">Ungrouped (no parent)</option>
-              ) : (
-                <option value={selectedProjectId ?? ""}>
-                  Project (root)
-                </option>
-              )}
-              {taskParentOptions.map((option) => (
-                <option key={option.id} value={option.id}>
-                  {formatOptionLabel(
+              options={[
+                selectedProjectId === UNGROUPED_PROJECT_ID
+                  ? {
+                      value: EMPTY_SELECT_VALUE,
+                      label: "Ungrouped (no parent)",
+                    }
+                  : {
+                      value: selectedProjectId ?? EMPTY_SELECT_VALUE,
+                      label: selectedProjectId ? "Project (root)" : "Select a project",
+                    },
+                ...taskParentOptions.map((option) => ({
+                  value: option.id,
+                  label: formatOptionLabel(
                     option,
                     parentTypeMap.get(option.parent_id ?? "") ?? null
-                  )}
-                </option>
-              ))}
-            </select>
+                  ),
+                })),
+              ]}
+            />
           )}
         </label>
         <label>
           Status
-          <select value={status} onChange={(event) => setStatus(event.target.value)}>
-            <option value="backlog">backlog</option>
-            <option value="ready">ready</option>
-            <option value="in_progress">in_progress</option>
-            <option value="blocked">blocked</option>
-            <option value="review">review</option>
-            <option value="done">done</option>
-            <option value="canceled">canceled</option>
-          </select>
+          <AppSelect
+            value={status}
+            onChange={(value) => setStatus(value)}
+            options={[
+              { value: "backlog", label: "backlog" },
+              { value: "ready", label: "ready" },
+              { value: "in_progress", label: "in_progress" },
+              { value: "blocked", label: "blocked" },
+              { value: "review", label: "review" },
+              { value: "done", label: "done" },
+              { value: "canceled", label: "canceled" },
+            ]}
+          />
         </label>
         <label>
           Priority
-          <select
+          <AppSelect
             value={priority}
-            onChange={(event) => setPriority(event.target.value)}
-          >
-            {Array.from({ length: 6 }, (_, index) => (
-              <option key={index} value={String(index)}>
-                {index}
-              </option>
-            ))}
-          </select>
+            onChange={(value) => setPriority(value)}
+            options={Array.from({ length: 6 }, (_, index) => ({
+              value: String(index),
+              label: String(index),
+            }))}
+          />
         </label>
         <label>
           Health mode
-          <select
+          <AppSelect
             value={healthMode}
-            onChange={(event) =>
-              setHealthMode(event.target.value as "auto" | "manual")
-            }
-          >
-            <option value="auto">auto</option>
-            <option value="manual">manual</option>
-          </select>
+            onChange={(value) => setHealthMode(value as "auto" | "manual")}
+            options={[
+              { value: "auto", label: "auto" },
+              { value: "manual", label: "manual" },
+            ]}
+          />
         </label>
         <label>
           Health
-          <select
+          <AppSelect
             value={health}
-            onChange={(event) => setHealth(event.target.value)}
+            onChange={(value) => setHealth(value)}
             disabled={healthMode !== "manual"}
-          >
-            <option value="on_track">on_track</option>
-            <option value="at_risk">at_risk</option>
-            <option value="behind">behind</option>
-            <option value="ahead">ahead</option>
-            <option value="unknown">unknown</option>
-          </select>
+            options={[
+              { value: "on_track", label: "on_track" },
+              { value: "at_risk", label: "at_risk" },
+              { value: "behind", label: "behind" },
+              { value: "ahead", label: "ahead" },
+              { value: "unknown", label: "unknown" },
+            ]}
+          />
         </label>
       </div>
 
@@ -873,19 +902,21 @@ const AddItemForm: FC<AddItemFormProps> = ({
           <div className="chip-input">
             <div className="chip-list">
               {tagChips.map((tag) => (
-                <button
+                <AppButton
                   key={tag}
                   type="button"
+                  size="1"
+                  variant="soft"
                   className="chip"
                   onClick={() =>
                     setTagChips((prev) => prev.filter((entry) => entry !== tag))
                   }
                 >
                   {tag} ×
-                </button>
+                </AppButton>
               ))}
             </div>
-            <input
+            <AppInput
               value={tagsInput}
               onChange={(event) => setTagsInput(event.target.value)}
               onKeyDown={(event) => {
@@ -903,9 +934,11 @@ const AddItemForm: FC<AddItemFormProps> = ({
             {filteredTagSuggestions.length > 0 ? (
               <div className="chip-suggestions">
                 {filteredTagSuggestions.map((tag) => (
-                  <button
+                  <AppButton
                     key={tag}
                     type="button"
+                    size="1"
+                    variant="soft"
                     className="chip-suggestion"
                     onClick={() => {
                       setTagChips((prev) =>
@@ -915,7 +948,7 @@ const AddItemForm: FC<AddItemFormProps> = ({
                     }}
                   >
                     {tag}
-                  </button>
+                  </AppButton>
                 ))}
               </div>
             ) : null}
@@ -934,9 +967,11 @@ const AddItemForm: FC<AddItemFormProps> = ({
           <div className="chip-input">
             <div className="chip-list">
               {depChips.map((depId) => (
-                <button
+                <AppButton
                   key={depId}
                   type="button"
+                  size="1"
+                  variant="soft"
                   className="chip"
                   onClick={async () => {
                     setDepChips((prev) =>
@@ -961,7 +996,7 @@ const AddItemForm: FC<AddItemFormProps> = ({
                   }}
                 >
                   {depId.slice(0, 8)} ×
-                </button>
+                </AppButton>
               ))}
             </div>
             <ItemAutocomplete
@@ -987,16 +1022,18 @@ const AddItemForm: FC<AddItemFormProps> = ({
                 {blockers.map((blocker) => (
                   <div key={blocker.blocker_id} className="blocker-row">
                     <span>
-                      {blocker.kind}: {blocker.text} {blocker.cleared_at ? "(cleared)" : ""}
+                      {blocker.kind}: {blocker.text}{" "}
+                      {blocker.cleared_at ? "(cleared)" : ""}
                     </span>
                     {!blocker.cleared_at ? (
-                      <button
+                      <AppButton
                         type="button"
-                        className="button button-ghost"
+                        size="1"
+                        variant="ghost"
                         onClick={() => handleClearBlocker(blocker.blocker_id)}
                       >
                         Clear
-                      </button>
+                      </AppButton>
                     ) : null}
                   </div>
                 ))}
@@ -1005,7 +1042,7 @@ const AddItemForm: FC<AddItemFormProps> = ({
           </label>
           <label>
             Add blocker kind
-            <input
+            <AppInput
               value={blockerKind}
               onChange={(event) => setBlockerKind(event.target.value)}
               placeholder="general"
@@ -1013,15 +1050,15 @@ const AddItemForm: FC<AddItemFormProps> = ({
           </label>
           <label>
             Add blocker text
-            <input
+            <AppInput
               value={blockerText}
               onChange={(event) => setBlockerText(event.target.value)}
               placeholder="Reason"
             />
           </label>
-          <button type="button" className="button" onClick={handleAddBlocker}>
+          <AppButton type="button" variant="surface" onClick={handleAddBlocker}>
             Add blocker
-          </button>
+          </AppButton>
         </div>
       ) : null}
 
@@ -1029,17 +1066,24 @@ const AddItemForm: FC<AddItemFormProps> = ({
         <div className="list-empty">Select a project to add a milestone.</div>
       ) : null}
       {error ? <div className="error">{error}</div> : null}
-      <button
-        type="submit"
-        className="button"
-        disabled={
-          (type !== "project" && !selectedProjectId) ||
-          (mode === "edit" && !selectedItemId) ||
-          loadingDetails
-        }
-      >
-        {mode === "edit" ? "Save changes" : "Create item"}
-      </button>
+      <div className="form-actions">
+        {mode === "edit" ? (
+          <AppButton type="button" variant="surface" onClick={handleDeleteItem}>
+            Delete
+          </AppButton>
+        ) : null}
+        <AppButton
+          type="submit"
+          variant="surface"
+          disabled={
+            (type !== "project" && !selectedProjectId) ||
+            (mode === "edit" && !selectedItemId) ||
+            loadingDetails
+          }
+        >
+          {mode === "edit" ? "Save changes" : "Create item"}
+        </AppButton>
+      </div>
     </form>
   );
 };

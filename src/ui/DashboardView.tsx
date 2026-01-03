@@ -1,10 +1,19 @@
-import { useCallback, useEffect, useMemo, useState, type FC } from "react";
+import { SegmentedControl } from "@radix-ui/themes";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useState,
+  type FC,
+  type KeyboardEvent,
+} from "react";
 import type { Scope } from "../domain/scope";
 import { query } from "../rpc/clientSingleton";
 import { formatDate } from "../domain/formatters";
 import { getTodayRange, getWeekRange } from "./dateWindow";
 import ContributionsHeatmap from "./ContributionsHeatmap";
 import { setStatus } from "./itemActions";
+import { AppCheckbox } from "./controls";
 
 type DashboardViewProps = {
   scope: Scope;
@@ -224,29 +233,25 @@ const DashboardView: FC<DashboardViewProps> = ({
     void loadWidgets();
   }, [loadWidgets, refreshToken]);
 
+  const handleRowKeyDown = (action: () => void) => (event: KeyboardEvent) => {
+    if (event.key === "Enter" || event.key === " ") {
+      event.preventDefault();
+      action();
+    }
+  };
+
   return (
     <div className="dashboard-view">
       <ContributionsHeatmap scope={scope} refreshToken={refreshToken} />
       <div className="dashboard-toolbar">
         <div className="dashboard-title">Dashboard</div>
-        <div className="dashboard-toggle">
-          <button
-            type="button"
-            className={
-              windowMode === "today" ? "button button-active" : "button"
-            }
-            onClick={() => setWindowMode("today")}
-          >
-            Today
-          </button>
-          <button
-            type="button"
-            className={windowMode === "week" ? "button button-active" : "button"}
-            onClick={() => setWindowMode("week")}
-          >
-            This Week
-          </button>
-        </div>
+        <SegmentedControl.Root
+          value={windowMode}
+          onValueChange={(value) => setWindowMode(value as "today" | "week")}
+        >
+          <SegmentedControl.Item value="today">Today</SegmentedControl.Item>
+          <SegmentedControl.Item value="week">This Week</SegmentedControl.Item>
+        </SegmentedControl.Root>
       </div>
       {error ? <div className="error">{error}</div> : null}
       {loading ? <div className="list-empty">Loading…</div> : null}
@@ -259,24 +264,24 @@ const DashboardView: FC<DashboardViewProps> = ({
               <div className="dashboard-empty">No scheduled blocks.</div>
             ) : (
               execution.scheduled.map((block) => (
-                <button
+                <div
                   key={block.block_id}
-                  type="button"
                   className="dashboard-row"
                   onClick={() =>
                     onSelectItem(block.item_id, block.project_id ?? null)
                   }
+                  onKeyDown={handleRowKeyDown(() =>
+                    onSelectItem(block.item_id, block.project_id ?? null)
+                  )}
+                  role="button"
+                  tabIndex={0}
                 >
                   <span className="dashboard-leading">
-                    <input
-                      type="checkbox"
+                    <AppCheckbox
                       className="task-checkbox task-checkbox--compact"
                       checked={block.status === "done"}
-                      onChange={(event) =>
-                        void handleToggleDone(
-                          block.item_id,
-                          event.target.checked
-                        )
+                      onCheckedChange={(checked) =>
+                        void handleToggleDone(block.item_id, checked === true)
                       }
                       onClick={(event) => event.stopPropagation()}
                     />
@@ -288,7 +293,7 @@ const DashboardView: FC<DashboardViewProps> = ({
                   <span className="dashboard-meta">
                     {block.project_title ?? "—"}
                   </span>
-                </button>
+                </div>
               ))
             )}
             {execution.meta?.truncated.scheduled ? (
@@ -304,24 +309,24 @@ const DashboardView: FC<DashboardViewProps> = ({
               <div className="dashboard-empty">No actionable items.</div>
             ) : (
               execution.actionable_now.map((item) => (
-                <button
+                <div
                   key={item.item_id}
-                  type="button"
                   className="dashboard-row"
                   onClick={() =>
                     onSelectItem(item.item_id, item.project_id ?? null)
                   }
+                  onKeyDown={handleRowKeyDown(() =>
+                    onSelectItem(item.item_id, item.project_id ?? null)
+                  )}
+                  role="button"
+                  tabIndex={0}
                 >
                   <span className="dashboard-leading">
-                    <input
-                      type="checkbox"
+                    <AppCheckbox
                       className="task-checkbox task-checkbox--compact"
                       checked={item.status === "done"}
-                      onChange={(event) =>
-                        void handleToggleDone(
-                          item.item_id,
-                          event.target.checked
-                        )
+                      onCheckedChange={(checked) =>
+                        void handleToggleDone(item.item_id, checked === true)
                       }
                       onClick={(event) => event.stopPropagation()}
                     />
@@ -333,7 +338,7 @@ const DashboardView: FC<DashboardViewProps> = ({
                   <span className="dashboard-meta">
                     {item.due_at ? formatDate(item.due_at) : "No due"}
                   </span>
-                </button>
+                </div>
               ))
             )}
             {execution.meta?.truncated.actionable_now ? (
@@ -349,24 +354,24 @@ const DashboardView: FC<DashboardViewProps> = ({
               <div className="dashboard-empty">Nothing ready without blocks.</div>
             ) : (
               execution.unscheduled_ready.map((item) => (
-                <button
+                <div
                   key={item.item_id}
-                  type="button"
                   className="dashboard-row"
                   onClick={() =>
                     onSelectItem(item.item_id, item.project_id ?? null)
                   }
+                  onKeyDown={handleRowKeyDown(() =>
+                    onSelectItem(item.item_id, item.project_id ?? null)
+                  )}
+                  role="button"
+                  tabIndex={0}
                 >
                   <span className="dashboard-leading">
-                    <input
-                      type="checkbox"
+                    <AppCheckbox
                       className="task-checkbox task-checkbox--compact"
                       checked={item.status === "done"}
-                      onChange={(event) =>
-                        void handleToggleDone(
-                          item.item_id,
-                          event.target.checked
-                        )
+                      onCheckedChange={(checked) =>
+                        void handleToggleDone(item.item_id, checked === true)
                       }
                       onClick={(event) => event.stopPropagation()}
                     />
@@ -378,7 +383,7 @@ const DashboardView: FC<DashboardViewProps> = ({
                   <span className="dashboard-meta">
                     {item.due_at ? formatDate(item.due_at) : "No due"}
                   </span>
-                </button>
+                </div>
               ))
             )}
             {execution.meta?.truncated.unscheduled_ready ? (
@@ -398,22 +403,22 @@ const DashboardView: FC<DashboardViewProps> = ({
               <div className="dashboard-empty">No dependency blocks.</div>
             ) : (
               blocked.blocked_by_dependencies.map((item) => (
-                <button
+                <div
                   key={item.item_id}
-                  type="button"
                   className="dashboard-row"
                   onClick={() => onSelectItem(item.item_id, null)}
+                  onKeyDown={handleRowKeyDown(() =>
+                    onSelectItem(item.item_id, null)
+                  )}
+                  role="button"
+                  tabIndex={0}
                 >
                   <span className="dashboard-leading">
-                    <input
-                      type="checkbox"
+                    <AppCheckbox
                       className="task-checkbox task-checkbox--compact"
                       checked={item.status === "done"}
-                      onChange={(event) =>
-                        void handleToggleDone(
-                          item.item_id,
-                          event.target.checked
-                        )
+                      onCheckedChange={(checked) =>
+                        void handleToggleDone(item.item_id, checked === true)
                       }
                       onClick={(event) => event.stopPropagation()}
                     />
@@ -422,7 +427,7 @@ const DashboardView: FC<DashboardViewProps> = ({
                   <span className="dashboard-meta">
                     {item.project_title ?? "—"}
                   </span>
-                </button>
+                </div>
               ))
             )}
           </div>
@@ -432,22 +437,22 @@ const DashboardView: FC<DashboardViewProps> = ({
               <div className="dashboard-empty">No active blockers.</div>
             ) : (
               blocked.blocked_by_blockers.map((item) => (
-                <button
+                <div
                   key={item.item_id}
-                  type="button"
                   className="dashboard-row"
                   onClick={() => onSelectItem(item.item_id, null)}
+                  onKeyDown={handleRowKeyDown(() =>
+                    onSelectItem(item.item_id, null)
+                  )}
+                  role="button"
+                  tabIndex={0}
                 >
                   <span className="dashboard-leading">
-                    <input
-                      type="checkbox"
+                    <AppCheckbox
                       className="task-checkbox task-checkbox--compact"
                       checked={item.status === "done"}
-                      onChange={(event) =>
-                        void handleToggleDone(
-                          item.item_id,
-                          event.target.checked
-                        )
+                      onCheckedChange={(checked) =>
+                        void handleToggleDone(item.item_id, checked === true)
                       }
                       onClick={(event) => event.stopPropagation()}
                     />
@@ -457,7 +462,7 @@ const DashboardView: FC<DashboardViewProps> = ({
                     {item.blocker_count} blocker
                     {item.blocker_count === 1 ? "" : "s"}
                   </span>
-                </button>
+                </div>
               ))
             )}
           </div>
@@ -469,22 +474,22 @@ const DashboardView: FC<DashboardViewProps> = ({
               <div className="dashboard-empty">No scheduled blocks blocked.</div>
             ) : (
               blocked.scheduled_but_blocked.map((item) => (
-                <button
+                <div
                   key={item.item_id}
-                  type="button"
                   className="dashboard-row dashboard-row-warning"
                   onClick={() => onSelectItem(item.item_id, null)}
+                  onKeyDown={handleRowKeyDown(() =>
+                    onSelectItem(item.item_id, null)
+                  )}
+                  role="button"
+                  tabIndex={0}
                 >
                   <span className="dashboard-leading">
-                    <input
-                      type="checkbox"
+                    <AppCheckbox
                       className="task-checkbox task-checkbox--compact"
                       checked={item.status === "done"}
-                      onChange={(event) =>
-                        void handleToggleDone(
-                          item.item_id,
-                          event.target.checked
-                        )
+                      onCheckedChange={(checked) =>
+                        void handleToggleDone(item.item_id, checked === true)
                       }
                       onClick={(event) => event.stopPropagation()}
                     />
@@ -493,7 +498,7 @@ const DashboardView: FC<DashboardViewProps> = ({
                   <span className="dashboard-meta">
                     {item.project_title ?? "—"}
                   </span>
-                </button>
+                </div>
               ))
             )}
           </div>
@@ -507,22 +512,22 @@ const DashboardView: FC<DashboardViewProps> = ({
               <div className="dashboard-empty">No upcoming deadlines.</div>
             ) : (
               dueOverdue.due_soon.map((item) => (
-                <button
+                <div
                   key={item.item_id}
-                  type="button"
                   className="dashboard-row"
                   onClick={() => onSelectItem(item.item_id, null)}
+                  onKeyDown={handleRowKeyDown(() =>
+                    onSelectItem(item.item_id, null)
+                  )}
+                  role="button"
+                  tabIndex={0}
                 >
                   <span className="dashboard-leading">
-                    <input
-                      type="checkbox"
+                    <AppCheckbox
                       className="task-checkbox task-checkbox--compact"
                       checked={item.status === "done"}
-                      onChange={(event) =>
-                        void handleToggleDone(
-                          item.item_id,
-                          event.target.checked
-                        )
+                      onCheckedChange={(checked) =>
+                        void handleToggleDone(item.item_id, checked === true)
                       }
                       onClick={(event) => event.stopPropagation()}
                     />
@@ -534,7 +539,7 @@ const DashboardView: FC<DashboardViewProps> = ({
                   <span className="dashboard-meta">
                     {formatDate(item.due_at)}
                   </span>
-                </button>
+                </div>
               ))
             )}
           </div>
@@ -544,22 +549,22 @@ const DashboardView: FC<DashboardViewProps> = ({
               <div className="dashboard-empty">No overdue items.</div>
             ) : (
               dueOverdue.overdue.map((item) => (
-                <button
+                <div
                   key={item.item_id}
-                  type="button"
                   className="dashboard-row dashboard-row-warning"
                   onClick={() => onSelectItem(item.item_id, null)}
+                  onKeyDown={handleRowKeyDown(() =>
+                    onSelectItem(item.item_id, null)
+                  )}
+                  role="button"
+                  tabIndex={0}
                 >
                   <span className="dashboard-leading">
-                    <input
-                      type="checkbox"
+                    <AppCheckbox
                       className="task-checkbox task-checkbox--compact"
                       checked={item.status === "done"}
-                      onChange={(event) =>
-                        void handleToggleDone(
-                          item.item_id,
-                          event.target.checked
-                        )
+                      onCheckedChange={(checked) =>
+                        void handleToggleDone(item.item_id, checked === true)
                       }
                       onClick={(event) => event.stopPropagation()}
                     />
@@ -571,7 +576,7 @@ const DashboardView: FC<DashboardViewProps> = ({
                   <span className="dashboard-meta">
                     {formatDate(item.due_at)}
                   </span>
-                </button>
+                </div>
               ))
             )}
           </div>

@@ -1,10 +1,11 @@
 import type { FC, KeyboardEvent } from "react";
 import { useEffect, useMemo, useRef, useState } from "react";
-import * as Dialog from "@radix-ui/react-dialog";
+import { Dialog } from "@radix-ui/themes";
 import { parseCommand } from "../cli/parseCommand";
 import { mutate, query } from "../rpc/clientSingleton";
 import { UNGROUPED_PROJECT_ID } from "./constants";
 import type { ItemLite } from "./ItemAutocomplete";
+import { AppButton, AppInput } from "./controls";
 
 type CommandPaletteProps = {
   open: boolean;
@@ -660,18 +661,15 @@ const CommandPalette: FC<CommandPaletteProps> = ({
 
   return (
     <Dialog.Root open={open} onOpenChange={onOpenChange}>
-      <Dialog.Portal>
-        <div className="palette-root" role="presentation">
-          <Dialog.Overlay className="palette-overlay" />
-          <Dialog.Content
-            className="palette-content"
-            aria-label="Command palette"
-          >
+      <Dialog.Content
+        className="palette-content"
+        aria-label="Command palette"
+      >
         <div className="palette-header">
           <div className="autocomplete">
-            <input
+            <AppInput
               ref={inputRef}
-              className="palette-input"
+              rootClassName="palette-input"
               type="text"
               value={inputValue}
               onChange={(event) => {
@@ -684,9 +682,10 @@ const CommandPalette: FC<CommandPaletteProps> = ({
             {autoOpen && autoItems.length > 0 ? (
               <div className="autocomplete-list" role="listbox">
                 {autoItems.map((item, index) => (
-                  <button
+                  <AppButton
                     key={item.id}
                     type="button"
+                    variant="ghost"
                     className={`autocomplete-option ${
                       index === autoIndex ? "is-active" : ""
                     }`}
@@ -699,8 +698,10 @@ const CommandPalette: FC<CommandPaletteProps> = ({
                     }}
                   >
                     <span className="autocomplete-title">{item.title}</span>
-                    <span className="autocomplete-meta">{item.item_type}</span>
-                  </button>
+                    <span className="autocomplete-meta">
+                      {item.item_type}
+                    </span>
+                  </AppButton>
                 ))}
               </div>
             ) : null}
@@ -709,7 +710,9 @@ const CommandPalette: FC<CommandPaletteProps> = ({
             <div className="palette-error">{submitError}</div>
           ) : null}
           {parseResult && !parseResult.ok ? (
-            <div className="palette-error">{parseResult.error.message}</div>
+            <div className="palette-error">
+              {parseResult.error.message}
+            </div>
           ) : null}
           {parseResult && parseResult.ok ? (
             <div className="palette-preview">
@@ -753,9 +756,7 @@ const CommandPalette: FC<CommandPaletteProps> = ({
             <GeneralHelp />
           )}
         </div>
-          </Dialog.Content>
-        </div>
-      </Dialog.Portal>
+      </Dialog.Content>
     </Dialog.Root>
   );
 };

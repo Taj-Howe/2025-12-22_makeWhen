@@ -12,6 +12,9 @@ export const updateItemFields = (
 export const deleteItem = (id: string) =>
   mutate("delete_item", { item_id: id });
 
+export const deleteItems = (ids: string[]) =>
+  mutate("items.delete_many", { ids });
+
 export const createItem = (args: Record<string, unknown>) =>
   mutate("create_item", args);
 

@@ -4,6 +4,7 @@ import { PlusIcon } from "@radix-ui/react-icons";
 import { query } from "../rpc/clientSingleton";
 import { UNGROUPED_PROJECT_ID, UNGROUPED_PROJECT_LABEL } from "./constants";
 import type { Scope } from "../domain/scope";
+import { AppButton, AppIconButton } from "./controls";
 type Project = {
   id: string;
   title: string;
@@ -103,8 +104,9 @@ const SidebarProjects: FC<SidebarProjectsProps> = ({
           <ContextMenu.Trigger asChild>
             <div className="sidebar-header">
               <div className="sidebar-title">Projects</div>
-              <button
+              <AppIconButton
                 type="button"
+                variant="ghost"
                 className="icon-button"
                 onClick={(event) => {
                   event.stopPropagation();
@@ -114,7 +116,7 @@ const SidebarProjects: FC<SidebarProjectsProps> = ({
                 title="Add project"
               >
                 <PlusIcon />
-              </button>
+              </AppIconButton>
             </div>
           </ContextMenu.Trigger>
           <ContextMenu.Portal>
@@ -130,7 +132,7 @@ const SidebarProjects: FC<SidebarProjectsProps> = ({
         </ContextMenu.Root>
         <div className="sidebar-list">
           {error ? <div className="error">{error}</div> : null}
-          <button
+          <AppButton
             key={UNGROUPED_PROJECT_ID}
             className={
               scope.kind === "project" &&
@@ -139,17 +141,18 @@ const SidebarProjects: FC<SidebarProjectsProps> = ({
                 : "sidebar-item"
             }
             type="button"
+            variant="ghost"
             onClick={() => onSelect(UNGROUPED_PROJECT_ID)}
           >
             {UNGROUPED_PROJECT_LABEL}
-          </button>
+          </AppButton>
           {projects.length === 0 ? (
             <div className="sidebar-empty">No projects yet</div>
           ) : (
             projects.map((project) => (
               <ContextMenu.Root key={project.id}>
                 <ContextMenu.Trigger asChild>
-                  <button
+                  <AppButton
                     className={
                       scope.kind === "project" &&
                       project.id === selectedProjectId
@@ -157,10 +160,11 @@ const SidebarProjects: FC<SidebarProjectsProps> = ({
                         : "sidebar-item"
                     }
                     type="button"
+                    variant="ghost"
                     onClick={() => onSelect(project.id)}
                   >
                     {project.title}
-                  </button>
+                  </AppButton>
                 </ContextMenu.Trigger>
                 <ContextMenu.Portal>
                   <ContextMenu.Content className="context-menu-content">
@@ -187,7 +191,7 @@ const SidebarProjects: FC<SidebarProjectsProps> = ({
             <div className="sidebar-empty">No calendars yet</div>
           ) : (
             users.map((user) => (
-              <button
+              <AppButton
                 key={user.user_id}
                 className={
                   scope.kind === "user" &&
@@ -196,10 +200,11 @@ const SidebarProjects: FC<SidebarProjectsProps> = ({
                     : "sidebar-item"
                 }
                 type="button"
+                variant="ghost"
                 onClick={() => onSelectUser(user.user_id)}
               >
                 {user.display_name}
-              </button>
+              </AppButton>
             ))
           )}
         </div>

@@ -4,6 +4,7 @@ git procedure:
 
 # Bug Fixes
 - [ ] Fix the asignee menu not having enough space to click if its the last task in the list. 
+- [ ] Highlight item that corresponds to scope. Make page titles more expressive. 
 
 
 # Upcoming Features:
@@ -18,8 +19,17 @@ git procedure:
 - [ ] Make slim, medium, and bold style
 - [ ] Code, Minimal, and 
 - [ ] I want three cohesive concepts for the themes. SO each color theme matches with a font style matches with a graphic weight (corners, lines, etc). They can each be controlled indvidgually. Use the Radix color pack as your sample selection. For the fonts, I will paste the embed links for the fonts that I want defualt. 
+- [ ] Font one: looks good in bolder type faces, serif, traditional but still clean and minmal:
+traditional font:  <link rel="stylesheet" href="https://use.typekit.net/pcv4nbv.css">
+minimal font pack: <link rel="stylesheet" href="https://use.typekit.net/pcv4nbv.css">
+code font pack: <link rel="stylesheet" href="https://use.typekit.net/pcv4nbv.css">
 
-
+## Progress Tracking UI  
+  - [ ] Add a completed tasks bar (identical to github contributions) (this is iciing on the cake)
+  - [ ] Create a time tracking functionality that has a timer that fills in actual hours worked (vs estimate duration) 
+  - [ ] 
+  - [ ] Would be fun to have achievement levels for time worked (actual vs estimate), efficiency achievements, total tasks achievements, etc.
+  - And then just go ahead and add a basic set of met
 
 
 ## Add Folder Support 
@@ -30,26 +40,18 @@ git procedure:
 ## CLI 
 - [ ] Add a switch command to switch between projects 
 
-
-## Progress Tracking UI  
-  - [ ] Add a completed tasks bar (identical to github contributions) (this is iciing on the cake)
-  - [ ] Would be fun to have achievement levels for time worked (actual vs estimate), efficiency achievements, total tasks achievements, etc.
-  - And then just go ahead and add a basic set of metrics. Whatever is most common in PM world.  
+rics. Whatever is most common in PM world.  
 
 
 ## Create the next views
+
+- [ ]  make the dahsboard stich between list view/kanban/cal/gantt for that user. When on project, it switches between the views. 
+
+
 - [ ] I need project and user views to be able to be opened in tabs. RIght now the switch between list/calendar view needs to be somewhere else. I think how it works is you can select the level of the view, and type of view combination. Somehow this has to be simple in the ui. Maybe two horizontal selection bars at the top? 
  - [ ] Decisions: How to organize all of these views? How do I set the foundation so that i can start with just project based calendar, kanban, gantt, today, etc, and then build the functionality for calendars by user/team/org. 
 
-    - Org Calendar 
-      - User Calendar 
-       - Project Calender Shows all tasks
-   - Org Kanban
-     - User Kanban
-        - Project Kanban
-    - Org Gantt
-        - User Gantt 
-             - Project Gantt 
+   
     - Today
         - Project Today
             - User Today 
@@ -57,7 +59,7 @@ git procedure:
 
 ### LIST View
 - 
-    - by org
+    
         - by user
             - by project
 ### 4.1 Project view (tree)
@@ -68,23 +70,10 @@ git procedure:
         - by user
             - by project
 
-### 4.2 Kanban view
-- Columns: backlog, ready, in_progress, blocked, review, done (canceled hidden by default)
-- Swimlanes optional: by project, by assignee, by health
-        - by user
-        - by project 
+
 
             
 
-### 4.4 Gantt view
-Okay, so that app is working great. List view and calendar view seem to be in synch. The features are working correctly. it's usable. 
-
-Next big task is Gantt view. Look back at this context to understand the design philosophy around the dependencies. I want Gantt to work even if the dependency logic hasn't been set up. Instead, it would just show a horizontal view of time, basically the order someone will do projects based on the order they are in the calendar. Then, when dependency logic is added, the lines will be drawn per usual gantt chart behavior. I would like dependency logic to be able to be added by interacting with the UI. 
-- Bars reflect scheduled blocks:
-  - Task bar: earliest block start → latest block end (optionally show gaps)
-  - Project/milestone bar: rollup start/end from descendants
-- Due markers render as vertical lines/pins
-        
 
 
 ### 4.5 “Today / This Week” execution view
@@ -122,8 +111,11 @@ Missing fields in the list view (not showing up in the input component either):
  - There are no tags field 
  - No depends on field 
 
- Completed: 
-
+ 
+ 
+ 
+ ## **Completed:** 
+________________________________________
 
 ### 4.3 Calendar view
 Notes as of dec 30: 
@@ -175,3 +167,15 @@ Interactions:
   -[x] Don't sto re single dependons_on string field if you care about SS/FF
   -[x] Don't store blocked-by and blocking as separate source-of-truth fields. This creates contradictions. Pick one truth (the dependecy edges,) compute the rest. 
 -[x] Scheduled for should shange to start date + duration to compute time block, keeping due date flag separate (but contained within the same task). 
+
+
+
+### 4.4 Gantt view
+Okay, so that app is working great. List view and calendar view seem to be in synch. The features are working correctly. it's usable. 
+
+Next big task is Gantt view. Look back at this context to understand the design philosophy around the dependencies. I want Gantt to work even if the dependency logic hasn't been set up. Instead, it would just show a horizontal view of time, basically the order someone will do projects based on the order they are in the calendar. Then, when dependency logic is added, the lines will be drawn per usual gantt chart behavior. I would like dependency logic to be able to be added by interacting with the UI. 
+- Bars reflect scheduled blocks:
+  - Task bar: earliest block start → latest block end (optionally show gaps)
+  - Project/milestone bar: rollup start/end from descendants
+- Due markers render as vertical lines/pins
+        

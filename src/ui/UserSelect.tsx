@@ -6,6 +6,7 @@ import {
   type FC,
 } from "react";
 import { query } from "../rpc/clientSingleton";
+import { AppButton, AppInput } from "./controls";
 
 type UserOption = {
   user_id: string;
@@ -94,17 +95,18 @@ const UserSelect: FC<UserSelectProps> = ({
 
   return (
     <div className="user-select" ref={containerRef}>
-      <button
+      <AppButton
         type="button"
+        variant="ghost"
         className="user-select-trigger"
         onClick={() => setOpen((prev) => !prev)}
       >
         {selected?.display_name ?? "Unassigned"}
-      </button>
+      </AppButton>
       {open ? (
         <div className="user-select-popover">
-          <input
-            className="user-select-input"
+          <AppInput
+            rootClassName="user-select-input"
             value={filter}
             onChange={(event) => setFilter(event.target.value)}
             placeholder={placeholder}
@@ -113,8 +115,10 @@ const UserSelect: FC<UserSelectProps> = ({
           {error ? <div className="user-select-error">{error}</div> : null}
           <div className="user-select-list">
             {allowClear ? (
-              <button
+              <AppButton
                 type="button"
+                size="1"
+                variant="ghost"
                 className={
                   value === null
                     ? "user-select-option is-active"
@@ -127,15 +131,17 @@ const UserSelect: FC<UserSelectProps> = ({
                 }}
               >
                 Unassigned
-              </button>
+              </AppButton>
             ) : null}
             {filtered.length === 0 ? (
               <div className="user-select-empty">No users found</div>
             ) : (
               filtered.map((user) => (
-                <button
+                <AppButton
                   key={user.user_id}
                   type="button"
+                  size="1"
+                  variant="ghost"
                   className={
                     user.user_id === value
                       ? "user-select-option is-active"
@@ -148,7 +154,7 @@ const UserSelect: FC<UserSelectProps> = ({
                   }}
                 >
                   {user.display_name}
-                </button>
+                </AppButton>
               ))
             )}
           </div>

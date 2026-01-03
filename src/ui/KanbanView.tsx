@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useState, type FC } from "react";
 import { mutate, query } from "../rpc/clientSingleton";
 import type { Scope } from "../domain/scope";
+import { AppButton, AppCheckbox, AppSelect, AppSwitch } from "./controls";
 
 type CardItem = {
   id: string;
@@ -244,33 +245,32 @@ const KanbanView: FC<KanbanViewProps> = ({
         <div className="kanban-toolbar-left">
           <label>
             Swimlanes
-            <select
+            <AppSelect
               value={swimlaneMode}
-              onChange={(event) =>
+              onChange={(value) =>
                 setSwimlaneMode(
-                  event.target.value as "none" | "assignee" | "project" | "health"
+                  value as "none" | "assignee" | "project" | "health"
                 )
               }
-            >
-              <option value="none">None</option>
-              <option value="assignee">By Assignee</option>
-              <option value="project">By Project</option>
-              <option value="health">By Health</option>
-            </select>
+              options={[
+                { value: "none", label: "None" },
+                { value: "assignee", label: "By Assignee" },
+                { value: "project", label: "By Project" },
+                { value: "health", label: "By Health" },
+              ]}
+            />
           </label>
           <label className="kanban-toggle">
-            <input
-              type="checkbox"
+            <AppSwitch
               checked={showDone}
-              onChange={(event) => setShowDone(event.target.checked)}
+              onCheckedChange={(checked) => setShowDone(checked === true)}
             />
             Show Done
           </label>
           <label className="kanban-toggle">
-            <input
-              type="checkbox"
+            <AppSwitch
               checked={showCanceled}
-              onChange={(event) => setShowCanceled(event.target.checked)}
+              onCheckedChange={(checked) => setShowCanceled(checked === true)}
             />
             Show Canceled
           </label>
@@ -294,13 +294,15 @@ const KanbanView: FC<KanbanViewProps> = ({
                 >
                   <div className="kanban-column-header">
                     <span>{status.replace("_", " ")}</span>
-                    <button
+                    <AppButton
                       type="button"
+                      size="1"
+                      variant="ghost"
                       className="kanban-add"
                       onClick={() => void handleCreate(lane, status)}
                     >
                       + Task
-                    </button>
+                    </AppButton>
                   </div>
                   <div className="kanban-column-body">
                     {(lane.columns[status] ?? []).length === 0 ? (
@@ -318,12 +320,11 @@ const KanbanView: FC<KanbanViewProps> = ({
                         onClick={() => onOpenItem(card.id)}
                       >
                         <div className="kanban-card-header">
-                          <input
-                            type="checkbox"
+                          <AppCheckbox
                             className="task-checkbox task-checkbox--compact"
                             checked={card.status === "done"}
-                            onChange={(event) =>
-                              void handleToggleDone(card.id, event.target.checked)
+                            onCheckedChange={(checked) =>
+                              void handleToggleDone(card.id, checked === true)
                             }
                             onClick={(event) => event.stopPropagation()}
                           />

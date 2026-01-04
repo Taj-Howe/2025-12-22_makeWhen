@@ -514,6 +514,10 @@ body {
   position: relative;
 }
 
+.gantt-timeline-scroll--header {
+  overflow-x: hidden;
+}
+
 .gantt-timeline {
   position: relative;
   min-height: 100%;
@@ -555,7 +559,11 @@ body {
   align-items: center;
   gap: 6px;
   cursor: pointer;
-  overflow: hidden;
+  overflow: visible;
+  white-space: nowrap;
+}
+
+.gantt-bar-title {
   white-space: nowrap;
 }
 

@@ -193,6 +193,232 @@ const parseEdgeId = (edgeId: string) => {
   return { successorId: parts[0], predecessorId: parts[1] };
 };
 
+type IntegrityIssue = {
+  code: string;
+  message: string;
+  count?: number;
+  sample?: unknown;
+};
+
+const detectDependencyCycles = (edges: Array<[string, string]>) => {
+  const adjacency = new Map<string, string[]>();
+  for (const [itemId, dependsOnId] of edges) {
+    if (!adjacency.has(itemId)) {
+      adjacency.set(itemId, []);
+    }
+    adjacency.get(itemId)?.push(dependsOnId);
+  }
+  const visited = new Set<string>();
+  const inStack = new Set<string>();
+  const cycles: string[][] = [];
+
+  const dfs = (node: string, path: string[]) => {
+    if (cycles.length >= 5) {
+      return;
+    }
+    if (inStack.has(node)) {
+      const cycleStart = path.indexOf(node);
+      cycles.push(path.slice(cycleStart).concat(node));
+      return;
+    }
+    if (visited.has(node)) {
+      return;
+    }
+    visited.add(node);
+    inStack.add(node);
+    const nextNodes = adjacency.get(node) ?? [];
+    for (const next of nextNodes) {
+      dfs(next, [...path, next]);
+      if (cycles.length >= 5) {
+        break;
+      }
+    }
+    inStack.delete(node);
+  };
+
+  for (const node of adjacency.keys()) {
+    if (cycles.length >= 5) {
+      break;
+    }
+    if (!visited.has(node)) {
+      dfs(node, [node]);
+    }
+  }
+  return cycles;
+};
+
+const verifyIntegrity = (): { ok: boolean; issues: IntegrityIssue[] } => {
+  if (!dbHandle) {
+    return {
+      ok: false,
+      issues: [{ code: "db_missing", message: "DB not initialized" }],
+    };
+  }
+  const issues: IntegrityIssue[] = [];
+
+  const invalidBlocks = dbHandle.exec({
+    sql: "SELECT block_id, item_id, duration_minutes FROM scheduled_blocks WHERE duration_minutes <= 0;",
+    rowMode: "array",
+    returnValue: "resultRows",
+  }) as Array<[string, string, number]>;
+  if (invalidBlocks.length > 0) {
+    issues.push({
+      code: "scheduled_blocks_invalid_duration",
+      message: "Scheduled blocks must have duration_minutes > 0",
+      count: invalidBlocks.length,
+      sample: invalidBlocks.slice(0, 5),
+    });
+  }
+
+  const blocksMissingItems = dbHandle.exec({
+    sql: "SELECT block_id, item_id FROM scheduled_blocks WHERE item_id NOT IN (SELECT id FROM items);",
+    rowMode: "array",
+    returnValue: "resultRows",
+  }) as Array<[string, string]>;
+  if (blocksMissingItems.length > 0) {
+    issues.push({
+      code: "scheduled_blocks_missing_items",
+      message: "Scheduled blocks reference missing items",
+      count: blocksMissingItems.length,
+      sample: blocksMissingItems.slice(0, 5),
+    });
+  }
+
+  const depsMissingItems = dbHandle.exec({
+    sql: "SELECT item_id, depends_on_id FROM dependencies WHERE item_id NOT IN (SELECT id FROM items) OR depends_on_id NOT IN (SELECT id FROM items);",
+    rowMode: "array",
+    returnValue: "resultRows",
+  }) as Array<[string, string]>;
+  if (depsMissingItems.length > 0) {
+    issues.push({
+      code: "dependencies_missing_items",
+      message: "Dependencies reference missing items",
+      count: depsMissingItems.length,
+      sample: depsMissingItems.slice(0, 5),
+    });
+  }
+
+  const dependencyEdges = dbHandle.exec({
+    sql: "SELECT item_id, depends_on_id FROM dependencies;",
+    rowMode: "array",
+    returnValue: "resultRows",
+  }) as Array<[string, string]>;
+  const cycles = detectDependencyCycles(dependencyEdges);
+  if (cycles.length > 0) {
+    issues.push({
+      code: "dependency_cycles",
+      message: "Dependency cycles detected",
+      count: cycles.length,
+      sample: cycles,
+    });
+  }
+
+  const blockersMissingItems = dbHandle.exec({
+    sql: "SELECT blocker_id, item_id FROM blockers WHERE item_id NOT IN (SELECT id FROM items);",
+    rowMode: "array",
+    returnValue: "resultRows",
+  }) as Array<[string, string]>;
+  if (blockersMissingItems.length > 0) {
+    issues.push({
+      code: "blockers_missing_items",
+      message: "Blockers reference missing items",
+      count: blockersMissingItems.length,
+      sample: blockersMissingItems.slice(0, 5),
+    });
+  }
+
+  const timeEntryIssues = dbHandle.exec({
+    sql: "SELECT entry_id, item_id, start_at, end_at FROM time_entries WHERE item_id NOT IN (SELECT id FROM items) OR end_at < start_at;",
+    rowMode: "array",
+    returnValue: "resultRows",
+  }) as Array<[string, string, number, number]>;
+  if (timeEntryIssues.length > 0) {
+    issues.push({
+      code: "time_entries_invalid",
+      message: "Time entries reference missing items or have end_at < start_at",
+      count: timeEntryIssues.length,
+      sample: timeEntryIssues.slice(0, 5),
+    });
+  }
+
+  const timeEntriesByItem = dbHandle.exec({
+    sql: "SELECT item_id, start_at, end_at FROM time_entries ORDER BY item_id, start_at;",
+    rowMode: "array",
+    returnValue: "resultRows",
+  }) as Array<[string, number, number]>;
+  let overlapCount = 0;
+  let overlapSample: Array<[string, number, number, number, number]> = [];
+  let currentItem: string | null = null;
+  let lastEnd = 0;
+  for (const [itemId, startAt, endAt] of timeEntriesByItem) {
+    if (itemId !== currentItem) {
+      currentItem = itemId;
+      lastEnd = endAt;
+      continue;
+    }
+    if (startAt < lastEnd) {
+      overlapCount += 1;
+      if (overlapSample.length < 5) {
+        overlapSample.push([itemId, startAt, endAt, lastEnd, startAt]);
+      }
+    }
+    if (endAt > lastEnd) {
+      lastEnd = endAt;
+    }
+  }
+  if (overlapCount > 0) {
+    issues.push({
+      code: "time_entries_overlap",
+      message: "Overlapping time entries detected for the same item",
+      count: overlapCount,
+      sample: overlapSample,
+    });
+  }
+
+  const runningTimerCount = dbHandle.exec({
+    sql: "SELECT COUNT(*) FROM running_timers;",
+    rowMode: "array",
+    returnValue: "resultRows",
+  }) as Array<[number]>;
+  if ((runningTimerCount[0]?.[0] ?? 0) > 1) {
+    issues.push({
+      code: "multiple_running_timers",
+      message: "More than one running timer exists",
+      count: runningTimerCount[0][0],
+    });
+  }
+
+  const completedMissing = dbHandle.exec({
+    sql: "SELECT id, status, completed_at FROM items WHERE status = 'done' AND completed_at IS NULL;",
+    rowMode: "array",
+    returnValue: "resultRows",
+  }) as Array<[string, string, number | null]>;
+  if (completedMissing.length > 0) {
+    issues.push({
+      code: "completed_at_missing",
+      message: "Done items must have completed_at set",
+      count: completedMissing.length,
+      sample: completedMissing.slice(0, 5),
+    });
+  }
+
+  const completedExtra = dbHandle.exec({
+    sql: "SELECT id, status, completed_at FROM items WHERE status != 'done' AND completed_at IS NOT NULL;",
+    rowMode: "array",
+    returnValue: "resultRows",
+  }) as Array<[string, string, number | null]>;
+  if (completedExtra.length > 0) {
+    issues.push({
+      code: "completed_at_orphaned",
+      message: "Non-done items should not have completed_at set",
+      count: completedExtra.length,
+      sample: completedExtra.slice(0, 5),
+    });
+  }
+
+  return { ok: issues.length === 0, issues };
+};
+
 const minNullable = (a: number | null, b: number | null) => {
   if (a === null) return b;
   if (b === null) return a;
@@ -7095,6 +7321,10 @@ const handleRequest = async (message: RpcRequest): Promise<RpcResponse> => {
             ok: true,
             result: { users, current_user_id: currentUserId },
           };
+          break;
+        }
+        case "debug.verify_integrity": {
+          result = { ok: true, result: verifyIntegrity() };
           break;
         }
         default:

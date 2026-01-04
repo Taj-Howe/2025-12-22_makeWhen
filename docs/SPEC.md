@@ -1,134 +1,76 @@
-# UI Style Settings Spec (v1)
+# MakeWhen Spec (Source of Truth)
 
-Goal: provide a Minimal Theme Settings-style customization layer without rewriting UI. Settings are stored in `settings` under the worker-owned key `ui.settings` as JSON and applied at runtime by resolving CSS variables + body classes + optional CSS snippets.
+This doc defines the non-negotiable domain truths, what is stored vs computed, and what each UI view is allowed to do.
 
-## Settings JSON (UiSettingsV1)
+## Architecture rules
 
-```
-{
-  "version": 1,
-  "presetBundleId": "minimal" | "traditional" | "code",
-  "colorThemeId": "radix_slate" | "radix_amber" | "radix_crimson",
-  "colorMode": "light" | "dark" | "system",
-  "lightSchemeId": "slate" | "amber" | "crimson",
-  "darkSchemeId": "slate" | "amber" | "crimson",
-  "backgroundContrast": "low" | "default" | "high" | "true_black",
-  "accent": { "hue": string, "saturation": number },
-  "fontPackId": "traditional" | "minimal" | "code",
-  "fontSizeScale": 1.0 | 1.05 | 1.1,
-  "weightProfileId": "slim" | "medium" | "bold",
-  "shapeProfileId": "slim" | "medium" | "bold",
-  "overrides": {
-    "radiusPx"?: number,
-    "borderWidthPx"?: number,
-    "density"?: "compact" | "comfortable"
-  },
-  "snippets": {
-    "enabledIds": string[],
-    "order": string[]
-  }
-}
-```
+- UI is a Vite + React + TypeScript SPA.
+- SQLite-WASM runs only in a Web Worker (OPFS + sahpool).
+- UI never runs SQL.
+- All writes go through worker mutate ops.
+- All reads go through worker named queries.
+- Derived logic lives in the worker (and `src/db-worker/rollup.ts`), not in UI.
 
-Default value lives in worker (`DEFAULT_UI_SETTINGS`) and is inserted into `settings` if missing.
+## Source of truth (canonical)
 
-## Token list (CSS variables)
+- Scheduling: `scheduled_blocks` with `{ start_at, duration_minutes }`. End time is derived.
+- Deadlines: `items.due_at` (optional).
+- Dependencies: `dependencies` edges. `blocked_by` / `blocking` are projections only.
+- Blockers: `blockers` table (active = `cleared_at IS NULL`).
+- Completion: `items.completed_at` set when status becomes `done`.
+- Archiving: `items.archived_at` (non-null means archived).
+- Assignment: `item_assignees` (single assignee enforced in UI/ops).
 
-These are the semantic tokens the UI should read. Values are resolved from Radix color scales + presets + overrides:
+## Stored vs computed
 
-- Color surface/text:
-  - `--color-bg`
-  - `--color-panel`
-  - `--color-panel-2`
-  - `--color-text`
-  - `--color-muted-text`
-  - `--color-border`
-  - `--color-border-hover`
-  - `--color-accent`
-  - `--color-accent-text`
-  - `--color-accent-border`
-  - `--color-danger`
-  - `--color-warning`
-  - `--color-success`
-  - `--shadow-color`
+Stored (examples):
+- items: `id`, `type`, `title`, `parent_id`, `status`, `priority`, `due_at`, `estimate_mode`, `estimate_minutes`, `notes`, `health`, `health_mode`, `sort_order`, `completed_at`, `archived_at`
+- scheduled_blocks: `block_id`, `item_id`, `start_at`, `duration_minutes`, `locked`, `source`
+- dependencies: `item_id`, `depends_on_id`, `type`, `lag_minutes` (type/lag may default if missing in older data)
+- blockers, time_entries, item_tags, item_assignees, settings, audit_log, running_timers
 
-- Typography:
-  - `--font-sans`
-  - `--font-mono`
-  - `--font-size-base`
-  - `--line-height`
+Computed (examples):
+- `planned_start_at` / `planned_end_at` (from scheduled_blocks)
+- `slack_minutes` (due_at - planned_end_at; null if no blocks or no due_at)
+- `blocked_by` / `blocking` (from dependency edges + schedule timing)
+- rollups for milestones/projects/tasks with children (estimates, actuals, scheduled minutes)
 
-- Shape/spacing:
-  - `--radius`
-  - `--border-width`
-  - `--density`
+## Scheduling invariant
 
-These map onto existing semantic tokens in `src/ui/theme/semantic-tokens.css`.
+- The only scheduling primitive is `scheduled_blocks`.
+- UI never edits an “end time” field; end is always `start_at + duration_minutes`.
+- “Scheduled For” in UI is derived from earliest block start.
 
-## Body classes (profiles)
+## Dependencies invariant
 
-Body classes provide coarse-grained style switches. The resolver returns a list of classes to apply.
+- Dependencies are stored as edges and are the only truth.
+- `blocked_by` and `blocking` are computed projections for display.
+- Dependency status (satisfied/violated/unknown) is computed from block timing.
 
-- Bundle preset:
-  - `ui-bundle-minimal`
-  - `ui-bundle-traditional`
-  - `ui-bundle-code`
-- Weight profile:
-  - `ui-weight-slim`
-  - `ui-weight-medium`
-  - `ui-weight-bold`
-- Shape profile:
-  - `ui-shape-slim`
-  - `ui-shape-medium`
-  - `ui-shape-bold`
-- Density:
-  - `ui-density-compact`
-  - `ui-density-comfortable`
-- Contrast:
-  - `ui-contrast-low`
-  - `ui-contrast-default`
-  - `ui-contrast-high`
-  - `ui-contrast-true-black`
-- Color mode:
-  - `ui-mode-light`
-  - `ui-mode-dark`
-  - `ui-mode-system`
+## Completion + archiving
 
-## Preset + override resolution
+- When status transitions to `done`, `completed_at` is set.
+- Archiving uses `archived_at` to hide items from active lists.
+- Archived items remain in the DB with all related data intact.
 
-Resolution order is deterministic and additive:
+## Assignments
 
-1) Base tokens (default theme)
-2) Bundle preset (`presetBundleId`)
-3) Independent selectors (color mode/scheme, font pack, weight, shape)
-4) Overrides (`radiusPx`, `borderWidthPx`, `density`)
-5) Snippets (in `snippets.order`)
+- Single assignee per item (enforced by ops: replace existing assignee row).
+- User scope views include only items assigned to that user (no parent inference).
 
-Independent selectors override bundle-provided values when both are present.
+## View responsibilities (UI)
 
-## Snippet behavior
+- UI renders worker query results and formats values only.
+- UI must not compute rollups, dependency projections, or schedule math.
+- List/Calendar/Gantt/Kanban/Dashboard all share the worker’s canonical data.
 
-Snippets are additive overrides applied after token resolution:
+## Operations (writes)
 
-- Snippets are stored in the `ui_snippets` table (id, name, css, is_enabled, sort_order).
-- Enabled snippets apply in sort_order; disabled snippets are ignored.
-- `snippets.enabledIds` / `snippets.order` remain in settings for future compatibility, but `ui_snippets` is the current source of truth.
+- All mutations occur via worker ops (mutate RPC).
+- UI never constructs SQL or bypasses ops.
 
-## Worker settings key
+## Scope model
 
-- Key: `ui.settings`
-- Stored in `settings.value_json` as UiSettingsV1
-- Default is inserted during worker init if missing
-
-## Runtime resolver signature (worker scaffold)
-
-```
-resolveUiThemeRuntime(uiSettings) => {
-  cssVars: { [name: string]: string },
-  bodyClasses: string[],
-  fontLinks: string[],
-  snippetCss: string[]
-}
-```
-
-This will be used by the UI layer to apply variables, classes, and optional font/snippet assets.
+- Scope is either `project` or `user`.
+- Project scope uses the project subtree.
+- User scope includes only items directly assigned to that user.

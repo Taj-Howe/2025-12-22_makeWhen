@@ -1,5 +1,12 @@
 import { SegmentedControl } from "@radix-ui/themes";
-import { useCallback, useEffect, useMemo, useState, type FC } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type FC,
+} from "react";
 import { query, mutate } from "../rpc/clientSingleton";
 import type {
   GanttBlock,
@@ -19,6 +26,8 @@ type GanttViewProps = {
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 const DAY_WIDTH = 120;
+const MIN_DAY_WIDTH = 60;
+const MAX_DAY_WIDTH = 260;
 const ROW_HEIGHT = 28;
 
 const DAY_LABEL = new Intl.DateTimeFormat(undefined, {
@@ -106,6 +115,9 @@ const GanttView: FC<GanttViewProps> = ({
   const [collapsed, setCollapsed] = useState<Set<string>>(() => new Set());
   const [dependencyMode, setDependencyMode] = useState(false);
   const [pendingEdge, setPendingEdge] = useState<string | null>(null);
+  const [dayWidth, setDayWidth] = useState(DAY_WIDTH);
+  const headerScrollRef = useRef<HTMLDivElement | null>(null);
+  const bodyScrollRef = useRef<HTMLDivElement | null>(null);
   const [edgeDraft, setEdgeDraft] = useState<{
     predecessorId: string;
     successorId: string;
@@ -239,11 +251,11 @@ const GanttView: FC<GanttViewProps> = ({
     return days;
   }, [timeWindow]);
 
-  const timelineWidth = timelineDays.length * DAY_WIDTH;
+  const timelineWidth = timelineDays.length * dayWidth;
   const totalHeight = visibleRows.length * ROW_HEIGHT;
 
   const toX = (timestamp: number) =>
-    ((timestamp - timeWindow.start.getTime()) / DAY_MS) * DAY_WIDTH;
+    ((timestamp - timeWindow.start.getTime()) / DAY_MS) * dayWidth;
 
   const rowPositionMap = useMemo(() => {
     const map = new Map<
@@ -318,6 +330,48 @@ const GanttView: FC<GanttViewProps> = ({
       setError(message);
     }
   };
+
+  const handleTimelineScroll = useCallback(() => {
+    if (!headerScrollRef.current || !bodyScrollRef.current) {
+      return;
+    }
+    headerScrollRef.current.scrollLeft = bodyScrollRef.current.scrollLeft;
+  }, []);
+
+  const handleTimelineWheel = useCallback(
+    (event: React.WheelEvent<HTMLDivElement>) => {
+      if (!event.ctrlKey && !event.metaKey) {
+        return;
+      }
+      event.preventDefault();
+      const delta = Math.sign(event.deltaY) * 10;
+      setDayWidth((prev) => {
+        const next = Math.min(MAX_DAY_WIDTH, Math.max(MIN_DAY_WIDTH, prev - delta));
+        return next;
+      });
+    },
+    []
+  );
+
+  useEffect(() => {
+    if (!headerScrollRef.current || !bodyScrollRef.current) {
+      return;
+    }
+    const header = headerScrollRef.current;
+    const body = bodyScrollRef.current;
+    const prevWidth = body.dataset.timelineWidth
+      ? Number(body.dataset.timelineWidth)
+      : timelineWidth;
+    if (!Number.isFinite(prevWidth) || prevWidth <= 0) {
+      body.dataset.timelineWidth = String(timelineWidth);
+      return;
+    }
+    const ratio = body.scrollLeft / prevWidth;
+    const nextScrollLeft = ratio * timelineWidth;
+    body.scrollLeft = nextScrollLeft;
+    header.scrollLeft = nextScrollLeft;
+    body.dataset.timelineWidth = String(timelineWidth);
+  }, [timelineWidth]);
 
   return (
     <div className="gantt-root">
@@ -421,16 +475,24 @@ const GanttView: FC<GanttViewProps> = ({
       <div className="gantt-grid">
         <div className="gantt-header">
           <div className="gantt-label-header">Item</div>
-          <div className="gantt-timeline-header" style={{ width: timelineWidth }}>
-            {timelineDays.map((day) => (
-              <div
-                key={day.toISOString()}
-                className="gantt-day"
-                style={{ width: DAY_WIDTH }}
-              >
-                {formatDayLabel(day)}
-              </div>
-            ))}
+          <div
+            className="gantt-timeline-scroll gantt-timeline-scroll--header"
+            ref={headerScrollRef}
+          >
+            <div
+              className="gantt-timeline-header"
+              style={{ width: timelineWidth }}
+            >
+              {timelineDays.map((day) => (
+                <div
+                  key={day.toISOString()}
+                  className="gantt-day"
+                  style={{ width: dayWidth }}
+                >
+                  {formatDayLabel(day)}
+                </div>
+              ))}
+            </div>
           </div>
         </div>
         <div className="gantt-body">
@@ -463,7 +525,12 @@ const GanttView: FC<GanttViewProps> = ({
               );
             })}
           </div>
-          <div className="gantt-timeline-scroll">
+          <div
+            className="gantt-timeline-scroll"
+            ref={bodyScrollRef}
+            onScroll={handleTimelineScroll}
+            onWheel={handleTimelineWheel}
+          >
             <div
               className="gantt-timeline"
               style={{ width: timelineWidth, height: totalHeight }}
@@ -539,7 +606,7 @@ const GanttView: FC<GanttViewProps> = ({
                         }}
                         onClick={() => handleBarClick(item.id)}
                       >
-                        {item.title}
+                        <span className="gantt-bar-title">{item.title}</span>
                       </AppButton>
                     ) : (
                       <span className="gantt-unscheduled">—</span>

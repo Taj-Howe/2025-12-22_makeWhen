@@ -1,14 +1,13 @@
 import { useCallback, useEffect, useState, type FC } from "react";
 import * as ContextMenu from "@radix-ui/react-context-menu";
 import { PlusIcon } from "@radix-ui/react-icons";
-import { query } from "../rpc/clientSingleton";
+import { serverQuery } from "./serverApi";
 import { UNGROUPED_PROJECT_ID, UNGROUPED_PROJECT_LABEL } from "./constants";
 import type { Scope } from "../domain/scope";
 import { AppButton, AppIconButton } from "./controls";
 type Project = {
   id: string;
   title: string;
-  type: "project" | "milestone" | "task";
 };
 
 type UserLite = {
@@ -24,8 +23,8 @@ type SidebarProjectsProps = {
   refreshToken: number;
   onAddProject: () => void;
   onDeleteProject: (projectId: string, projectTitle: string) => void;
-  users: UserLite[];
-  usersError: string | null;
+  collaborators: UserLite[];
+  collaboratorsError: string | null;
   selectedUserId: string | null;
   onSelectUser: (userId: string) => void;
 };
@@ -38,8 +37,8 @@ const SidebarProjects: FC<SidebarProjectsProps> = ({
   refreshToken,
   onAddProject,
   onDeleteProject,
-  users,
-  usersError,
+  collaborators,
+  collaboratorsError,
   selectedUserId,
   onSelectUser,
 }) => {
@@ -50,28 +49,17 @@ const SidebarProjects: FC<SidebarProjectsProps> = ({
     setError(null);
     let isMounted = true;
     try {
-      const data = await query<{ items: Project[] }>("listItems", {
-      includeDone: true,
-      includeCanceled: true,
-      });
+      const data = await serverQuery<{ projects: Project[] }>(
+        "projects_list",
+        {}
+      );
       if (!isMounted) {
         return;
       }
-      const list = data.items.filter((item) => item.type === "project");
+      const list = data.projects;
       setProjects(list);
-      if (!selectedProjectId) {
-        if (scope.kind === "project") {
-          onSelect(UNGROUPED_PROJECT_ID);
-        } else {
-          onSetProjectId(UNGROUPED_PROJECT_ID);
-        }
-        return;
-      }
-      if (
-        selectedProjectId !== UNGROUPED_PROJECT_ID &&
-        !list.some((item) => item.id === selectedProjectId)
-      ) {
-        const fallback = list[0]?.id ?? UNGROUPED_PROJECT_ID;
+      if (!selectedProjectId || !list.some((item) => item.id === selectedProjectId)) {
+        const fallback = list[0]?.id ?? null;
         if (scope.kind === "project") {
           onSelect(fallback);
         } else {
@@ -132,20 +120,17 @@ const SidebarProjects: FC<SidebarProjectsProps> = ({
         </ContextMenu.Root>
         <div className="sidebar-list">
           {error ? <div className="error">{error}</div> : null}
-          <AppButton
-            key={UNGROUPED_PROJECT_ID}
-            className={
-              scope.kind === "project" &&
-              selectedProjectId === UNGROUPED_PROJECT_ID
-                ? "sidebar-item is-active"
-                : "sidebar-item"
-            }
-            type="button"
-            variant="ghost"
-            onClick={() => onSelect(UNGROUPED_PROJECT_ID)}
-          >
-            {UNGROUPED_PROJECT_LABEL}
-          </AppButton>
+          {projects.length === 0 ? (
+            <AppButton
+              key={UNGROUPED_PROJECT_ID}
+              className="sidebar-item is-active"
+              type="button"
+              variant="ghost"
+              onClick={() => onSelect(UNGROUPED_PROJECT_ID)}
+            >
+              {UNGROUPED_PROJECT_LABEL}
+            </AppButton>
+          ) : null}
           {projects.length === 0 ? (
             <div className="sidebar-empty">No projects yet</div>
           ) : (
@@ -184,13 +169,15 @@ const SidebarProjects: FC<SidebarProjectsProps> = ({
         </div>
       </div>
       <div className="sidebar-section">
-        <div className="sidebar-title">Team</div>
+        <div className="sidebar-title">Collaborators</div>
         <div className="sidebar-list">
-          {usersError ? <div className="error">{usersError}</div> : null}
-          {users.length === 0 ? (
-            <div className="sidebar-empty">No calendars yet</div>
+          {collaboratorsError ? (
+            <div className="error">{collaboratorsError}</div>
+          ) : null}
+          {collaborators.length === 0 ? (
+            <div className="sidebar-empty">No collaborators yet</div>
           ) : (
-            users.map((user) => (
+            collaborators.map((user) => (
               <AppButton
                 key={user.user_id}
                 className={

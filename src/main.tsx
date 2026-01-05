@@ -6,6 +6,7 @@ import "./ui/theme/semantic-tokens.css";
 import "./index.css";
 import App from "./ui/App";
 import ThemeRoot from "./ui/ThemeRoot";
+import QueryProvider from "./ui/QueryProvider";
 
 const root = document.getElementById("root");
 
@@ -15,8 +16,10 @@ if (!root) {
 
 ReactDOM.createRoot(root).render(
   <React.StrictMode>
-    <ThemeRoot>
-      <App />
-    </ThemeRoot>
+    <QueryProvider>
+      <ThemeRoot>
+        <App />
+      </ThemeRoot>
+    </QueryProvider>
   </React.StrictMode>
 );

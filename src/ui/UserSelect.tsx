@@ -5,7 +5,7 @@ import {
   useState,
   type FC,
 } from "react";
-import { query } from "../rpc/clientSingleton";
+import { serverQuery } from "./serverApi";
 import { AppButton, AppInput } from "./controls";
 
 type UserOption = {
@@ -20,6 +20,7 @@ type UserSelectProps = {
   onClose?: () => void;
   placeholder?: string;
   allowClear?: boolean;
+  projectId?: string | null;
   refreshToken?: number;
 };
 
@@ -29,6 +30,7 @@ const UserSelect: FC<UserSelectProps> = ({
   onClose,
   placeholder = "Select assignee",
   allowClear = true,
+  projectId = null,
   refreshToken = 0,
 }) => {
   const [open, setOpen] = useState(false);
@@ -40,7 +42,9 @@ const UserSelect: FC<UserSelectProps> = ({
   useEffect(() => {
     let isMounted = true;
     setError(null);
-    query<{ users: UserOption[] }>("users_list", {})
+    serverQuery<{ users: UserOption[] }>("assignees_list", {
+      projectId,
+    })
       .then((data) => {
         if (isMounted) {
           setUsers(data.users ?? []);
@@ -56,7 +60,7 @@ const UserSelect: FC<UserSelectProps> = ({
     return () => {
       isMounted = false;
     };
-  }, [refreshToken]);
+  }, [projectId, refreshToken]);
 
   useEffect(() => {
     if (!open) {

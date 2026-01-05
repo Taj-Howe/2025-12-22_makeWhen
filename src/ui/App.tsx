@@ -1,8 +1,8 @@
+"use client";
+
 import { Tabs } from "@radix-ui/themes";
 import { useCallback, useEffect, useMemo, useState } from "react";
-import "./app.css";
 import SidebarProjects from "./SidebarProjects";
-import { UNGROUPED_PROJECT_ID, UNGROUPED_PROJECT_LABEL } from "./constants";
 import ListView from "./ListView";
 import CalendarView from "./CalendarView";
 import DashboardView from "./DashboardView";
@@ -12,17 +12,31 @@ import AddItemForm from "./AddItemForm";
 import RightSheet from "./RightSheet";
 import CommandPalette from "./CommandPalette";
 import ThemeSettings from "./ThemeSettings";
-import SampleDataPanel from "./SampleDataPanel";
+import AiPlanPanel from "./AiPlanPanel";
 import { AppButton } from "./controls";
-import { mutate, query } from "../rpc/clientSingleton";
-import type { ListItem } from "../domain/listTypes";
+import { serverQuery } from "./serverApi";
+import { createInviteLink, revokeInviteLink } from "./serverActions";
 import type { Scope } from "../domain/scope";
 import { ScopeProvider } from "./ScopeContext";
+import { useSse } from "./useSse";
 
 type UserLite = {
   user_id: string;
   display_name: string;
   avatar_url?: string | null;
+};
+
+type ProjectLite = {
+  id: string;
+  title: string;
+};
+
+type InviteLink = {
+  id: string;
+  role: "viewer" | "editor";
+  url: string;
+  revoked_at: string | null;
+  created_at: string;
 };
 
 // Placeholder current user until real auth/users are wired.
@@ -33,13 +47,17 @@ const DEFAULT_USER: UserLite = {
 };
 
 const App = () => {
-  const [projectItems, setProjectItems] = useState<ListItem[]>([]);
   const [selectedProjectId, setSelectedProjectId] = useState<string | null>(
-    UNGROUPED_PROJECT_ID
+    null
   );
+  const [projects, setProjects] = useState<ProjectLite[]>([]);
   const [users, setUsers] = useState<UserLite[]>([]);
+  const [collaborators, setCollaborators] = useState<UserLite[]>([]);
   const [selectedUserId, setSelectedUserId] = useState<string | null>(null);
   const [usersError, setUsersError] = useState<string | null>(null);
+  const [collaboratorsError, setCollaboratorsError] = useState<string | null>(
+    null
+  );
   const [scope, setScope] = useState<Scope | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [deleteError, setDeleteError] = useState<string | null>(null);
@@ -56,48 +74,52 @@ const App = () => {
     "list" | "calendar" | "gantt" | "kanban" | "dashboard"
   >("list");
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [aiOpen, setAiOpen] = useState(false);
+  const [shareOpen, setShareOpen] = useState(false);
+  const [inviteRole, setInviteRole] = useState<"viewer" | "editor">("viewer");
+  const [inviteLinks, setInviteLinks] = useState<InviteLink[]>([]);
+  const [inviteError, setInviteError] = useState<string | null>(null);
+  const [inviteLoading, setInviteLoading] = useState(false);
 
-  const loadProjectItems = useCallback(async () => {
-    if (!selectedProjectId) {
-      setProjectItems([]);
-      return;
+  const loadProjects = useCallback(async () => {
+    setError(null);
+    try {
+      const data = await serverQuery<{ projects: ProjectLite[] }>(
+        "projects_list",
+        {}
+      );
+      setProjects(data.projects);
+      setSelectedProjectId((prev) => {
+        if (prev && data.projects.some((project) => project.id === prev)) {
+          return prev;
+        }
+        return data.projects[0]?.id ?? null;
+      });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Unknown error";
+      setError(message);
+      setProjects([]);
     }
-    const data = await query<{ items: ListItem[] }>("listItems", {
-      projectId: selectedProjectId,
-      includeDone: true,
-      includeCanceled: true,
-      orderBy: "due_at",
-      orderDir: "asc",
-    });
-    setProjectItems(data.items);
-  }, [selectedProjectId]);
+  }, [setError]);
 
   const triggerRefresh = useCallback(() => {
     setRefreshToken((value) => value + 1);
   }, []);
 
+  useSse(scope, () => {
+    triggerRefresh();
+  });
+
   const loadUsers = useCallback(async () => {
     setUsersError(null);
     try {
-      const data = await query<{
+      const data = await serverQuery<{
         users: UserLite[];
         current_user_id?: string | null;
       }>("users_list", {});
       let list = data.users;
       let currentId =
         typeof data.current_user_id === "string" ? data.current_user_id : null;
-      if (list.length === 0) {
-        await mutate("user.create", { display_name: "Me" });
-        const refreshed = await query<{
-          users: UserLite[];
-          current_user_id?: string | null;
-        }>("users_list", {});
-        list = refreshed.users;
-        currentId =
-          typeof refreshed.current_user_id === "string"
-            ? refreshed.current_user_id
-            : currentId;
-      }
       if (list.length === 0) {
         list = [DEFAULT_USER];
       }
@@ -119,17 +141,63 @@ const App = () => {
     }
   }, []);
 
+  const loadCollaborators = useCallback(async () => {
+    setCollaboratorsError(null);
+    try {
+      const data = await serverQuery<{ collaborators: UserLite[] }>(
+        "collaborators_list",
+        {}
+      );
+      setCollaborators(data.collaborators ?? []);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Unknown error";
+      setCollaboratorsError(message);
+      setCollaborators([]);
+    }
+  }, []);
+
   useEffect(() => {
     setError(null);
-    loadProjectItems().catch((err) => {
-      const message = err instanceof Error ? err.message : "Unknown error";
-      setError(message);
-    });
-  }, [loadProjectItems, refreshToken]);
+    void loadProjects();
+  }, [loadProjects, refreshToken]);
 
   useEffect(() => {
     void loadUsers();
   }, [loadUsers, refreshToken]);
+
+  useEffect(() => {
+    void loadCollaborators();
+  }, [loadCollaborators, refreshToken]);
+
+  const loadInviteLinks = useCallback(async () => {
+    if (!selectedProjectId) {
+      setInviteLinks([]);
+      setInviteError(null);
+      return;
+    }
+    setInviteLoading(true);
+    setInviteError(null);
+    try {
+      const data = await serverQuery<{ invites: InviteLink[] }>(
+        "project_invite_links",
+        { projectId: selectedProjectId }
+      );
+      setInviteLinks(data.invites ?? []);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Unknown error";
+      setInviteError(message);
+      setInviteLinks([]);
+    } finally {
+      setInviteLoading(false);
+    }
+  }, [selectedProjectId]);
+
+  useEffect(() => {
+    if (!shareOpen) {
+      return;
+    }
+    void loadInviteLinks();
+  }, [loadInviteLinks, shareOpen]);
 
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
@@ -151,13 +219,11 @@ const App = () => {
   }, [sheetOpen]);
 
   const selectedProject = useMemo(() => {
-    if (selectedProjectId === UNGROUPED_PROJECT_ID) {
-      return { id: UNGROUPED_PROJECT_ID, title: UNGROUPED_PROJECT_LABEL };
+    if (!selectedProjectId) {
+      return null;
     }
-    return (
-      projectItems.find((item) => item.id === selectedProjectId) ?? null
-    );
-  }, [projectItems, selectedProjectId]);
+    return projects.find((project) => project.id === selectedProjectId) ?? null;
+  }, [projects, selectedProjectId]);
 
   const currentUser = useMemo(() => {
     const list = users.length > 0 ? users : [DEFAULT_USER];
@@ -178,10 +244,7 @@ const App = () => {
     if (selectedUserId) {
       return { kind: "user", userId: selectedUserId };
     }
-    return {
-      kind: "project",
-      projectId: selectedProjectId ?? UNGROUPED_PROJECT_ID,
-    };
+    return { kind: "project", projectId: selectedProjectId ?? "" };
   }, [scope, selectedProjectId, selectedUserId]);
 
   useEffect(() => {
@@ -221,6 +284,13 @@ const App = () => {
     });
   }, [selectedProjectId]);
 
+  useEffect(() => {
+    if (activeScope.kind !== "project") {
+      setShareOpen(false);
+      setAiOpen(false);
+    }
+  }, [activeScope.kind]);
+
   const handleSelectProject = useCallback(
     (projectId: string | null) => {
       if (!projectId) {
@@ -249,28 +319,15 @@ const App = () => {
 
   const handleDeleteProjectById = useCallback(
     async (projectId: string, projectTitle: string) => {
-      if (!projectId || projectId === UNGROUPED_PROJECT_ID) {
-        return;
-      }
-      if (
-        !confirm(`Delete ${projectTitle}? This removes all descendants.`)
-      ) {
+      if (!projectId) {
         return;
       }
       setDeleteError(null);
-      try {
-        await mutate("delete_item", { item_id: projectId });
-        if (selectedProjectId === projectId) {
-          setSelectedProjectId(UNGROUPED_PROJECT_ID);
-          setScope({ kind: "project", projectId: UNGROUPED_PROJECT_ID });
-        }
-        triggerRefresh();
-      } catch (err) {
-        const message = err instanceof Error ? err.message : "Unknown error";
-        setDeleteError(message);
-      }
+      setDeleteError(
+        `Delete ${projectTitle} is not available in server mode yet.`
+      );
     },
-    [selectedProjectId, triggerRefresh]
+    []
   );
 
   const openSheet = useCallback(
@@ -300,25 +357,19 @@ const App = () => {
         openTaskEditor(itemId);
         return;
       }
-      const targetId = projectId ?? UNGROUPED_PROJECT_ID;
-      if (selectedProjectId === targetId) {
+      if (!projectId) {
+        openTaskEditor(itemId);
+        return;
+      }
+      if (selectedProjectId === projectId) {
         openTaskEditor(itemId);
         return;
       }
       setActiveView("list");
-      setSelectedProjectId(targetId);
-      setScope({ kind: "project", projectId: targetId });
-    },
-    [activeScope.kind, openTaskEditor, selectedProjectId]
-  );
-
-  const handleSeededProject = useCallback(
-    (projectId: string) => {
       setSelectedProjectId(projectId);
       setScope({ kind: "project", projectId });
-      setActiveView("list");
     },
-    []
+    [activeScope.kind, openTaskEditor, selectedProjectId]
   );
 
   const handleSheetOpenChange = useCallback((open: boolean) => {
@@ -335,6 +386,18 @@ const App = () => {
     setScope({ kind: "project", projectId });
   }, []);
 
+  const handleCopyInviteLink = async (url: string) => {
+    if (typeof navigator === "undefined") {
+      return;
+    }
+    try {
+      await navigator.clipboard.writeText(url);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Copy failed";
+      setInviteError(message);
+    }
+  };
+
   return (
     <ScopeProvider scope={activeScope} setScope={setScope}>
       <div className="app-root">
@@ -347,8 +410,8 @@ const App = () => {
           refreshToken={refreshToken}
           onAddProject={() => openSheet("project")}
           onDeleteProject={handleDeleteProjectById}
-          users={users}
-          usersError={usersError}
+          collaborators={collaborators}
+          collaboratorsError={collaboratorsError}
           selectedUserId={selectedUserId ?? currentUser.user_id}
           onSelectUser={handleSelectUser}
         />
@@ -380,6 +443,24 @@ const App = () => {
               </div>
             </div>
             <div className="top-bar-right">
+              {activeScope.kind === "project" && selectedProjectId ? (
+                <>
+                  <AppButton
+                    type="button"
+                    variant="surface"
+                    onClick={() => setAiOpen((prev) => !prev)}
+                  >
+                    AI Plan
+                  </AppButton>
+                  <AppButton
+                    type="button"
+                    variant="surface"
+                    onClick={() => setShareOpen((prev) => !prev)}
+                  >
+                    Share
+                  </AppButton>
+                </>
+              ) : null}
               <div className="user-chip" title={currentUser.display_name}>
                 <span className="user-chip-icon" aria-hidden="true">
                   👤
@@ -400,10 +481,127 @@ const App = () => {
           {settingsOpen ? (
             <div className="settings-panel">
               <ThemeSettings />
-              <SampleDataPanel
-                onSeeded={handleSeededProject}
-                onRefresh={triggerRefresh}
-              />
+            </div>
+          ) : null}
+          {aiOpen && activeScope.kind === "project" && selectedProject ? (
+            <AiPlanPanel
+              projectId={selectedProject.id}
+              projectTitle={selectedProject.title}
+              onClose={() => setAiOpen(false)}
+              onApplied={() => triggerRefresh()}
+            />
+          ) : null}
+          {shareOpen && activeScope.kind === "project" ? (
+            <div className="share-panel">
+              <div className="share-panel-header">
+                <div className="share-panel-title">Invite link</div>
+                <AppButton
+                  type="button"
+                  size="1"
+                  variant="ghost"
+                  onClick={() => setShareOpen(false)}
+                >
+                  Close
+                </AppButton>
+              </div>
+              <div className="share-panel-row">
+                <label className="share-panel-label">Role</label>
+                <select
+                  className="share-panel-select"
+                  value={inviteRole}
+                  onChange={(event) =>
+                    setInviteRole(event.target.value as "viewer" | "editor")
+                  }
+                >
+                  <option value="viewer">Viewer</option>
+                  <option value="editor">Editor</option>
+                </select>
+                <AppButton
+                  type="button"
+                  size="1"
+                  variant="surface"
+                  onClick={async () => {
+                    if (!selectedProjectId) {
+                      return;
+                    }
+                    setInviteError(null);
+                    try {
+                      await createInviteLink(selectedProjectId, inviteRole);
+                      await loadInviteLinks();
+                    } catch (err) {
+                      const message =
+                        err instanceof Error ? err.message : "Unknown error";
+                      setInviteError(message);
+                    }
+                  }}
+                >
+                  Generate
+                </AppButton>
+              </div>
+              {inviteError ? <div className="error">{inviteError}</div> : null}
+              {inviteLoading ? (
+                <div className="share-panel-empty">Loading links…</div>
+              ) : inviteLinks.length === 0 ? (
+                <div className="share-panel-empty">No invite links yet.</div>
+              ) : (
+                <div className="share-panel-list">
+                  {inviteLinks.map((invite) => (
+                    <div
+                      key={invite.id}
+                      className={
+                        invite.revoked_at
+                          ? "share-panel-item is-revoked"
+                          : "share-panel-item"
+                      }
+                    >
+                      <div className="share-panel-item-meta">
+                        <div className="share-panel-item-role">
+                          {invite.role}
+                        </div>
+                        <div className="share-panel-item-url">
+                          {invite.url}
+                        </div>
+                      </div>
+                      <div className="share-panel-item-actions">
+                        <AppButton
+                          type="button"
+                          size="1"
+                          variant="ghost"
+                          onClick={() => void handleCopyInviteLink(invite.url)}
+                        >
+                          Copy
+                        </AppButton>
+                        {!invite.revoked_at ? (
+                          <AppButton
+                            type="button"
+                            size="1"
+                            variant="ghost"
+                            onClick={async () => {
+                              setInviteError(null);
+                              try {
+                                await revokeInviteLink(invite.id);
+                                await loadInviteLinks();
+                              } catch (err) {
+                                const message =
+                                  err instanceof Error
+                                    ? err.message
+                                    : "Unknown error";
+                                setInviteError(message);
+                              }
+                            }}
+                          >
+                            Revoke
+                          </AppButton>
+                        ) : (
+                          <span className="share-panel-item-revoked">
+                            Revoked
+                          </span>
+                        )}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
             </div>
           ) : null}
           {activeScope.kind === "project" && activeView !== "dashboard" ? (
@@ -442,7 +640,7 @@ const App = () => {
           ) : activeView === "calendar" ? (
             <CalendarView
               scope={activeScope}
-              projectItems={projectItems}
+              defaultProjectId={selectedProjectId}
               refreshToken={refreshToken}
               onRefresh={triggerRefresh}
               onOpenItem={openTaskEditor}
@@ -463,7 +661,7 @@ const App = () => {
             <AddItemForm
               key={`${sheetMode}-${sheetType}-${selectedProjectId ?? "none"}-${sheetItemId ?? "none"}`}
               selectedProjectId={selectedProjectId}
-              items={projectItems}
+              items={[]}
               onRefresh={triggerRefresh}
               initialType={sheetType}
               initialMode={sheetMode}

@@ -1,3 +1,5 @@
+"use client";
+
 import { Theme } from "@radix-ui/themes";
 import { useEffect, useState, type FC, type ReactNode } from "react";
 import { initTheme, subscribeTheme, type ThemeName } from "../theme/themeStore";

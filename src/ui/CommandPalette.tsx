@@ -2,10 +2,27 @@ import type { FC, KeyboardEvent } from "react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Dialog } from "@radix-ui/themes";
 import { parseCommand } from "../cli/parseCommand";
-import { mutate, query } from "../rpc/clientSingleton";
 import { UNGROUPED_PROJECT_ID } from "./constants";
 import type { ItemLite } from "./ItemAutocomplete";
 import { AppButton, AppInput } from "./controls";
+import { serverQuery } from "./serverApi";
+import {
+  addBlocker,
+  archiveItem,
+  createBlock,
+  createDependencyEdge,
+  createItem,
+  deleteDependencyEdge,
+  deleteItem,
+  moveBlock,
+  resizeBlock,
+  restoreItem,
+  setItemAssignee,
+  setItemTags,
+  setStatus,
+  updateDependencyEdge,
+  updateItemFields,
+} from "./serverActions";
 
 type CommandPaletteProps = {
   open: boolean;
@@ -14,6 +31,25 @@ type CommandPaletteProps = {
   onCreated: () => void;
   onOpenProject?: (projectId: string) => void;
   onOpenView?: (view: "list" | "calendar" | "kanban" | "gantt" | "dashboard") => void;
+};
+
+type ListViewLite = {
+  id: string;
+  title: string;
+  type: string;
+  project_id?: string | null;
+};
+
+type ListViewEdge = {
+  edge_id: string;
+  depends_on_id: string;
+  type?: string | null;
+  lag_minutes?: number | null;
+};
+
+type ListViewRow = ListViewLite & {
+  depends_on_edges?: ListViewEdge[];
+  estimate_minutes?: number | null;
 };
 
 
@@ -93,15 +129,17 @@ const CommandPalette: FC<CommandPaletteProps> = ({
     target: string,
     projectId?: string | null
   ) => {
-    const data = await query<{ items: Array<{ id: string; title: string; type: string }> }>(
-      "listItems",
-      {
-        projectId: projectId ?? selectedProjectId ?? undefined,
-        includeDone: true,
-        includeCanceled: true,
-      }
-    );
-    const matches = data.items.filter((item) => {
+    const scopeId = projectId ?? selectedProjectId;
+    if (!scopeId || scopeId === UNGROUPED_PROJECT_ID) {
+      throw new Error("Select a project to resolve items");
+    }
+    const data = await serverQuery<ListViewLite[]>("list_view", {
+      scopeType: "project",
+      scopeId,
+      includeArchived: true,
+      includeCompleted: true,
+    });
+    const matches = data.filter((item) => {
       if (item.type !== type) {
         return false;
       }
@@ -124,17 +162,19 @@ const CommandPalette: FC<CommandPaletteProps> = ({
     projectId: string | null,
     allowProject = false
   ) => {
-    const data = await query<{ items: Array<{ id: string; title: string; type: string }> }>(
-      "listItems",
-      {
-        projectId: projectId ?? undefined,
-        includeDone: true,
-        includeCanceled: true,
-      }
-    );
+    const scopeId = projectId ?? selectedProjectId;
+    if (!scopeId || scopeId === UNGROUPED_PROJECT_ID) {
+      throw new Error("Select a project to resolve items");
+    }
+    const data = await serverQuery<ListViewLite[]>("list_view", {
+      scopeType: "project",
+      scopeId,
+      includeArchived: true,
+      includeCompleted: true,
+    });
     const items = allowProject
-      ? data.items
-      : data.items.filter((item) => item.type !== "project");
+      ? data
+      : data.filter((item) => item.type !== "project");
     const byId = items.find((item) => item.id === target);
     if (byId) {
       return byId.id;
@@ -151,22 +191,27 @@ const CommandPalette: FC<CommandPaletteProps> = ({
     return matches[0].id;
   };
 
-  const resolveProjectId = async (target: string) => {
-    const data = await query<{ items: Array<{ id: string; title: string; type: string }> }>(
-      "listItems",
-      {
-        includeDone: true,
-        includeCanceled: true,
-      }
+  const resolveItemProjectId = async (itemId: string) => {
+    const details = await serverQuery<{ project_id?: string | null } | null>(
+      "item_details",
+      { itemId }
     );
-    const matches = data.items.filter((item) => {
-      if (item.type !== "project") {
-        return false;
-      }
-      if (item.id === target) {
+    if (!details?.project_id) {
+      throw new Error("Parent item has no project");
+    }
+    return details.project_id;
+  };
+
+  const resolveProjectId = async (target: string) => {
+    const data = await serverQuery<{ projects: Array<{ id: string; title: string }> }>(
+      "projects_list",
+      {}
+    );
+    const matches = data.projects.filter((project) => {
+      if (project.id === target) {
         return true;
       }
-      return item.title.toLowerCase() === target.toLowerCase();
+      return project.title.toLowerCase() === target.toLowerCase();
     });
     if (matches.length === 0) {
       throw new Error(`No project found for "${target}"`);
@@ -238,10 +283,10 @@ const CommandPalette: FC<CommandPaletteProps> = ({
     }
     const requestId = ++autoRequestId.current;
     autoTimeoutId.current = window.setTimeout(() => {
-      query<{ items: ItemLite[] }>("searchItems", {
-        q: queryText,
+      serverQuery<{ items: ItemLite[] }>("searchItems", {
+        text: queryText,
         limit: 12,
-        scopeId: autoScopeId ?? selectedProjectId ?? undefined,
+        scopeProjectId: autoScopeId ?? selectedProjectId ?? undefined,
       })
         .then((data) => {
           if (requestId !== autoRequestId.current) {
@@ -372,9 +417,11 @@ const CommandPalette: FC<CommandPaletteProps> = ({
         return;
       }
       try {
-        await mutate(value.verb === "archive" ? "item.archive" : "item.restore", {
-          item_id: targetId,
-        });
+        if (value.verb === "archive") {
+          await archiveItem(targetId);
+        } else {
+          await restoreItem(targetId);
+        }
         setSubmitError(null);
         setInputValue("");
         onOpenChange(false);
@@ -411,23 +458,19 @@ const CommandPalette: FC<CommandPaletteProps> = ({
         return;
       }
       try {
-        const details = await query<{
+        const details = await serverQuery<{
           primary_block_id?: string | null;
-        }>("getItemDetails", { itemId: targetId });
+        }>("item_details", { itemId: targetId });
         const blockId = details?.primary_block_id ?? null;
+        const durationMinutes = Math.round(value.scheduledDurationMinutes);
         if (blockId) {
-          await mutate("scheduled_block.update", {
-            block_id: blockId,
-            start_at: value.scheduledFor,
-            duration_minutes: Math.round(value.scheduledDurationMinutes),
-          });
+          await moveBlock(blockId, value.scheduledFor);
+          await resizeBlock(blockId, durationMinutes);
         } else {
-          await mutate("scheduled_block.create", {
+          await createBlock({
             item_id: targetId,
             start_at: value.scheduledFor,
-            duration_minutes: Math.round(value.scheduledDurationMinutes),
-            locked: 0,
-            source: "manual",
+            duration_minutes: durationMinutes,
           });
         }
         setSubmitError(null);
@@ -462,7 +505,7 @@ const CommandPalette: FC<CommandPaletteProps> = ({
         return;
       }
       try {
-        await mutate("delete_item", { item_id: targetId });
+        await deleteItem(targetId);
         setSubmitError(null);
         setInputValue("");
         onOpenChange(false);
@@ -496,50 +539,32 @@ const CommandPalette: FC<CommandPaletteProps> = ({
       }
       try {
         if (value.title) {
-          await mutate("update_item_fields", {
-            id: targetId,
-            fields: { title: value.title },
-          });
+          await updateItemFields(targetId, { title: value.title });
         }
         if (value.dueAt !== undefined) {
-          await mutate("update_item_fields", {
-            id: targetId,
-            fields: { due_at: value.dueAt ?? null },
-          });
+          await updateItemFields(targetId, { due_at: value.dueAt ?? null });
         }
         if (value.priority !== undefined) {
-          await mutate("update_item_fields", {
-            id: targetId,
-            fields: { priority: value.priority },
-          });
+          await updateItemFields(targetId, { priority: value.priority });
         }
         if (value.status) {
-          await mutate("set_status", { id: targetId, status: value.status });
+          await setStatus(targetId, value.status);
         }
         if (value.notes !== undefined) {
-          await mutate("update_item_fields", {
-            id: targetId,
-            fields: { notes: value.notes || null },
-          });
+          await updateItemFields(targetId, { notes: value.notes || null });
         }
         if (value.estimateMode || value.estimateMinutes !== undefined) {
-          await mutate("update_item_fields", {
-            id: targetId,
-            fields: {
-              estimate_mode: value.estimateMode,
-              estimate_minutes:
-                value.estimateMinutes !== undefined ? value.estimateMinutes : undefined,
-            },
+          await updateItemFields(targetId, {
+            estimate_mode: value.estimateMode,
+            estimate_minutes:
+              value.estimateMinutes !== undefined ? value.estimateMinutes : undefined,
           });
         }
         if (value.tags) {
-          await mutate("set_item_tags", { item_id: targetId, tags: value.tags });
+          await setItemTags(targetId, value.tags);
         }
         if (value.assignees && value.assignees.length > 0) {
-          await mutate("item.set_assignee", {
-            item_id: targetId,
-            user_id: value.assignees[0],
-          });
+          await setItemAssignee(targetId, value.assignees[0]);
         }
         if (value.dependsOn) {
           const scopeId = value.inProject
@@ -549,40 +574,49 @@ const CommandPalette: FC<CommandPaletteProps> = ({
           for (const depTarget of value.dependsOn) {
             resolvedDeps.push(await resolveItemId(depTarget, scopeId, false));
           }
-          const data = await query<{
-            items: Array<{ id: string; depends_on: string[] }>;
-          }>("listItems", {
-            projectId: scopeId ?? undefined,
-            includeDone: true,
-            includeCanceled: true,
+          const data = await serverQuery<ListViewRow[]>("list_view", {
+            scopeType: "project",
+            scopeId: scopeId ?? selectedProjectId,
+            includeArchived: true,
+            includeCompleted: true,
           });
-          const current = data.items.find((item) => item.id === targetId);
-          const currentDeps = new Set(current?.depends_on ?? []);
+          const current = data.find((item) => item.id === targetId);
+          const currentEdges = new Map(
+            (current?.depends_on_edges ?? []).map((edge) => [
+              edge.depends_on_id,
+              edge,
+            ])
+          );
+          const currentDeps = new Set(currentEdges.keys());
           const desiredDeps = new Set(resolvedDeps);
           const depTypeForCreate = value.depType ?? "FS";
           const hasDepUpdates =
             value.depType !== undefined || value.depLagMinutes !== undefined;
           for (const depId of desiredDeps) {
             if (!currentDeps.has(depId)) {
-              await mutate("dependency.create", {
+              await createDependencyEdge({
                 predecessor_id: depId,
                 successor_id: targetId,
                 type: depTypeForCreate,
                 lag_minutes: value.depLagMinutes,
               });
             } else if (hasDepUpdates) {
-              await mutate("dependency.update", {
-                edge_id: `${targetId}->${depId}`,
-                type: value.depType,
-                lag_minutes: value.depLagMinutes,
-              });
+              const edgeId = currentEdges.get(depId)?.edge_id;
+              if (edgeId) {
+                await updateDependencyEdge({
+                  edge_id: edgeId,
+                  type: value.depType,
+                  lag_minutes: value.depLagMinutes,
+                });
+              }
             }
           }
           for (const depId of currentDeps) {
             if (!desiredDeps.has(depId)) {
-              await mutate("dependency.delete", {
-                edge_id: `${targetId}->${depId}`,
-              });
+              const edgeId = currentEdges.get(depId)?.edge_id;
+              if (edgeId) {
+                await deleteDependencyEdge({ edge_id: edgeId });
+              }
             }
           }
         }
@@ -591,44 +625,28 @@ const CommandPalette: FC<CommandPaletteProps> = ({
             value.scheduledDurationMinutes ?? value.estimateMinutes ?? null;
           if (!durationMinutes || durationMinutes <= 0) {
             const scopeId = projectScopeId ?? selectedProjectId ?? null;
-            const data = await query<{
-              items: Array<{ id: string; estimate_minutes: number }>;
-            }>("listItems", {
-              projectId: scopeId ?? undefined,
-              includeDone: true,
-              includeCanceled: true,
+            const data = await serverQuery<ListViewRow[]>("list_view", {
+              scopeType: "project",
+              scopeId: scopeId ?? selectedProjectId,
+              includeArchived: true,
+              includeCompleted: true,
             });
-            const current = data.items.find((item) => item.id === targetId);
+            const current = data.find((item) => item.id === targetId);
             durationMinutes = current?.estimate_minutes ?? null;
           }
           if (!durationMinutes || durationMinutes <= 0) {
             setSubmitError("Est Dur must be greater than 0 to schedule.");
             return;
           }
-          await mutate("scheduled_block.create", {
+          await createBlock({
             item_id: targetId,
             start_at: value.scheduledFor,
             duration_minutes: Math.round(durationMinutes),
-            locked: 0,
-            source: "manual",
-          });
-        }
-        if (value.health || value.healthMode) {
-          await mutate("update_item_fields", {
-            id: targetId,
-            fields: {
-              health: value.health,
-              health_mode: value.healthMode,
-            },
           });
         }
         if (value.blockerTexts && value.blockerTexts.length > 0) {
           for (const text of value.blockerTexts) {
-            await mutate("add_blocker", {
-              item_id: targetId,
-              kind: value.blockerKind ?? "general",
-              text,
-            });
+            await addBlocker(targetId, value.blockerKind ?? "general", text);
           }
         }
         setSubmitError(null);
@@ -664,6 +682,8 @@ const CommandPalette: FC<CommandPaletteProps> = ({
       }
     }
 
+    let projectIdForCreate = resolvedProjectId ?? targetProjectId;
+
     if (value.parentId) {
       const scopeId = resolvedProjectId ?? targetProjectId ?? null;
       try {
@@ -672,6 +692,11 @@ const CommandPalette: FC<CommandPaletteProps> = ({
           scopeId,
           false
         );
+        if (!projectIdForCreate) {
+          projectIdForCreate = await resolveItemProjectId(
+            createArgs.parent_id as string
+          );
+        }
       } catch (err) {
         const message = err instanceof Error ? err.message : "Unknown error";
         setSubmitError(message);
@@ -684,12 +709,23 @@ const CommandPalette: FC<CommandPaletteProps> = ({
         return;
       }
       createArgs.parent_id = projectParentId;
+      projectIdForCreate = projectParentId;
     } else if (value.type === "task") {
       if (resolvedProjectId) {
         createArgs.parent_id = resolvedProjectId;
+        projectIdForCreate = resolvedProjectId;
       } else if (targetProjectId) {
         createArgs.parent_id = targetProjectId;
+        projectIdForCreate = targetProjectId;
       }
+    }
+
+    if (value.type !== "project") {
+      if (!projectIdForCreate) {
+        setSubmitError("Select a project or use in:<name> for non-project items.");
+        return;
+      }
+      createArgs.project_id = projectIdForCreate;
     }
 
     if (value.dueAt !== undefined) {
@@ -715,27 +751,20 @@ const CommandPalette: FC<CommandPaletteProps> = ({
     }
 
     try {
-      const created = await mutate("create_item", createArgs);
-      const itemId = created?.result?.id ?? created?.id;
+      const created = await createItem(createArgs);
+      const itemId = (created as { id?: string })?.id;
       if (!itemId) {
         throw new Error("Create failed");
       }
       if (value.tags && value.tags.length > 0) {
-        await mutate("set_item_tags", { item_id: itemId, tags: value.tags });
+        await setItemTags(itemId, value.tags);
       }
       if (value.assignees && value.assignees.length > 0) {
-        await mutate("item.set_assignee", {
-          item_id: itemId,
-          user_id: value.assignees[0],
-        });
+        await setItemAssignee(itemId, value.assignees[0]);
       }
       if (value.blockerTexts && value.blockerTexts.length > 0) {
         for (const text of value.blockerTexts) {
-          await mutate("add_blocker", {
-            item_id: itemId,
-            kind: value.blockerKind ?? "general",
-            text,
-          });
+          await addBlocker(itemId, value.blockerKind ?? "general", text);
         }
       }
       if (value.dependsOn && value.dependsOn.length > 0) {
@@ -743,7 +772,7 @@ const CommandPalette: FC<CommandPaletteProps> = ({
         const depTypeForCreate = value.depType ?? "FS";
         for (const depTarget of value.dependsOn) {
           const depId = await resolveItemId(depTarget, scopeId, false);
-          await mutate("dependency.create", {
+          await createDependencyEdge({
             predecessor_id: depId,
             successor_id: itemId,
             type: depTypeForCreate,
@@ -758,12 +787,10 @@ const CommandPalette: FC<CommandPaletteProps> = ({
           setSubmitError("Est Dur must be greater than 0 to schedule.");
           return;
         }
-        await mutate("scheduled_block.create", {
+        await createBlock({
           item_id: itemId,
           start_at: value.scheduledFor,
           duration_minutes: Math.round(durationMinutes),
-          locked: 0,
-          source: "manual",
         });
       }
       setSubmitError(null);

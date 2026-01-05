@@ -10,16 +10,24 @@ import {
 } from "react";
 import { SegmentedControl } from "@radix-ui/themes";
 import * as ContextMenu from "@radix-ui/react-context-menu";
-import { mutate, query } from "../rpc/clientSingleton";
 import { UNGROUPED_PROJECT_ID } from "./constants";
-import type { ListItem } from "../domain/listTypes";
 import type { Scope } from "../domain/scope";
 import { addDays, startOfDay, startOfWeek } from "./dateWindow";
 import { AppButton, AppCheckbox } from "./controls";
+import { serverQuery } from "./serverApi";
+import {
+  createItem,
+  createBlock,
+  deleteBlock,
+  moveBlock,
+  resizeBlock,
+  setItemAssignee,
+  setStatus,
+} from "./serverActions";
 
 type CalendarViewProps = {
   scope: Scope;
-  projectItems: ListItem[];
+  defaultProjectId?: string | null;
   refreshToken: number;
   onRefresh: () => void;
   onOpenItem: (itemId: string) => void;
@@ -42,12 +50,63 @@ type CalendarItem = {
   priority: number;
   assignee_id?: string | null;
   assignee_name?: string | null;
+  project_id?: string | null;
 };
 
 type CalendarRangeResult = {
   blocks: CalendarBlock[];
   items: CalendarItem[];
 };
+
+type ServerCalendarBlock = {
+  block_id: string;
+  item_id: string;
+  start_at: string;
+  duration_minutes: number;
+  title: string;
+  status: string;
+  project_id: string;
+  assignee_user_id: string | null;
+};
+
+type ServerCalendarItem = {
+  id: string;
+  title: string;
+  status: string;
+  due_at: string | null;
+  parent_id: string | null;
+  item_type: string;
+  priority: number;
+  assignee_user_id: string | null;
+  project_id: string;
+};
+
+type ServerCalendarRangeResult = {
+  blocks: ServerCalendarBlock[];
+  items: ServerCalendarItem[];
+};
+
+const normalizeCalendarRange = (
+  result: ServerCalendarRangeResult
+): CalendarRangeResult => ({
+  blocks: result.blocks.map((block) => ({
+    block_id: block.block_id,
+    item_id: block.item_id,
+    start_at: new Date(block.start_at).getTime(),
+    duration_minutes: block.duration_minutes,
+  })),
+  items: result.items.map((item) => ({
+    id: item.id,
+    title: item.title,
+    status: item.status,
+    due_at: item.due_at ? new Date(item.due_at).getTime() : null,
+    parent_id: item.parent_id,
+    item_type: item.item_type,
+    priority: item.priority,
+    assignee_id: item.assignee_user_id,
+    project_id: item.project_id,
+  })),
+});
 
 const HOURS_START = 6;
 const HOURS_END = 20;
@@ -67,7 +126,7 @@ const TIME_LABEL = new Intl.DateTimeFormat(undefined, {
 
 const CalendarView: FC<CalendarViewProps> = ({
   scope,
-  projectItems,
+  defaultProjectId = null,
   refreshToken,
   onRefresh,
   onOpenItem,
@@ -134,24 +193,14 @@ const CalendarView: FC<CalendarViewProps> = ({
 
   const itemTitleMap = useMemo(() => {
     const map = new Map<string, string>();
-    if (scope.kind === "project") {
-      for (const item of projectItems) {
-        map.set(item.id, item.title);
-      }
-    }
     for (const item of calendarItems) {
       map.set(item.id, item.title);
     }
     return map;
-  }, [calendarItems, projectItems, scope.kind]);
+  }, [calendarItems]);
 
   const itemStatusMap = useMemo(() => {
     const map = new Map<string, string>();
-    if (scope.kind === "project") {
-      for (const item of projectItems) {
-        map.set(item.id, item.status);
-      }
-    }
     for (const item of calendarItems) {
       map.set(item.id, item.status);
     }
@@ -159,19 +208,7 @@ const CalendarView: FC<CalendarViewProps> = ({
       map.set(id, status);
     }
     return map;
-  }, [calendarItems, projectItems, scope.kind, statusOverrides]);
-
-  const projectItemIds = useMemo(() => {
-    if (scope.kind !== "project") {
-      return new Set<string>();
-    }
-    return new Set(projectItems.map((item) => item.id));
-  }, [projectItems, scope.kind]);
-
-  const projectItemMap = useMemo(
-    () => new Map(projectItems.map((item) => [item.id, item])),
-    [projectItems]
-  );
+  }, [calendarItems, statusOverrides]);
 
   const scopeProjectId = scope.kind === "project" ? scope.projectId : null;
   const scopeUserId = scope.kind === "user" ? scope.userId : null;
@@ -208,56 +245,20 @@ const CalendarView: FC<CalendarViewProps> = ({
     let isMounted = true;
     setLoading(true);
     setError(null);
-    if (scope.kind === "project") {
-      const scopedProjectId =
-        scopeProjectId === UNGROUPED_PROJECT_ID ? undefined : scopeProjectId;
-      query<CalendarRangeResult>("calendar_range", {
-        time_min: range.start.getTime(),
-        time_max: range.end.getTime(),
-        ...(scopedProjectId ? { scopeProjectId: scopedProjectId } : {}),
-      })
-        .then((result) => {
-          if (!isMounted) {
-            return;
-          }
-          const shouldFilter =
-            scopedProjectId || scopeProjectId === UNGROUPED_PROJECT_ID;
-          const nextBlocks = shouldFilter
-            ? result.blocks.filter((block) => projectItemIds.has(block.item_id))
-            : result.blocks;
-          const nextItems = shouldFilter
-            ? result.items.filter((item) => projectItemIds.has(item.id))
-            : result.items;
-          setBlocks(nextBlocks);
-          setCalendarItems(nextItems);
-        })
-        .catch((err) => {
-          if (!isMounted) {
-            return;
-          }
-          const message = err instanceof Error ? err.message : "Unknown error";
-          setError(message);
-        })
-        .finally(() => {
-          if (isMounted) {
-            setLoading(false);
-          }
-        });
-      return () => {
-        isMounted = false;
-      };
-    }
-    query<CalendarRangeResult>("calendar_range_user", {
-      user_id: scopeUserId,
-      time_min: range.start.getTime(),
-      time_max: range.end.getTime(),
+    const scopeId = scope.kind === "project" ? scopeProjectId : scopeUserId;
+    serverQuery<ServerCalendarRangeResult>("calendar_view", {
+      scopeType: scope.kind,
+      scopeId,
+      windowStart: range.start.toISOString(),
+      windowEnd: range.end.toISOString(),
     })
       .then((result) => {
         if (!isMounted) {
           return;
         }
-        setBlocks(result.blocks);
-        setCalendarItems(result.items);
+        const normalized = normalizeCalendarRange(result);
+        setBlocks(normalized.blocks);
+        setCalendarItems(normalized.items);
       })
       .catch((err) => {
         if (!isMounted) {
@@ -275,7 +276,6 @@ const CalendarView: FC<CalendarViewProps> = ({
       isMounted = false;
     };
   }, [
-    projectItemIds,
     range.end,
     range.start,
     refreshToken,
@@ -403,7 +403,7 @@ const CalendarView: FC<CalendarViewProps> = ({
       const prevStatus = itemStatusMap.get(itemId);
       setStatusOverrides((prev) => ({ ...prev, [itemId]: nextStatus }));
       try {
-        await mutate("set_status", { id: itemId, status: nextStatus });
+        await setStatus(itemId, nextStatus);
         scheduleRefresh();
       } catch (err) {
         setStatusOverrides((prev) => {
@@ -426,7 +426,7 @@ const CalendarView: FC<CalendarViewProps> = ({
     async (blockId: string) => {
       setError(null);
       try {
-        await mutate("scheduled_block.delete", { block_id: blockId });
+        await deleteBlock(blockId);
         scheduleRefresh();
       } catch (err) {
         const message = err instanceof Error ? err.message : "Unknown error";
@@ -438,42 +438,47 @@ const CalendarView: FC<CalendarViewProps> = ({
 
   const handleDuplicateTask = useCallback(
     async (itemId: string) => {
-      const item =
-        scope.kind === "project"
-          ? projectItemMap.get(itemId)
-          : calendarItems.find((entry) => entry.id === itemId);
-      if (!item) {
-        return;
-      }
       setError(null);
       try {
-        const itemType = "type" in item ? item.type : item.item_type;
-        const estimateMode =
-          "estimate_mode" in item
-            ? item.estimate_mode ?? (itemType === "task" ? "manual" : "rollup")
-            : itemType === "task"
-              ? "manual"
-              : "rollup";
-        const created = await mutate<{ id: string }>("create_item", {
-          type: itemType,
-          title: `${item.title} (copy)`,
-          parent_id: item.parent_id,
-          due_at: item.due_at ?? null,
-          estimate_mode: estimateMode,
-          estimate_minutes:
-            "estimate_minutes" in item ? item.estimate_minutes ?? 0 : 0,
-          status: item.status,
-          priority: item.priority ?? 0,
-          notes: "notes" in item ? item.notes ?? null : null,
+        const details = await serverQuery<{
+          id: string;
+          type: string;
+          title: string;
+          parent_id: string | null;
+          project_id: string;
+          due_at: string | null;
+          estimate_mode: string;
+          estimate_minutes: number;
+          status: string;
+          priority: number;
+          notes: string | null;
+          assignee_id?: string | null;
+        } | null>("item_details", { itemId });
+        if (!details) {
+          return;
+        }
+        const created = await createItem({
+          type: details.type,
+          title: `${details.title} (copy)`,
+          parent_id: details.parent_id,
+          project_id: details.project_id,
+          due_at: details.due_at ?? null,
+          estimate_mode: details.estimate_mode ?? "manual",
+          estimate_minutes: details.estimate_minutes ?? 0,
+          status: details.status,
+          priority: details.priority ?? 0,
+          notes: details.notes ?? null,
+          assignee_id:
+            scope.kind === "user" && scopeUserId
+              ? scopeUserId
+              : details.assignee_id ?? null,
         });
+        const newItemId = (created as { id?: string } | null)?.id;
+        if (!newItemId) {
+          throw new Error("Failed to duplicate task");
+        }
         if (scope.kind === "user" && scopeUserId) {
-          const itemIdValue = created?.id;
-          if (itemIdValue) {
-            await mutate("item.set_assignee", {
-              item_id: itemIdValue,
-              user_id: scopeUserId,
-            });
-          }
+          await setItemAssignee(newItemId, scopeUserId);
         }
         scheduleRefresh();
       } catch (err) {
@@ -481,7 +486,7 @@ const CalendarView: FC<CalendarViewProps> = ({
         setError(message);
       }
     },
-    [calendarItems, projectItemMap, scheduleRefresh, scope.kind, scopeUserId]
+    [scheduleRefresh, scope.kind, scopeUserId]
   );
 
   const updateDragPreview = (next: {
@@ -518,39 +523,37 @@ const CalendarView: FC<CalendarViewProps> = ({
       if (scope.kind === "project" && !scopeProjectId) {
         return;
       }
-      const parentId =
-        scope.kind === "project"
-          ? scopeProjectId === UNGROUPED_PROJECT_ID
-            ? null
-            : scopeProjectId
-          : null;
+      const projectId =
+        scope.kind === "project" ? scopeProjectId : defaultProjectId;
+      if (!projectId || projectId === UNGROUPED_PROJECT_ID) {
+        setError("Select a project to create tasks");
+        return;
+      }
+      const parentId = scope.kind === "project" ? projectId : null;
       setError(null);
       try {
-        const created = await mutate<{ id: string }>("create_item", {
+        const created = await createItem({
           type: "task",
           title: "New task",
           parent_id: parentId,
+          project_id: projectId,
           due_at: null,
           estimate_mode: "manual",
           estimate_minutes: Math.max(15, Math.round(durationMinutes)),
           status: "ready",
           priority: 0,
         });
-        const itemId = created?.id;
+        const itemId = (created as { id?: string } | null)?.id;
         if (!itemId) {
           throw new Error("Failed to create task");
         }
         if (scope.kind === "user" && scopeUserId) {
-          await mutate("item.set_assignee", {
-            item_id: itemId,
-            user_id: scopeUserId,
-          });
+          await setItemAssignee(itemId, scopeUserId);
         }
-        await mutate("scheduled_block.create", {
+        await createBlock({
           item_id: itemId,
           start_at: startAt,
           duration_minutes: Math.max(15, Math.round(durationMinutes)),
-          source: "manual",
         });
         scheduleRefresh();
         onOpenItem(itemId);
@@ -559,7 +562,14 @@ const CalendarView: FC<CalendarViewProps> = ({
         setError(message);
       }
     },
-    [onOpenItem, scheduleRefresh, scope.kind, scopeProjectId, scopeUserId]
+    [
+      defaultProjectId,
+      onOpenItem,
+      scheduleRefresh,
+      scope.kind,
+      scopeProjectId,
+      scopeUserId,
+    ]
   );
 
   const beginBlockDrag = useCallback(
@@ -870,11 +880,16 @@ const CalendarView: FC<CalendarViewProps> = ({
                 : block
             )
           );
-          void mutate("scheduled_block.update", {
-            block_id: dragBlock.blockId,
-            start_at: preview.start_at,
-            duration_minutes: preview.duration_minutes,
-          })
+          const updates: Promise<unknown>[] = [];
+          if (changedStart) {
+            updates.push(moveBlock(dragBlock.blockId, preview.start_at));
+          }
+          if (changedDuration) {
+            updates.push(
+              resizeBlock(dragBlock.blockId, preview.duration_minutes)
+            );
+          }
+          Promise.all(updates)
             .then(() => scheduleRefresh())
             .catch((err) => {
               const message =

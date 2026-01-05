@@ -9,7 +9,7 @@ import {
   type ReactNode,
 } from "react";
 import * as ContextMenu from "@radix-ui/react-context-menu";
-import { query, mutate } from "../rpc/clientSingleton";
+import { serverQuery } from "./serverApi";
 import { UNGROUPED_PROJECT_ID, UNGROUPED_PROJECT_LABEL } from "./constants";
 import { scopeKey } from "../domain/scope";
 import type {
@@ -31,12 +31,12 @@ import {
 import {
   createDependencyEdge,
   createItem,
+  duplicateTaskFromItem,
   archiveItem,
   archiveItems,
   deleteItem,
   deleteItems,
   deleteDependencyEdge,
-  duplicateTaskFromItem,
   restoreItem,
   restoreItems,
   setItemAssignee,
@@ -44,7 +44,10 @@ import {
   setStatus,
   updateDependencyEdge,
   updateItemFields,
-} from "./itemActions";
+  createBlock,
+  moveBlock,
+  resizeBlock,
+} from "./serverActions";
 import { ItemAutocomplete } from "./ItemAutocomplete";
 import UserSelect from "./UserSelect";
 import { AppButton, AppCheckbox, AppInput, AppSelect } from "./controls";
@@ -58,6 +61,67 @@ type ListViewItem = ListItem & {
   blocked_by: DependencyProjectionLite[];
   blocking: DependencyProjectionLite[];
   slack_minutes: number | null;
+};
+
+type ServerListViewItem = {
+  id: string;
+  project_id: string;
+  parent_id: string | null;
+  type: "milestone" | "task" | "subtask";
+  title: string;
+  status: string;
+  priority: number;
+  due_at: string | null;
+  completed_at: string | null;
+  updated_at?: string | null;
+  archived_at: string | null;
+  assignee_user_id: string | null;
+  estimate_mode: string;
+  estimate_minutes: number;
+  notes: string | null;
+  sort_order: number;
+  health: string | null;
+  sequence_rank?: number | null;
+  schedule_start_at?: string | null;
+  schedule_end_at?: string | null;
+  blocks?: Array<{
+    id: string;
+    start_at: string;
+    duration_minutes: number;
+    end_at: string;
+  }>;
+  depends_on_edges?: Array<{
+    edge_id: string;
+    item_id: string;
+    depends_on_id: string;
+    type: string;
+    lag_minutes: number;
+    status: string;
+    reason?: string;
+    title?: string;
+  }>;
+  blocked_by?: Array<{
+    item_id: string;
+    title: string;
+    type: string;
+    lag_minutes: number;
+    status: "satisfied" | "violated" | "unknown";
+  }>;
+  blocking?: Array<{
+    item_id: string;
+    title: string;
+    type: string;
+    lag_minutes: number;
+    status: "satisfied" | "violated" | "unknown";
+  }>;
+  blockers_count?: number | null;
+  unresolved_blockers?: number | null;
+  actual_minutes?: number | null;
+  slack_minutes?: number | null;
+  rollup_start_at?: string | null;
+  rollup_end_at?: string | null;
+  rollup_estimate_minutes?: number | null;
+  rollup_actual_minutes?: number | null;
 };
 
 const listViewCache = new Map<string, ListViewItem[]>();
@@ -79,6 +143,136 @@ type ListViewProps = {
   refreshToken: number;
   onRefresh: () => void;
   onOpenItem?: (itemId: string) => void;
+};
+
+const toMs = (value: string | null | undefined) =>
+  value ? new Date(value).getTime() : null;
+
+const normalizeListViewItems = (
+  serverItems: ServerListViewItem[]
+): ListViewItem[] => {
+  const baseById = new Map<string, ServerListViewItem>();
+  for (const item of serverItems) {
+    baseById.set(item.id, item);
+  }
+
+  const outgoingMap = new Map<string, ItemGanttModel["dependencies_out"]>();
+  for (const item of serverItems) {
+    for (const edge of item.depends_on_edges ?? []) {
+      const list = outgoingMap.get(edge.depends_on_id) ?? [];
+      list.push({
+        edge_id: edge.edge_id,
+        type: edge.type as ItemGanttModel["dependencies_out"][number]["type"],
+        lag_minutes: edge.lag_minutes,
+        predecessor_id: edge.depends_on_id,
+        successor_id: edge.item_id,
+      });
+      outgoingMap.set(edge.depends_on_id, list);
+    }
+  }
+
+  const depthMap = new Map<string, number>();
+  const computeDepth = (id: string): number => {
+    if (depthMap.has(id)) {
+      return depthMap.get(id) ?? 0;
+    }
+    const item = baseById.get(id);
+    if (!item || !item.parent_id) {
+      depthMap.set(id, 0);
+      return 0;
+    }
+    const depth = computeDepth(item.parent_id) + 1;
+    depthMap.set(id, depth);
+    return depth;
+  };
+
+  return serverItems.map((item) => {
+    const blocks = item.blocks ?? [];
+    const scheduled_blocks: ScheduledBlockLite[] = blocks.map((block) => ({
+      block_id: block.id,
+      item_id: item.id,
+      start_at: toMs(block.start_at) ?? 0,
+      duration_minutes: block.duration_minutes,
+      end_at_derived: toMs(block.end_at) ?? 0,
+    }));
+    const scheduledMinutesTotal = scheduled_blocks.reduce(
+      (sum, block) => sum + block.duration_minutes,
+      0
+    );
+    const scheduleStart = toMs(item.schedule_start_at);
+    const scheduleEnd = toMs(item.schedule_end_at);
+    const blockedBy = (item.blocked_by ?? []).map((dep) => ({
+      item_id: dep.item_id,
+      title: dep.title,
+      type: dep.type as DependencyProjectionLite["type"],
+      lag_minutes: dep.lag_minutes,
+      status: dep.status,
+    }));
+    const blocking = (item.blocking ?? []).map((dep) => ({
+      item_id: dep.item_id,
+      title: dep.title,
+      type: dep.type as DependencyProjectionLite["type"],
+      lag_minutes: dep.lag_minutes,
+      status: dep.status,
+    }));
+    const unmetDeps = blockedBy.filter((dep) => dep.status !== "satisfied").length;
+    const unresolvedBlockers = item.unresolved_blockers ?? 0;
+
+    return {
+      id: item.id,
+      type: item.type === "subtask" ? "task" : item.type,
+      title: item.title,
+      parent_id: item.parent_id,
+      depth: computeDepth(item.id),
+      project_id: item.project_id,
+      sort_order: item.sequence_rank ?? 0,
+      due_at: toMs(item.due_at),
+      archived_at: toMs(item.archived_at),
+      estimate_mode: item.estimate_mode,
+      estimate_minutes: item.estimate_minutes ?? 0,
+      status: item.status,
+      priority: item.priority ?? 0,
+      notes: item.notes ?? null,
+      health: item.health ?? "unknown",
+      schedule: {
+        has_blocks: scheduled_blocks.length > 0,
+        scheduled_minutes_total: scheduledMinutesTotal,
+        schedule_start_at: scheduleStart,
+        schedule_end_at: scheduleEnd,
+      },
+      depends_on: (item.depends_on_edges ?? []).map((edge) => edge.depends_on_id),
+      blocked: {
+        is_blocked: unmetDeps > 0 || unresolvedBlockers > 0,
+        blocked_by_deps: unmetDeps > 0,
+        blocked_by_blockers: unresolvedBlockers > 0,
+        active_blocker_count: unresolvedBlockers,
+        unmet_dependency_count: unmetDeps,
+      },
+      assignees: [],
+      assignee_id: item.assignee_user_id ?? null,
+      tags: [],
+      completed_on: toMs(
+        item.completed_at ?? (item.status === "done" ? item.updated_at ?? null : null)
+      ),
+      actual_minutes: item.actual_minutes ?? null,
+      scheduled_blocks,
+      dependencies_in: (item.depends_on_edges ?? []).map((edge) => ({
+        edge_id: edge.edge_id,
+        type: edge.type as ItemGanttModel["dependencies_in"][number]["type"],
+        lag_minutes: edge.lag_minutes,
+        predecessor_id: edge.depends_on_id,
+        successor_id: edge.item_id,
+      })),
+      dependencies_out: outgoingMap.get(item.id) ?? [],
+      blocked_by: blockedBy,
+      blocking,
+      slack_minutes: item.slack_minutes ?? null,
+      rollup_start_at: toMs(item.rollup_start_at),
+      rollup_end_at: toMs(item.rollup_end_at),
+      rollup_estimate_minutes: item.rollup_estimate_minutes ?? 0,
+      rollup_actual_minutes: item.rollup_actual_minutes ?? 0,
+    };
+  });
 };
 
 const ListView: FC<ListViewProps> = ({
@@ -150,97 +344,39 @@ const ListView: FC<ListViewProps> = ({
     if (scope.kind === "project" && !scope.projectId) {
       return [];
     }
-    const [listData, completeData] = await Promise.all([
-      query<{ items: ListItem[] }>("listItems", {
-        ...(scope.kind === "project"
-          ? { projectId: scope.projectId }
-          : { assigneeId: scope.userId }),
-        includeDone: true,
-        includeCanceled: true,
-        orderBy: "due_at",
-        orderDir: "asc",
-      }),
-      query<ItemGanttModel[]>("list_view_complete", {
-        scope,
-        ...(scope.kind === "project"
-          ? { scopeProjectId: scope.projectId }
-          : { scopeUserId: scope.userId }),
-        includeUngrouped: false,
-        includeCompleted: true,
-      }),
-    ]);
-    const completeMap = new Map(
-      completeData.map((item) => [item.id, item])
-    );
-    const merged = listData.items.map((item) => {
-      const extra = completeMap.get(item.id);
-      return {
-        ...item,
-        completed_on: extra?.completed_on ?? null,
-        actual_minutes: extra?.actual_minutes ?? null,
-        scheduled_blocks: extra?.scheduled_blocks ?? [],
-        dependencies_out: extra?.dependencies_out ?? [],
-        dependencies_in: extra?.dependencies_in ?? [],
-        blocked_by: extra?.blocked_by ?? [],
-        blocking: extra?.blocking ?? [],
-        slack_minutes: extra?.slack_minutes ?? null,
-      };
+    const data = await serverQuery<ServerListViewItem[]>("list_view", {
+      scopeType: scope.kind,
+      scopeId: scope.kind === "project" ? scope.projectId : scope.userId,
+      includeArchived: false,
+      includeCompleted: true,
     });
-    return merged;
+    return normalizeListViewItems(data);
   }, [scope]);
 
   const loadArchivedItems = useCallback(async () => {
     if (scope.kind !== "project" || !scope.projectId) {
       return [];
     }
-    const [listData, completeData] = await Promise.all([
-      query<{ items: ListItem[] }>("listItems", {
-        projectId: scope.projectId,
-        includeDone: true,
-        includeCanceled: true,
-        orderBy: "updated_at",
-        orderDir: "desc",
-        archiveFilter: "archived",
-      }),
-      query<ItemGanttModel[]>("list_view_complete", {
-        scope,
-        scopeProjectId: scope.projectId,
-        includeUngrouped: false,
-        includeCompleted: true,
-        archiveFilter: "archived",
-      }),
-    ]);
-    const completeMap = new Map(
-      completeData.map((item) => [item.id, item])
-    );
-    return listData.items.map((item) => {
-      const extra = completeMap.get(item.id);
-      return {
-        ...item,
-        completed_on: extra?.completed_on ?? null,
-        actual_minutes: extra?.actual_minutes ?? null,
-        scheduled_blocks: extra?.scheduled_blocks ?? [],
-        dependencies_out: extra?.dependencies_out ?? [],
-        dependencies_in: extra?.dependencies_in ?? [],
-        blocked_by: extra?.blocked_by ?? [],
-        blocking: extra?.blocking ?? [],
-        slack_minutes: extra?.slack_minutes ?? null,
-      };
+    const data = await serverQuery<ServerListViewItem[]>("list_view", {
+      scopeType: "project",
+      scopeId: scope.projectId,
+      includeArchived: true,
+      includeCompleted: true,
     });
+    return normalizeListViewItems(data).filter(
+      (item) => item.archived_at !== null
+    );
   }, [scope]);
 
   const loadProjects = useCallback(async () => {
     setProjectsError(null);
     setProjectsLoading(true);
     try {
-      const data = await query<{ items: ListItem[] }>("listItems", {
-        includeDone: true,
-        includeCanceled: true,
-      });
-      const list = data.items
-        .filter((item) => item.type === "project")
-        .map((item) => ({ id: item.id, title: item.title }));
-      setProjects(list);
+      const data = await serverQuery<{ projects: Array<{ id: string; title: string }> }>(
+        "projects_list",
+        {}
+      );
+      setProjects(data.projects);
     } catch (err) {
       const message = err instanceof Error ? err.message : "Unknown error";
       setProjects([]);
@@ -620,21 +756,19 @@ const ListView: FC<ListViewProps> = ({
       }
       setError(null);
       try {
-        const list = await query<{ items: ListItem[] }>("listItems", {
-          projectId: targetProjectId,
-          includeDone: true,
-          includeCanceled: true,
-          archiveFilter: "active",
+        const list = await serverQuery<ServerListViewItem[]>("list_view", {
+          scopeType: "project",
+          scopeId: targetProjectId,
+          includeArchived: true,
+          includeCompleted: true,
         });
-        const siblingMax = list.items
+        const siblingMax = list
           .filter((candidate) => candidate.parent_id === targetParentId)
           .reduce(
             (max, candidate) =>
               Math.max(
                 max,
-                typeof candidate.sort_order === "number"
-                  ? candidate.sort_order
-                  : 0
+                typeof candidate.sort_order === "number" ? candidate.sort_order : 0
               ),
             0
           );
@@ -882,6 +1016,7 @@ const ListView: FC<ListViewProps> = ({
                 value={currentId}
                 onChange={(value) => handleAssigneeChange(item.id, value)}
                 onClose={() => setEditingAssigneeId(null)}
+                projectId={item.project_id}
               />
             );
           }
@@ -927,7 +1062,7 @@ const ListView: FC<ListViewProps> = ({
         label: "Completed On",
         minWidth: 170,
         render: (item: ListViewItem) =>
-          item.completed_on ? formatDate(item.completed_on) : "",
+          item.completed_on ? formatDate(item.completed_on) : "—",
       },
       {
         key: "slack_minutes",
@@ -1451,17 +1586,13 @@ const ListView: FC<ListViewProps> = ({
     setError(null);
     try {
       if (editingBlockId) {
-        await mutate("scheduled_block.update", {
-          block_id: editingBlockId,
-          start_at: startAt,
-          duration_minutes: durationMinutes,
-        });
+        await moveBlock(editingBlockId, startAt);
+        await resizeBlock(editingBlockId, durationMinutes);
       } else {
-        await mutate("scheduled_block.create", {
+        await createBlock({
           item_id: item.id,
           start_at: startAt,
           duration_minutes: durationMinutes,
-          source: "manual",
         });
       }
       onRefresh();
@@ -2078,12 +2209,7 @@ const ListView: FC<ListViewProps> = ({
   ) => {
     setError(null);
     try {
-      await mutate("move_item", {
-        item_id: itemId,
-        parent_id: parentId,
-        before_id: beforeId,
-        after_id: afterId,
-      });
+      await updateItemFields(itemId, { parent_id: parentId });
       onRefresh();
     } catch (err) {
       const message = err instanceof Error ? err.message : "Unknown error";

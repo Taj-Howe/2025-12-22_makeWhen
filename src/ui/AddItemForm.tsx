@@ -6,12 +6,28 @@ import {
   type FC,
   type FormEvent,
 } from "react";
-import { mutate, query } from "../rpc/clientSingleton";
+import { serverQuery } from "./serverApi";
 import { UNGROUPED_PROJECT_ID } from "./constants";
 import { toDateTimeLocal } from "../domain/formatters";
 import { ItemAutocomplete } from "./ItemAutocomplete";
 import UserSelect from "./UserSelect";
 import { AppButton, AppInput, AppSelect, AppTextArea } from "./controls";
+import {
+  addBlocker,
+  addDependency,
+  archiveItem,
+  createBlock,
+  createItem,
+  deleteItem,
+  moveBlock,
+  removeDependency,
+  resizeBlock,
+  resolveBlocker,
+  setItemAssignee,
+  setItemTags,
+  setStatus,
+  updateItemFields,
+} from "./serverActions";
 
 type ItemType = "project" | "milestone" | "task";
 
@@ -37,12 +53,13 @@ type ItemRow = {
 
 type ItemDetails = {
   id: string;
+  project_id?: string;
   type: ItemType;
   title: string;
   parent_id: string | null;
   status: string;
   priority: number;
-  due_at: number | null;
+  due_at: string | null;
   estimate_mode: string;
   estimate_minutes: number;
   health: string;
@@ -50,7 +67,7 @@ type ItemDetails = {
   notes: string | null;
   dependencies: string[];
   scheduled_minutes_total: number;
-  schedule_start_at: number | null;
+  schedule_start_at: string | null;
   primary_block_id: string | null;
   assignee_id?: string | null;
   assignee_name?: string | null;
@@ -58,9 +75,23 @@ type ItemDetails = {
     blocker_id: string;
     kind: string;
     text: string;
-    created_at: number;
-    cleared_at: number | null;
+    created_at: string;
+    cleared_at: string | null;
   }[];
+};
+
+type ServerListItem = {
+  id: string;
+  project_id: string;
+  parent_id: string | null;
+  type: "project" | "milestone" | "task" | "subtask";
+  title: string;
+  status: string;
+  priority: number;
+  due_at: string | null;
+  estimate_minutes: number;
+  notes: string | null;
+  assignee_user_id?: string | null;
 };
 
 type AddItemFormProps = {
@@ -73,6 +104,64 @@ type AddItemFormProps = {
   autoFocusTitle?: boolean;
   onCreated?: () => void;
   onDeleted?: () => void;
+};
+
+const toMs = (value: string | number | null | undefined) => {
+  if (value === null || value === undefined) {
+    return null;
+  }
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? null : date.getTime();
+};
+
+const normalizeItems = (items: ServerListItem[]): ItemRow[] => {
+  const map = new Map<string, ServerListItem>();
+  for (const item of items) {
+    map.set(item.id, item);
+  }
+  const depthCache = new Map<string, number>();
+  const resolveDepth = (itemId: string, guard = new Set<string>()) => {
+    if (depthCache.has(itemId)) {
+      return depthCache.get(itemId) ?? 0;
+    }
+    if (guard.has(itemId)) {
+      return 0;
+    }
+    guard.add(itemId);
+    const item = map.get(itemId);
+    if (!item || !item.parent_id) {
+      depthCache.set(itemId, 0);
+      return 0;
+    }
+    const parent = map.get(item.parent_id);
+    if (!parent) {
+      depthCache.set(itemId, 0);
+      return 0;
+    }
+    const depth = resolveDepth(parent.id, guard) + 1;
+    depthCache.set(itemId, depth);
+    return depth;
+  };
+  return items.map((item) => ({
+    id: item.id,
+    type: item.type === "subtask" ? "task" : (item.type as ItemType),
+    title: item.title,
+    parent_id: item.parent_id,
+    project_id: item.project_id,
+    depth: resolveDepth(item.id),
+    status: item.status,
+    priority: item.priority,
+    due_at: toMs(item.due_at),
+    estimate_minutes: item.estimate_minutes ?? 0,
+    notes: item.notes ?? null,
+    health: "unknown",
+    tags: [],
+    assignees: item.assignee_user_id
+      ? [{ id: item.assignee_user_id, name: null }]
+      : [],
+    assignee_id: item.assignee_user_id ?? null,
+    assignee_name: null,
+  }));
 };
 
 const formatOptionLabel = (item: ItemRow, parentType: ItemType | null) => {
@@ -124,24 +213,61 @@ const AddItemForm: FC<AddItemFormProps> = ({
   const [blockerText, setBlockerText] = useState("");
   const [blockers, setBlockers] = useState<ItemDetails["blockers"]>([]);
   const [currentDeps, setCurrentDeps] = useState<string[]>([]);
+  const [availableItems, setAvailableItems] = useState<ItemRow[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [loadingDetails, setLoadingDetails] = useState(false);
   const titleInputRef = useRef<HTMLInputElement>(null);
 
+  const itemsSource = useMemo(
+    () => (items.length > 0 ? items : availableItems),
+    [availableItems, items]
+  );
+
+  useEffect(() => {
+    if (items.length > 0) {
+      return;
+    }
+    if (!selectedProjectId || selectedProjectId === UNGROUPED_PROJECT_ID) {
+      setAvailableItems([]);
+      return;
+    }
+    let isMounted = true;
+    serverQuery<ServerListItem[]>("list_view", {
+      scopeType: "project",
+      scopeId: selectedProjectId,
+      includeArchived: true,
+      includeCompleted: true,
+    })
+      .then((data) => {
+        if (!isMounted) {
+          return;
+        }
+        setAvailableItems(normalizeItems(data));
+      })
+      .catch(() => {
+        if (isMounted) {
+          setAvailableItems([]);
+        }
+      });
+    return () => {
+      isMounted = false;
+    };
+  }, [items.length, selectedProjectId]);
+
   const parentTypeMap = useMemo(() => {
     const map = new Map<string, ItemType>();
-    for (const item of items) {
+    for (const item of itemsSource) {
       map.set(item.id, item.type);
     }
     return map;
-  }, [items]);
+  }, [itemsSource]);
 
   const projectItems = useMemo(() => {
     if (selectedProjectId === UNGROUPED_PROJECT_ID) {
-      return items;
+      return itemsSource;
     }
-    return items.filter((item) => item.project_id === selectedProjectId);
-  }, [items, selectedProjectId]);
+    return itemsSource.filter((item) => item.project_id === selectedProjectId);
+  }, [itemsSource, selectedProjectId]);
 
   const childMap = useMemo(() => {
     const map = new Map<string, string[]>();
@@ -196,7 +322,7 @@ const AddItemForm: FC<AddItemFormProps> = ({
 
   const tagSuggestions = useMemo(() => {
     const set = new Set<string>();
-    for (const item of items) {
+    for (const item of itemsSource) {
       for (const tag of item.tags ?? []) {
         if (tag.name) {
           set.add(tag.name);
@@ -204,7 +330,7 @@ const AddItemForm: FC<AddItemFormProps> = ({
       }
     }
     return Array.from(set).sort();
-  }, [items]);
+  }, [itemsSource]);
 
   const filteredTagSuggestions = useMemo(() => {
     const input = tagsInput.trim().toLowerCase();
@@ -228,7 +354,9 @@ const AddItemForm: FC<AddItemFormProps> = ({
   useEffect(() => {
     if (mode === "edit" && selectedItemId) {
       setLoadingDetails(true);
-      query<ItemDetails | null>("getItemDetails", { itemId: selectedItemId })
+      serverQuery<ItemDetails | null>("item_details", {
+        itemId: selectedItemId,
+      })
         .then((data) => {
           if (!data) {
             return;
@@ -236,7 +364,7 @@ const AddItemForm: FC<AddItemFormProps> = ({
           setType(data.type);
           setTitle(data.title);
           setParentId(data.parent_id);
-          setDueAt(toDateTimeLocal(data.due_at));
+          setDueAt(toDateTimeLocal(toMs(data.due_at)));
           setEstimateMode(
             data.estimate_mode === "rollup" ? "rollup" : "manual"
           );
@@ -257,12 +385,12 @@ const AddItemForm: FC<AddItemFormProps> = ({
           setBlockers(data.blockers);
           setCurrentDeps(data.dependencies ?? []);
           setDepChips(data.dependencies ?? []);
-          const nextScheduledFor = toDateTimeLocal(data.schedule_start_at);
+          const nextScheduledFor = toDateTimeLocal(toMs(data.schedule_start_at));
           setScheduledFor(nextScheduledFor);
           setScheduledBlockId(data.primary_block_id ?? null);
           scheduledForInitialRef.current = nextScheduledFor;
           setAssigneeId(data.assignee_id ?? null);
-          const fromList = items.find((item) => item.id === data.id);
+          const fromList = itemsSource.find((item) => item.id === data.id);
           if (fromList) {
             setTagsInput("");
             setTagChips(fromList.tags.map((tag) => tag.name));
@@ -287,7 +415,7 @@ const AddItemForm: FC<AddItemFormProps> = ({
     if (mode === "edit" && !selectedItemId) {
       resetForm();
     }
-  }, [items, mode, selectedItemId]);
+  }, [itemsSource, mode, selectedItemId]);
 
   useEffect(() => {
     if (!initialMode) {
@@ -463,10 +591,14 @@ const AddItemForm: FC<AddItemFormProps> = ({
 
     try {
       if (mode === "create") {
-        const result = await mutate<{ id: string }>("create_item", {
+        if (type !== "project" && (!selectedProjectId || selectedProjectId === UNGROUPED_PROJECT_ID)) {
+          throw new Error("Select a project before creating items.");
+        }
+        const result = await createItem({
           type,
           title: title.trim(),
           parent_id: resolvedParentId ?? null,
+          project_id: type === "project" ? null : selectedProjectId,
           due_at: dueMs,
           estimate_mode: estimateMode,
           estimate_minutes: estimate,
@@ -476,49 +608,39 @@ const AddItemForm: FC<AddItemFormProps> = ({
           health_mode: healthMode,
           notes: notes.trim() ? notes.trim() : null,
         });
-        const itemId = result?.id;
+        const itemId = (result as { id?: string } | null)?.id;
         if (itemId) {
         if (scheduledFor) {
           const startAt = new Date(scheduledFor).getTime();
           const durationMinutes = Math.round(estimate);
-          await mutate("scheduled_block.create", {
+          await createBlock({
             item_id: itemId,
             start_at: startAt,
             duration_minutes: durationMinutes,
-            source: "manual",
           });
         }
           const tags = tagChips;
           if (tags.length > 0) {
-            await mutate("set_item_tags", { item_id: itemId, tags });
+            await setItemTags(itemId, tags);
           }
-          await mutate("item.set_assignee", {
-            item_id: itemId,
-            user_id: assigneeId ?? null,
-          });
+          await setItemAssignee(itemId, assigneeId ?? null);
           for (const depId of depChips) {
-            await mutate("add_dependency", {
-              item_id: itemId,
-              depends_on_id: depId,
-            });
+            await addDependency(itemId, depId);
           }
         }
         resetForm();
         onCreated?.();
       } else if (selectedItemId) {
-        await mutate("update_item_fields", {
-          id: selectedItemId,
-          fields: {
-            title: title.trim(),
-            parent_id: resolvedParentId ?? null,
-            due_at: dueMs,
-            estimate_mode: estimateMode,
-            estimate_minutes: estimate,
-            priority: Number(priority),
-            health,
-            health_mode: healthMode,
-            notes: notes.trim() ? notes.trim() : null,
-          },
+        await updateItemFields(selectedItemId, {
+          title: title.trim(),
+          parent_id: resolvedParentId ?? null,
+          due_at: dueMs,
+          estimate_mode: estimateMode,
+          estimate_minutes: estimate,
+          priority: Number(priority),
+          health,
+          health_mode: healthMode,
+          notes: notes.trim() ? notes.trim() : null,
         });
         const scheduleChanged =
           scheduledFor &&
@@ -527,48 +649,32 @@ const AddItemForm: FC<AddItemFormProps> = ({
           const startAt = new Date(scheduledFor).getTime();
           const durationMinutes = Math.round(estimate);
           if (scheduledBlockId) {
-            await mutate("scheduled_block.update", {
-              block_id: scheduledBlockId,
+            await moveBlock(scheduledBlockId, startAt);
+            await resizeBlock(scheduledBlockId, durationMinutes);
+          } else {
+            const created = await createBlock({
+              item_id: selectedItemId,
               start_at: startAt,
               duration_minutes: durationMinutes,
             });
-          } else {
-            const created = await mutate<{ block_id: string }>(
-              "scheduled_block.create",
-              {
-                item_id: selectedItemId,
-                start_at: startAt,
-                duration_minutes: durationMinutes,
-                source: "manual",
-              }
-            );
-            setScheduledBlockId(created?.block_id ?? null);
+            setScheduledBlockId((created as { id?: string } | null)?.id ?? null);
           }
           scheduledForInitialRef.current = scheduledFor;
         }
-        await mutate("set_status", { id: selectedItemId, status });
+        await setStatus(selectedItemId, status);
         const tags = tagChips;
-        await mutate("set_item_tags", { item_id: selectedItemId, tags });
-        await mutate("item.set_assignee", {
-          item_id: selectedItemId,
-          user_id: assigneeId ?? null,
-        });
+        await setItemTags(selectedItemId, tags);
+        await setItemAssignee(selectedItemId, assigneeId ?? null);
         const desiredDeps = new Set(depChips);
         const existingDeps = new Set(currentDeps);
         for (const depId of desiredDeps) {
           if (!existingDeps.has(depId)) {
-            await mutate("add_dependency", {
-              item_id: selectedItemId,
-              depends_on_id: depId,
-            });
+            await addDependency(selectedItemId, depId);
           }
         }
         for (const depId of existingDeps) {
           if (!desiredDeps.has(depId)) {
-            await mutate("remove_dependency", {
-              item_id: selectedItemId,
-              depends_on_id: depId,
-            });
+            await removeDependency(selectedItemId, depId);
           }
         }
         onCreated?.();
@@ -586,10 +692,7 @@ const AddItemForm: FC<AddItemFormProps> = ({
     }
     if (mode === "edit" && selectedItemId) {
       try {
-        await mutate("add_dependency", {
-          item_id: selectedItemId,
-          depends_on_id: dependencyId,
-        });
+        await addDependency(selectedItemId, dependencyId);
         setCurrentDeps((prev) =>
           prev.includes(dependencyId) ? prev : [...prev, dependencyId]
         );
@@ -608,12 +711,8 @@ const AddItemForm: FC<AddItemFormProps> = ({
       return;
     }
     try {
-      await mutate("add_blocker", {
-        item_id: selectedItemId,
-        kind: blockerKind,
-        text: blockerText,
-      });
-      const details = await query<ItemDetails | null>("getItemDetails", {
+      await addBlocker(selectedItemId, blockerKind, blockerText);
+      const details = await serverQuery<ItemDetails | null>("item_details", {
         itemId: selectedItemId,
       });
       setBlockers(details?.blockers ?? []);
@@ -630,8 +729,8 @@ const AddItemForm: FC<AddItemFormProps> = ({
       return;
     }
     try {
-      await mutate("clear_blocker", { blocker_id: blockerId });
-      const details = await query<ItemDetails | null>("getItemDetails", {
+      await resolveBlocker(blockerId);
+      const details = await serverQuery<ItemDetails | null>("item_details", {
         itemId: selectedItemId,
       });
       setBlockers(details?.blockers ?? []);
@@ -650,7 +749,7 @@ const AddItemForm: FC<AddItemFormProps> = ({
       return;
     }
     try {
-      await mutate("item.archive", { item_id: selectedItemId });
+      await archiveItem(selectedItemId);
       onRefresh();
       onDeleted?.();
     } catch (err) {
@@ -667,7 +766,7 @@ const AddItemForm: FC<AddItemFormProps> = ({
       return;
     }
     try {
-      await mutate("delete_item", { item_id: selectedItemId });
+      await deleteItem(selectedItemId);
       onRefresh();
       onDeleted?.();
     } catch (err) {
@@ -977,6 +1076,7 @@ const AddItemForm: FC<AddItemFormProps> = ({
             value={assigneeId}
             onChange={setAssigneeId}
             placeholder="Search users"
+            projectId={selectedProjectId}
           />
         </label>
         <label>
@@ -996,10 +1096,7 @@ const AddItemForm: FC<AddItemFormProps> = ({
                     );
                     if (mode === "edit" && selectedItemId) {
                       try {
-                        await mutate("remove_dependency", {
-                          item_id: selectedItemId,
-                          depends_on_id: depId,
-                        });
+                        await removeDependency(selectedItemId, depId);
                         setCurrentDeps((prev) =>
                           prev.filter((entry) => entry !== depId)
                         );

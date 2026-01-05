@@ -8,11 +8,10 @@ import {
   type KeyboardEvent,
 } from "react";
 import type { Scope } from "../domain/scope";
-import { query } from "../rpc/clientSingleton";
+import { serverQuery } from "./serverApi";
 import { formatDate } from "../domain/formatters";
 import { getTodayRange, getWeekRange } from "./dateWindow";
-import ContributionsHeatmap from "./ContributionsHeatmap";
-import { setStatus } from "./itemActions";
+import { setStatus } from "./serverActions";
 import { AppCheckbox } from "./controls";
 
 type DashboardViewProps = {
@@ -76,6 +75,52 @@ type ExecutionWindowResult = {
   };
 };
 
+type ExecutionWindowServer = {
+  scheduled: Array<{
+    block_id: string;
+    item_id: string;
+    title: string;
+    start_at: string | null;
+    duration_minutes: number;
+    end_at?: string | null;
+    due_at?: string | null;
+    status: string;
+    priority?: number | null;
+    slack_minutes?: number | null;
+    project_id?: string | null;
+    project_title?: string | null;
+    assignee_name?: string | null;
+  }>;
+  actionable_now: Array<{
+    item_id: string;
+    title: string;
+    due_at?: string | null;
+    status: string;
+    priority: number;
+    slack_minutes?: number | null;
+    planned_start_at?: string | null;
+    planned_end_at?: string | null;
+    project_id?: string | null;
+    project_title?: string | null;
+    assignee_name?: string | null;
+  }>;
+  unscheduled_ready: Array<{
+    item_id: string;
+    title: string;
+    due_at?: string | null;
+    status: string;
+    priority: number;
+    sequence_rank?: number;
+    slack_minutes?: number | null;
+    planned_start_at?: string | null;
+    planned_end_at?: string | null;
+    project_id?: string | null;
+    project_title?: string | null;
+    assignee_name?: string | null;
+  }>;
+  meta?: ExecutionWindowResult["meta"];
+};
+
 type BlockedViewResult = {
   blocked_by_dependencies: Array<{
     item_id: string;
@@ -114,6 +159,35 @@ type BlockedViewResult = {
   }>;
 };
 
+type BlockedViewServer = {
+  blocked_by_dependencies: Array<{
+    item_id: string;
+    title: string;
+    reason: string;
+    status?: string;
+    due_at?: string | null;
+    planned_start_at?: string | null;
+    planned_end_at?: string | null;
+    slack_minutes?: number | null;
+    project_title?: string | null;
+    assignee_name?: string | null;
+  }>;
+  blocked_by_blockers: Array<{
+    item_id: string;
+    title: string;
+    reason?: string;
+  }>;
+  scheduled_but_blocked: Array<{
+    item_id: string;
+    title: string;
+    block_id?: string | null;
+    start_at?: string | null;
+    duration_minutes?: number | null;
+    reason: string;
+    project_title?: string | null;
+  }>;
+};
+
 type DueOverdueResult = {
   due_soon: Array<{
     item_id: string;
@@ -145,6 +219,21 @@ type DueOverdueResult = {
   }>;
 };
 
+type DueOverdueServer = {
+  due_soon: Array<{
+    item_id: string;
+    title: string;
+    due_at: string;
+    days_until_due: number;
+  }>;
+  overdue: Array<{
+    item_id: string;
+    title: string;
+    due_at: string;
+    days_until_due: number;
+  }>;
+};
+
 const TIME_LABEL = new Intl.DateTimeFormat(undefined, {
   hour: "2-digit",
   minute: "2-digit",
@@ -153,6 +242,93 @@ const TIME_LABEL = new Intl.DateTimeFormat(undefined, {
 
 const formatDays = (value: number) =>
   `${value < 0 ? "-" : ""}${Math.abs(value)}d`;
+
+const toMs = (value: string | number | null | undefined) => {
+  if (!value) {
+    return null;
+  }
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? null : date.getTime();
+};
+
+const normalizeExecution = (data: ExecutionWindowServer): ExecutionWindowResult => ({
+  scheduled: data.scheduled.map((block) => ({
+    ...block,
+    start_at: toMs(block.start_at) ?? 0,
+    end_at: toMs(block.end_at ?? null) ?? undefined,
+    due_at: toMs(block.due_at ?? null),
+    priority: block.priority ?? 0,
+  })),
+  actionable_now: data.actionable_now.map((item) => ({
+    ...item,
+    due_at: toMs(item.due_at ?? null),
+    planned_start_at: toMs(item.planned_start_at ?? null),
+    planned_end_at: toMs(item.planned_end_at ?? null),
+  })),
+  unscheduled_ready: data.unscheduled_ready.map((item) => ({
+    ...item,
+    due_at: toMs(item.due_at ?? null),
+    planned_start_at: toMs(item.planned_start_at ?? null),
+    planned_end_at: toMs(item.planned_end_at ?? null),
+  })),
+  meta: data.meta,
+});
+
+const normalizeBlocked = (data: BlockedViewServer): BlockedViewResult => ({
+  blocked_by_dependencies: data.blocked_by_dependencies.map((item) => ({
+    item_id: item.item_id,
+    title: item.title,
+    blocked_reason: item.reason,
+    status: item.status ?? "blocked",
+    due_at: toMs(item.due_at ?? null),
+    planned_start_at: toMs(item.planned_start_at ?? null),
+    planned_end_at: toMs(item.planned_end_at ?? null),
+    slack_minutes: item.slack_minutes ?? null,
+    project_title: item.project_title ?? null,
+    assignee_name: item.assignee_name ?? null,
+  })),
+  blocked_by_blockers: data.blocked_by_blockers.map((item) => ({
+    item_id: item.item_id,
+    title: item.title,
+    blocker_count: 1,
+    status: "blocked",
+    due_at: null,
+    planned_start_at: null,
+    planned_end_at: null,
+    slack_minutes: null,
+    project_title: null,
+    assignee_name: null,
+  })),
+  scheduled_but_blocked: data.scheduled_but_blocked.map((item) => ({
+    item_id: item.item_id,
+    title: item.title,
+    status: "blocked",
+    block_id: item.block_id ?? null,
+    start_at: toMs(item.start_at ?? null),
+    duration_minutes: item.duration_minutes ?? null,
+    blocked_reason: item.reason,
+    due_at: null,
+    project_title: item.project_title ?? null,
+  })),
+});
+
+const normalizeDueOverdue = (data: DueOverdueServer): DueOverdueResult => ({
+  due_soon: data.due_soon.map((item) => ({
+    item_id: item.item_id,
+    title: item.title,
+    status: "ready",
+    due_at: toMs(item.due_at) ?? Date.now(),
+    days_until_due: item.days_until_due,
+  })),
+  overdue: data.overdue.map((item) => ({
+    item_id: item.item_id,
+    title: item.title,
+    status: "ready",
+    due_at: toMs(item.due_at) ?? Date.now(),
+    days_overdue: Math.abs(item.days_until_due),
+  })),
+  projects: [],
+});
 
 const DashboardView: FC<DashboardViewProps> = ({
   scope,
@@ -187,26 +363,30 @@ const DashboardView: FC<DashboardViewProps> = ({
     setLoading(true);
     setError(null);
     try {
+      const scopeArgs = {
+        scopeType: scope.kind,
+        scopeId: scope.kind === "project" ? scope.projectId : scope.userId,
+      };
       const [executionData, blockedData, dueData] = await Promise.all([
-        query<ExecutionWindowResult>("execution_window", {
-          scope,
-          time_min: windowRange.start.getTime(),
-          time_max: windowRange.end.getTime(),
+        serverQuery<ExecutionWindowServer>("execution_window", {
+          ...scopeArgs,
+          windowStart: windowRange.start.toISOString(),
+          windowEnd: windowRange.end.toISOString(),
         }),
-        query<BlockedViewResult>("blocked_view", {
-          scope,
-          time_min: windowRange.start.getTime(),
-          time_max: windowRange.end.getTime(),
+        serverQuery<BlockedViewServer>("blocked_view", {
+          ...scopeArgs,
+          time_min: windowRange.start.toISOString(),
+          time_max: windowRange.end.toISOString(),
         }),
-        query<DueOverdueResult>("due_overdue", {
-          scope,
-          now_at: Date.now(),
-          due_soon_days: 7,
+        serverQuery<DueOverdueServer>("due_overdue", {
+          ...scopeArgs,
+          now: new Date().toISOString(),
+          days: 7,
         }),
       ]);
-      setExecution(executionData);
-      setBlocked(blockedData);
-      setDueOverdue(dueData);
+      setExecution(normalizeExecution(executionData));
+      setBlocked(normalizeBlocked(blockedData));
+      setDueOverdue(normalizeDueOverdue(dueData));
     } catch (err) {
       const message = err instanceof Error ? err.message : "Unknown error";
       setError(message);
@@ -242,7 +422,6 @@ const DashboardView: FC<DashboardViewProps> = ({
 
   return (
     <div className="dashboard-view">
-      <ContributionsHeatmap scope={scope} refreshToken={refreshToken} />
       <div className="dashboard-toolbar">
         <div className="dashboard-title">Dashboard</div>
         <SegmentedControl.Root

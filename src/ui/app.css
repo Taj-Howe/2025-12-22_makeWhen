@@ -170,6 +170,214 @@ body {
   margin-bottom: 16px;
 }
 
+.share-panel {
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius);
+  padding: 12px;
+  margin-bottom: 16px;
+  background: var(--color-panel);
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.share-panel-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.share-panel-title {
+  font-weight: 600;
+}
+
+.share-panel-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.share-panel-label {
+  font-size: 0.85rem;
+  opacity: 0.8;
+}
+
+.share-panel-select {
+  background: var(--color-panel-2);
+  color: var(--color-text);
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  padding: 6px 8px;
+}
+
+.share-panel-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.share-panel-item {
+  border: 1px solid var(--color-border);
+  border-radius: 10px;
+  padding: 10px;
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.share-panel-item.is-revoked {
+  opacity: 0.6;
+}
+
+.share-panel-item-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.share-panel-item-role {
+  font-size: 0.8rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  opacity: 0.7;
+}
+
+.share-panel-item-url {
+  font-size: 0.85rem;
+  word-break: break-all;
+}
+
+.share-panel-item-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.share-panel-item-revoked {
+  font-size: 0.8rem;
+  opacity: 0.7;
+}
+
+.share-panel-empty {
+  font-size: 0.85rem;
+  opacity: 0.7;
+}
+
+.ai-panel {
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius);
+  padding: 12px;
+  margin-bottom: 16px;
+  background: var(--color-panel);
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.ai-panel-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.ai-panel-title {
+  font-weight: 600;
+}
+
+.ai-panel-subtitle {
+  font-size: 0.85rem;
+  opacity: 0.7;
+}
+
+.ai-panel-label {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 0.85rem;
+  opacity: 0.9;
+}
+
+.ai-panel-row {
+  display: grid;
+  gap: 10px;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+}
+
+.ai-panel-input {
+  background: var(--color-panel-2);
+  color: var(--color-text);
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  padding: 6px 8px;
+}
+
+.ai-panel-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.ai-panel-error {
+  color: var(--color-danger);
+  font-size: 0.85rem;
+}
+
+.ai-panel-preview {
+  border-top: 1px solid var(--color-border);
+  padding-top: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.ai-panel-section-title {
+  font-weight: 600;
+}
+
+.ai-panel-section {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.ai-panel-section-label {
+  font-size: 0.85rem;
+  opacity: 0.7;
+}
+
+.ai-panel-milestone {
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  padding: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.ai-panel-milestone-title {
+  font-weight: 600;
+  font-size: 0.95rem;
+}
+
+.ai-panel-task-list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: grid;
+  gap: 4px;
+  font-size: 0.85rem;
+}
+
+.ai-panel-empty {
+  font-size: 0.85rem;
+  opacity: 0.7;
+}
+
 .dashboard-view {
   border: 1px solid var(--color-border);
   border-radius: var(--radius);
@@ -1751,6 +1959,14 @@ body {
 .slack-negative {
   color: var(--color-danger);
   font-weight: 600;
+}
+
+.view-placeholder {
+  padding: 24px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius);
+  background: var(--color-panel);
+  color: var(--color-text-muted);
 }
 
 @media (max-width: 800px) {

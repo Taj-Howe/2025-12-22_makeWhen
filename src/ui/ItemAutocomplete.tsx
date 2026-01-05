@@ -5,16 +5,16 @@ import {
   type FC,
   type KeyboardEvent,
 } from "react";
-import { query } from "../rpc/clientSingleton";
+import { serverQuery } from "./serverApi";
 import { AppButton, AppInput } from "./controls";
 
 export type ItemLite = {
   id: string;
   title: string;
   item_type: string;
-  parent_id: string | null;
-  due_at: number | null;
-  completed_at: number | null;
+  parent_id?: string | null;
+  due_at?: number | null;
+  completed_at?: number | null;
 };
 
 type ItemAutocompleteProps = {
@@ -74,19 +74,26 @@ export const ItemAutocomplete: FC<ItemAutocompleteProps> = ({
     }
     const currentRequest = ++requestId.current;
     timeoutId.current = window.setTimeout(() => {
-      query<{ items: ItemLite[] }>("searchItems", {
-        q: queryText,
-        limit: 12,
-        scopeId,
-      })
+      serverQuery<{ items: Array<{ id: string; title: string; type: string }> }>(
+        "searchItems",
+        {
+          text: queryText,
+          limit: 12,
+          scopeProjectId: scopeId,
+        }
+      )
         .then((data) => {
           if (currentRequest !== requestId.current) {
             return;
           }
           const exclude = new Set(excludeIds ?? []);
-          const filtered = (data.items ?? []).filter(
-            (item) => !exclude.has(item.id)
-          );
+          const filtered = (data.items ?? [])
+            .map((item) => ({
+              id: item.id,
+              title: item.title,
+              item_type: item.type,
+            }))
+            .filter((item) => !exclude.has(item.id));
           setItems(filtered);
           setActiveIndex(filtered.length > 0 ? 0 : -1);
         })

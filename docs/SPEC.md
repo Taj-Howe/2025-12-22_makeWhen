@@ -20,6 +20,7 @@ This doc defines the non-negotiable domain truths, what is stored vs computed, a
 - Completion: `items.completed_at` set when status becomes `done`.
 - Archiving: `items.archived_at` (non-null means archived).
 - Assignment: `item_assignees` (single assignee enforced in UI/ops).
+- Subtasks: an item of type `task` whose parent is another task.
 
 ## Stored vs computed
 
@@ -63,6 +64,7 @@ Computed (examples):
 - UI renders worker query results and formats values only.
 - UI must not compute rollups, dependency projections, or schedule math.
 - List/Calendar/Gantt/Kanban/Dashboard all share the worker’s canonical data.
+- Command palette (CLI) and editor drawer also use the same mutate/query contracts.
 
 ## Operations (writes)
 

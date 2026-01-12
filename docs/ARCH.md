@@ -2,6 +2,17 @@
 
 This is a fast index of worker APIs, database tables, migrations, UI entry points, and special state machines.
 
+## Tech stack
+
+- Vite + React 18 + TypeScript
+- SQLite-WASM in a Web Worker (OPFS + opfs-sahpool)
+- Radix UI Themes + Radix primitives + Radix Colors
+- pnpm
+
+## Data flow (text diagram)
+
+UI (React) -> RPC client (src/rpc) -> db-worker (SQLite-WASM)
+
 ## Worker APIs (src/db-worker/worker.ts)
 
 Queries (named):
@@ -106,6 +117,7 @@ Shell + shared:
 - `AddItemForm.tsx`
 - `ItemAutocomplete.tsx`
 - `UserSelect.tsx`
+- `controls.tsx` (shared control wrappers)
 
 ## Special state machines / interactions
 

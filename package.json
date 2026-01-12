@@ -8,7 +8,7 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "db:migrate": "node scripts/dbMigrate.mjs",
+    "db:migrate": "node --env-file=env.local scripts/dbMigrate.mjs",
     "lint": "echo \"TODO: lint\"",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },

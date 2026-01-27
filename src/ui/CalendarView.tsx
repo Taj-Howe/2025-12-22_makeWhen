@@ -10,7 +10,7 @@ import {
 } from "react";
 import { SegmentedControl } from "@radix-ui/themes";
 import * as ContextMenu from "@radix-ui/react-context-menu";
-import { mutate, query } from "../rpc/clientSingleton";
+import { mutate, query } from "../data/api";
 import { UNGROUPED_PROJECT_ID } from "./constants";
 import type { ListItem } from "../domain/listTypes";
 import type { Scope } from "../domain/scope";

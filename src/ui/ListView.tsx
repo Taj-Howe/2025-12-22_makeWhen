@@ -9,7 +9,7 @@ import {
   type ReactNode,
 } from "react";
 import * as ContextMenu from "@radix-ui/react-context-menu";
-import { query, mutate } from "../rpc/clientSingleton";
+import { query, mutate } from "../data/api";
 import { UNGROUPED_PROJECT_ID, UNGROUPED_PROJECT_LABEL } from "./constants";
 import { scopeKey } from "../domain/scope";
 import type {

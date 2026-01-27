@@ -6,7 +6,7 @@ import {
   type FC,
   type FormEvent,
 } from "react";
-import { mutate, query } from "../rpc/clientSingleton";
+import { mutate, query } from "../data/api";
 import { UNGROUPED_PROJECT_ID } from "./constants";
 import { toDateTimeLocal } from "../domain/formatters";
 import { ItemAutocomplete } from "./ItemAutocomplete";

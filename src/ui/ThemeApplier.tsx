@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { query } from "../rpc/clientSingleton";
+import { query } from "../data/api";
 
 type UiThemeRuntime = {
   cssVars: Record<string, string>;

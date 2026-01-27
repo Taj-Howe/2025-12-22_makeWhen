@@ -5,7 +5,7 @@ import {
   deriveDurationMinutesFromEnd,
   deriveEndAtFromDuration,
   evaluateDependencyStatus,
-} from "../src/db-worker/scheduleMath.js";
+} from "../legacy/db-worker/scheduleMath.js";
 
 describe("schedule math", () => {
   it("derives end_at from start + duration", () => {

@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState, type FC } from "react";
 import * as ContextMenu from "@radix-ui/react-context-menu";
 import { PlusIcon } from "@radix-ui/react-icons";
-import { query } from "../rpc/clientSingleton";
+import { query } from "../data/api";
 import { UNGROUPED_PROJECT_ID, UNGROUPED_PROJECT_LABEL } from "./constants";
 import type { Scope } from "../domain/scope";
 import { AppButton, AppIconButton } from "./controls";

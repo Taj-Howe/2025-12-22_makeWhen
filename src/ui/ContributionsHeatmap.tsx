@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState, type FC } from "react";
 import type { Scope } from "../domain/scope";
-import { query } from "../rpc/clientSingleton";
+import { query } from "../data/api";
 import { AppSelect } from "./controls";
 import { addDays, startOfDay } from "./dateWindow";
 

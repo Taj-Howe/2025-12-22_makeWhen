@@ -8,7 +8,7 @@ import {
   type KeyboardEvent,
 } from "react";
 import type { Scope } from "../domain/scope";
-import { query } from "../rpc/clientSingleton";
+import { query } from "../data/api";
 import { formatDate } from "../domain/formatters";
 import { getTodayRange, getWeekRange } from "./dateWindow";
 import ContributionsHeatmap from "./ContributionsHeatmap";

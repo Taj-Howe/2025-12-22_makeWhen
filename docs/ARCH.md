@@ -1,106 +1,81 @@
 # Architecture Map (Quick Inventory)
 
-This is a fast index of worker APIs, database tables, migrations, UI entry points, and special state machines.
+This is a fast index of the **server-authoritative** architecture: APIs, tables,
+modules, and how data flows. Legacy worker code is listed at the end.
 
 ## Tech stack
 
-- Vite + React 18 + TypeScript
-- SQLite-WASM in a Web Worker (OPFS + opfs-sahpool)
-- Radix UI Themes + Radix primitives + Radix Colors
+- Next.js App Router (React 18 + TypeScript)
+- Postgres (Neon) via Kysely
+- Auth.js (Google OAuth)
+- SSE invalidation (`/api/sse`)
+- Radix UI Themes + Radix Colors
 - pnpm
 
 ## Data flow (text diagram)
 
-UI (React) -> RPC client (src/rpc) -> db-worker (SQLite-WASM)
+```
+UI (React)
+  -> src/data/api.ts
+     -> POST /api/query  -> lib/views/* -> Postgres (Kysely)
+     -> POST /api/ops    -> lib/domain/ops.ts -> Postgres (Kysely)
+     -> GET  /api/sse    -> lib/server/pubsub.ts -> invalidation events
+```
 
-## Worker APIs (src/db-worker/worker.ts)
+## Server API endpoints
 
-Queries (named):
-- `getItemDetails`
-- `get_running_timer`
-- `getProjectTree`
-- `listKanban`
-- `listItems`
-- `list_view_complete`
-- `list_view_scope`
-- `execution_window`
-- `blocked_view`
-- `due_overdue`
-- `contributions_range`
-- `kanban_view`
-- `searchItems`
-- `listGantt`
-- `listExecution`
-- `listBlocked`
-- `listByUser`
-- `listOverdue`
-- `listDueSoon`
-- `getSettings`
-- `listCalendarBlocks`
-- `calendar_range`
-- `gantt_range`
-- `calendar_range_user`
-- `users_list`
-- `debug.verify_integrity`
+- `POST /api/query`
+  - Dispatches named queries and returns computed view models.
+  - Active names in `app/api/query/route.ts`:
+    - `list_view`, `list_view_complete`, `listItems`
+    - `calendar_view`, `calendar_range`, `calendar_range_user`
+    - `users_list`
 
-Mutations (ops):
-- `create_item`
-- `update_item_fields`
-- `set_status`
-- `scheduled_block.create`
-- `scheduled_block.update`
-- `scheduled_block.delete`
-- `create_block` / `move_block` / `resize_block` / `delete_block` (legacy block ops)
-- `item.archive` / `items.archive_many`
-- `item.restore` / `items.restore_many`
-- `delete_item` / `items.delete_many`
-- `reorder_item`
-- `move_item`
-- `add_time_entry`
-- `start_timer` / `stop_timer`
-- `set_setting`
-- `export_data` / `import_data`
-- `dependency.create` / `dependency.update` / `dependency.delete`
-- `add_dependency` / `remove_dependency`
-- `add_blocker` / `clear_blocker`
-- `set_item_tags`
-- `user.create` / `user.update`
-- `item.set_assignee`
-- `set_item_assignees`
+- `POST /api/ops`
+  - Ops-only mutation surface (validated + transactional).
+  - Implemented in `lib/domain/ops.ts`.
+  - Categories:
+    - project: create/update
+    - item: create/update/set_status/archive/restore/delete
+    - scheduled blocks: create/move/resize/delete
+    - dependencies: add/update/remove (type + lag)
+    - blockers: add/clear
+    - time entries: start/stop
 
-## DB tables (src/db-worker/migrations)
+- `GET /api/sse`
+  - SSE stream for invalidation events.
+  - Publishes `project:<id>` and `user:<id>` topics.
 
-Core tables:
+## Core server modules
+
+- `lib/db/kysely.ts` - database connection
+- `lib/db/schema.ts` - Kysely types
+- `lib/auth/auth.ts` - Auth.js session + user provisioning
+- `lib/domain/ops.ts` - op handlers + invariants
+- `lib/domain/rollup.ts` - rollup computations
+- `lib/domain/scheduleMath.ts` - schedule envelopes + dependency status
+- `lib/views/listView.ts` - list view model builder
+- `lib/views/calendarView.ts` - calendar view model builder
+- `lib/server/pubsub.ts` - in-memory pubsub for SSE
+
+## Database tables (migrations)
+
+From `migrations/0001_init.sql`:
+- `users`
+- `projects`
+- `project_members`
 - `items`
-- `item_assignees`
-- `item_tags`
+- `scheduled_blocks`
 - `dependencies`
 - `blockers`
-- `scheduled_blocks`
 - `time_entries`
-- `audit_log`
-- `settings`
+- `op_log`
 
-Additional tables:
-- `running_timers`
-- `ui_snippets`
+Indexes in `migrations/0002_indexes.sql`.
 
-## Migrations
+## UI entry points (current)
 
-- `0001_init.sql` initial schema
-- `0002_blockers_kind_text.sql` blocker fields
-- `0003_running_timers.sql` running timers table
-- `0004_sort_order.sql` manual ordering
-- `0005_due_at_nullable.sql` allow null due dates
-- `0006_title_search.sql` title search index
-- `0007_dependencies_type_lag.sql` dependency type/lag
-- `0008_completed_at.sql` completion timestamp
-- `0009_ui_snippets.sql` UI CSS snippets
-- `0010_archived_at.sql` archiving timestamp
-
-## UI entry points (src/ui)
-
-Views:
+Views (in `src/ui`):
 - `ListView.tsx`
 - `CalendarView.tsx`
 - `GanttView.tsx`
@@ -115,20 +90,19 @@ Shell + shared:
 - `ScopeContext.tsx`
 - `SidebarProjects.tsx`
 - `AddItemForm.tsx`
-- `ItemAutocomplete.tsx`
-- `UserSelect.tsx`
-- `controls.tsx` (shared control wrappers)
-
-## Special state machines / interactions
-
-- List selection: multi-select (shift/cmd/ctrl), selection highlight
-- List drag/drop: move tasks between milestones/ungrouped, multi-drag
-- Calendar: click/drag to create blocks, move/resize blocks
-- Command palette: CLI parsing and actions
-- Right sheet: item editing drawer
-- Timer: running timer per item
 
 ## Scripts/tests
 
-- `scripts/rollup.test.mjs`
-- `scripts/scheduleMath.test.mjs`
+- `scripts/dbMigrate.mjs`
+- `scripts/dbReset.mjs`
+- `scripts/fixtures.mjs`
+- `scripts/parity.mjs` (worker vs server view parity)
+- `scripts/server.test.mjs`
+
+## Legacy architecture (deprecated)
+
+The old offline-first worker system still exists for reference only:
+- `legacy/db-worker/*`
+- `legacy/vite/*`
+
+Do not build new features on the legacy worker path.

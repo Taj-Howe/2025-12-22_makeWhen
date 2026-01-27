@@ -1,45 +1,7 @@
 // 1) src/dev/rpcSmoke.ts
 // Drop this file in your repo. It runs 5 backend-only RPC smoke checks in the browser.
 
-type AnyFn = (...args: any[]) => any;
-
-function pickClient() {
-  // Tries a few common export shapes without you having to rename anything.
-  // Adjust ONLY if none of these exist in your client.ts.
-  const mod: any = (globalThis as any).__rpcClientModule;
-  return mod;
-}
-
-async function getClient() {
-  const existing = pickClient();
-  if (existing?.query && existing?.mutate) {
-    return existing;
-  }
-  // We dynamically import so this file never runs in prod unless you opt in.
-  const mod: any = await import("../rpc/client");
-  (globalThis as any).__rpcClientModule = mod;
-
-  const query: AnyFn =
-    mod.query ??
-    mod.rpc?.query ??
-    mod.db?.query ??
-    mod.api?.query;
-
-  const mutate: AnyFn =
-    mod.mutate ??
-    mod.rpc?.mutate ??
-    mod.db?.mutate ??
-    mod.api?.mutate;
-
-  if (typeof query !== "function" || typeof mutate !== "function") {
-    const keys = Object.keys(mod);
-    throw new Error(
-      `rpcSmoke: couldn't find query/mutate in ../client exports. Exports: ${keys.join(", ")}`
-    );
-  }
-
-  return { query, mutate, request: mod.request };
-}
+import { mutate, query } from "../data/api";
 
 const now = () => Date.now();
 const min = (m: number) => m * 60_000;
@@ -49,16 +11,14 @@ function assert(cond: any, msg: string) {
 }
 
 export async function runRpcSmoke() {
-  const { query, mutate, request } = await getClient();
-
   console.groupCollapsed("%crpcSmoke: start", "font-weight:bold;");
   try {
     // --- Check 1: worker responds + DB initialized
-    const ping = request ? await request("ping", {}) : await query("ping", {});
-    console.log("ping:", ping);
-    const info = request ? await request("dbInfo", {}) : await query("dbInfo", {});
-    console.log("dbInfo:", info);
-    assert(info?.ok !== false, "dbInfo should not be ok:false");
+    const listBootstrap = await query("list_view_complete", {
+      includeUngrouped: true,
+      includeCompleted: true,
+    });
+    console.log("list_view_complete:", listBootstrap);
 
     // --- Setup: create a mini hierarchy: project > milestone > task
     const dueSoon = now() + min(60); // required by your create_item

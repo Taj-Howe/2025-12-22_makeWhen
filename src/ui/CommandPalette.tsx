@@ -2,7 +2,7 @@ import type { FC, KeyboardEvent } from "react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Dialog } from "@radix-ui/themes";
 import { parseCommand } from "../cli/parseCommand";
-import { mutate, query } from "../rpc/clientSingleton";
+import { mutate, query } from "../data/api";
 import { UNGROUPED_PROJECT_ID } from "./constants";
 import type { ItemLite } from "./ItemAutocomplete";
 import { AppButton, AppInput } from "./controls";

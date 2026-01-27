@@ -1,4 +1,4 @@
-import { mutate } from "../rpc/clientSingleton";
+import { mutate } from "../data/api";
 import type { ListItem } from "../domain/listTypes";
 
 export const setStatus = (id: string, status: string) =>

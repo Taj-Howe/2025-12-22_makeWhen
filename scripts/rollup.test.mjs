@@ -5,7 +5,7 @@ import { runInNewContext } from "node:vm";
 import ts from "typescript";
 
 const source = readFileSync(
-  new URL("../src/db-worker/rollup.ts", import.meta.url),
+  new URL("../legacy/db-worker/rollup.ts", import.meta.url),
   "utf8"
 );
 const output = ts.transpileModule(source, {

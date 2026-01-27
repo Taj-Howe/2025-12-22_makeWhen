@@ -1,15 +1,45 @@
 
-git procedure: 
 
 
-# Bug Fixes
-- [ ] Fix the asignee menu not having enough space to click if its the last task in the list. 
-- [ ] Highlight item that corresponds to scope. Make page titles more expressive. 
+
+Get the app up and running agaiin
+
+- [ ] fix spacing in CLI 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 # Upcoming Features:
 
+## Add Auth and users 
+
+
+## Fix UI 
+
+
 ## Add custom UI Settings
+
+
 - [ ] Copy minimal theme settings that allow you to change the CSS tokens 
   - [ ] Look up Minimal Theme Settings, it's an obsidian plugin, and use that model of being able to alter the CSS tokens through a UI. 
 - [ ] Allow you to export the settings as JSON 
@@ -24,18 +54,11 @@ traditional font:  <link rel="stylesheet" href="https://use.typekit.net/pcv4nbv.
 minimal font pack: <link rel="stylesheet" href="https://use.typekit.net/pcv4nbv.css">
 code font pack: <link rel="stylesheet" href="https://use.typekit.net/pcv4nbv.css">
 
-## Progress Tracking UI  
-  - [ ] Add a completed tasks bar (identical to github contributions) (this is iciing on the cake)
-  - [ ] Create a time tracking functionality that has a timer that fills in actual hours worked (vs estimate duration) 
-  - [ ] 
-  - [ ] Would be fun to have achievement levels for time worked (actual vs estimate), efficiency achievements, total tasks achievements, etc.
-  - And then just go ahead and add a basic set of met
-
 
 ## Add Folder Support 
   - [ ] Add folders for projects
 
-## Add Subtasks to tasks
+
 
 ## CLI 
 - [ ] Add a switch command to switch between projects 
@@ -73,34 +96,6 @@ rics. Whatever is most common in PM world.
 
 
             
-
-
-
-### 4.5 “Today / This Week” execution view
-- Just a super simple to do list widget that lists things in order of when they're scheduled for in the calendar. 
-- Primary: blocks scheduled in the time window (ordered by time)
-- Secondary: ready & unblocked items without blocks (ordered by sequence_rank)
-      - by org
-        - by user
-            - by project    
-### 4.6 Blocked view
-- Split into:
-  - blocked by dependencies
-  - blocked by blockers
-- Show “scheduled but blocked” items as high-visibility warnings
-      - by org
-        - by user
-            - by project    
-### 4.7 Due/Overdue dashboards
-- “Due soon” list
-- “Overdue” list
-- Per project: days until due / days overdue (based on project’s own due_at)
-      - by org
-        - by user
-            - by project
-
-## Dashboard 
-- [ ] A customizable view that users can add their favorite view tyupes to at a glance (by org, team, project, user basis). 
 
 
 Small ones: 
@@ -179,3 +174,51 @@ Next big task is Gantt view. Look back at this context to understand the design 
   - Project/milestone bar: rollup start/end from descendants
 - Due markers render as vertical lines/pins
         
+
+
+        ## Progress Tracking UI  
+  - [ ] Add a completed tasks bar (identical to github contributions) (this is iciing on the cake)
+  - [ ] Create a time tracking functionality that has a timer that fills in actual hours worked (vs estimate duration) 
+  - [ ] 
+  - [ ] Would be fun to have achievement levels for time worked (actual vs estimate), efficiency achievements, total tasks achievements, etc.
+  - And then just go ahead and add a basic set of met
+
+## Add Subtasks to tasks
+
+
+## Dashboard 
+- [ ] A customizable view that users can add their favorite view tyupes to at a glance (by org, team, project, user basis). 
+
+## Add archive functionality 
+
+
+# Bug Fixes
+- [ ] Fix the asignee menu not having enough space to click if its the last task in the list. 
+- [ ] Highlight item that corresponds to scope. Make page titles more expressive. 
+
+
+
+
+
+### 4.5 “Today / This Week” execution view
+- Just a super simple to do list widget that lists things in order of when they're scheduled for in the calendar. 
+- Primary: blocks scheduled in the time window (ordered by time)
+- Secondary: ready & unblocked items without blocks (ordered by sequence_rank)
+      - by org
+        - by user
+            - by project    
+### 4.6 Blocked view
+- Split into:
+  - blocked by dependencies
+  - blocked by blockers
+- Show “scheduled but blocked” items as high-visibility warnings
+      - by org
+        - by user
+            - by project    
+### 4.7 Due/Overdue dashboards
+- “Due soon” list
+- “Overdue” list
+- Per project: days until due / days overdue (based on project’s own due_at)
+      - by org
+        - by user
+            - by project

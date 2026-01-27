@@ -16,10 +16,16 @@ export const loadTheme = (): ThemeName => {
 };
 
 export const applyTheme = (theme: ThemeName) => {
+  if (typeof document === "undefined") {
+    return;
+  }
   document.documentElement.dataset.theme = theme;
 };
 
 export const saveTheme = (theme: ThemeName) => {
+  if (typeof window === "undefined") {
+    return;
+  }
   window.localStorage.setItem(STORAGE_KEY, theme);
 };
 

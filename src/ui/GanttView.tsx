@@ -7,7 +7,7 @@ import {
   useState,
   type FC,
 } from "react";
-import { query, mutate } from "../rpc/clientSingleton";
+import { query, mutate } from "../data/api";
 import type {
   GanttBlock,
   GanttEdge,

@@ -1412,6 +1412,31 @@ const initDb = async () => {
   return initPromise;
 };
 
+export const setDbHandleForTests = (db: any) => {
+  dbHandle = db;
+  dbState.error = null;
+};
+
+export const createTestDb = async () => {
+  const sqlite3 = await sqlite3InitModule({
+    print: () => {},
+    printErr: () => {},
+  });
+  const db = new sqlite3.oo1.DB(":memory:");
+  scheduledBlocksSchema = null;
+  const schemaVersion = runMigrations(db);
+  ensureScheduledBlocksDurationColumn(db);
+  dbHandle = db;
+  dbState.info = {
+    ok: true,
+    vfs: "memory",
+    filename: ":memory:",
+    schemaVersion,
+  };
+  dbState.error = null;
+  return { db, schemaVersion };
+};
+
 const handleMutate = (envelope: MutateEnvelope): MutateResult => {
   if (!dbHandle) {
     return { ok: false, error: "DB not initialized" };
@@ -3156,7 +3181,9 @@ const handleMutate = (envelope: MutateEnvelope): MutateResult => {
   });
 };
 
-const handleRequest = async (message: RpcRequest): Promise<RpcResponse> => {
+export const handleRequest = async (
+  message: RpcRequest
+): Promise<RpcResponse> => {
   if (message.method === "ping") {
     return {
       id: message.id,

@@ -5,7 +5,7 @@ import {
   useState,
   type FC,
 } from "react";
-import { query } from "../rpc/clientSingleton";
+import { query } from "../data/api";
 import { AppButton, AppInput } from "./controls";
 
 type UserOption = {

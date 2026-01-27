@@ -1,7 +1,7 @@
 import { Card, Flex, Heading, SegmentedControl, Switch, Text } from "@radix-ui/themes";
 import { useEffect, useState, type FC } from "react";
 import { loadTheme, setTheme, type ThemeName } from "../theme/themeStore";
-import { mutate, query } from "../rpc/clientSingleton";
+import { mutate, query } from "../data/api";
 
 const THEME_OPTIONS: Array<{ value: ThemeName; label: string }> = [
   { value: "light", label: "Light" },

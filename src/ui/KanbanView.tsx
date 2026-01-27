@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState, type FC } from "react";
-import { mutate, query } from "../rpc/clientSingleton";
+import { mutate, query } from "../data/api";
 import type { Scope } from "../domain/scope";
 import { AppButton, AppCheckbox, AppSelect, AppSwitch } from "./controls";
 

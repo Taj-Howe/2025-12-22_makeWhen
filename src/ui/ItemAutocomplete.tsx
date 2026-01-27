@@ -5,7 +5,7 @@ import {
   type FC,
   type KeyboardEvent,
 } from "react";
-import { query } from "../rpc/clientSingleton";
+import { query } from "../data/api";
 import { AppButton, AppInput } from "./controls";
 
 export type ItemLite = {

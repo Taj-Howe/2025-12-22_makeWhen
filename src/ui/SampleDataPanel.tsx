@@ -1,5 +1,5 @@
 import { useState, type FC } from "react";
-import { mutate, query } from "../rpc/clientSingleton";
+import { mutate, query } from "../data/api";
 import { AppButton } from "./controls";
 
 type SampleDataPanelProps = {

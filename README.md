@@ -1,82 +1,108 @@
-# MakeWhen — Offline-First Personal PM (SQLite-WASM + OPFS)
+# MakeWhen - Server-Authoritative Personal PM
 
-MakeWhen is an **offline-first** personal project management app built as a fast
-React SPA with a local SQLite database running in a Web Worker. All reads/writes
-go through a typed RPC layer so the UI never touches SQL.
+MakeWhen is a personal project management app with a **server-authoritative** data model.
+The Postgres database is the source of truth, and all UI reads/writes go through
+server APIs that return computed view models (no SQL in the client).
 
-If you need the architectural rules or invariants, start with `docs/SPEC.md`.
+If you need architectural rules and invariants, start with `docs/SPEC.md`.
 
 ---
 
 ## Tech stack (current)
 
-- Vite + React 18 + TypeScript
-- SQLite-WASM in a Web Worker (OPFS + opfs-sahpool VFS)
-- Radix UI Themes + Radix primitives + Radix Colors
+- Next.js App Router (React 18 + TypeScript)
+- Postgres (Neon) via Kysely
+- Auth.js (Google OAuth)
+- SSE invalidation (`/api/sse`)
+- Radix UI Themes + Radix Colors
 - pnpm
 
 ---
 
-## Quick start
+## Quick start (server mode)
+
+1) Install deps
 
 ```sh
 pnpm install
-pnpm dev
 ```
 
-Open the dev server URL printed by Vite (usually `http://localhost:5173`).
+2) Configure environment
+
+- `DATABASE_URL` (Neon Postgres connection string)
+- `GOOGLE_CLIENT_ID`
+- `GOOGLE_CLIENT_SECRET`
+- `AUTH_SECRET`
+- `NEXT_PUBLIC_DATA_SOURCE=server`
+
+3) Run migrations
+
+```sh
+pnpm db:migrate
+```
+
+4) Start the Next.js dev server
+
+```sh
+pnpm dev:server
+```
 
 ---
 
 ## How it works
 
-- **UI → Worker RPC**: UI calls `query(name,args)` for reads and `mutate(op,args)`
-  for writes. No SQL runs in the UI.
-- **Worker owns truth**: SQLite-WASM runs in `src/db-worker/worker.ts`. Migrations
-  live in `src/db-worker/migrations`.
-- **Derived logic is server-like**: rollups, scheduling envelopes, dependency
-  projections, and slack are computed in the worker (`src/db-worker/rollup.ts`,
-  `src/db-worker/scheduleMath.js`).
+- **Reads**: UI calls `POST /api/query` with a query name + args. The server returns
+  a computed view model (list, calendar, gantt, kanban, dashboard).
+- **Writes**: UI calls `POST /api/ops` with validated ops. Ops enforce permissions,
+  invariants, and write an op log. No direct DB writes from UI.
+- **Realtime**: `/api/sse` sends invalidation events; the client refetches view models.
+- **Derived logic**: rollups, slack, dependency projections, schedule envelopes all
+  live server-side (see `lib/domain/*` and `lib/views/*`).
 
 ---
 
 ## Core model (current behavior)
 
-- **Items**: `project | milestone | task` (a subtask is a task whose parent is a task)
-- **Due date**: `due_at` is optional for all items
-- **Estimate**: required at creation (`estimate_mode` + `estimate_minutes`)
+- **Items**: `project | milestone | task | subtask` (subtask is a task whose parent is a task)
+- **Due date**: `items.due_at` is optional
+- **Estimate**: `estimate_mode` + `estimate_minutes`
 - **Scheduling**: `scheduled_blocks` with `{ start_at, duration_minutes }`
   - end time is always derived
-  - items can have zero or many blocks
 - **Dependencies**: edges with `type` + `lag_minutes`
   - `blocked_by` / `blocking` are projections only (computed)
 - **Blockers**: rows in `blockers` (active = `cleared_at IS NULL`)
 - **Completion**: `completed_at` set when status becomes `done`
 - **Archiving**: `archived_at` hides items from active views
-- **Assignments**: single assignee per item (stored in `item_assignees`)
+- **Assignments**: single assignee per item
 
 ---
 
 ## Views / functionality
 
-- **List view**: spreadsheet-style table, grouping by milestones and ungrouped
-  tasks, inline editing, multi-select, archive section, drag/drop reordering
-- **Calendar view**: week + month views, drag to create blocks, move/resize blocks,
-  due flags
-- **Gantt view**: bars from scheduled blocks + rollups + due markers
-- **Kanban view**: status columns (tasks/subtasks only), swimlanes, drag to change status
+- **List**: spreadsheet-style table, milestones + ungrouped, inline edits, multi-select
+- **Calendar**: week + month, drag to create blocks, move/resize blocks, due flags
+- **Gantt**: bars from scheduled blocks + rollups + due markers
+- **Kanban**: status columns (tasks/subtasks), swimlanes, drag to change status
 - **Dashboard**: execution window, blocked view, due/overdue, contributions heatmap
-- **Command palette (CLI)**: Cmd/Ctrl+K for fast create/update (see docs)
-- **Right-side editor**: drawer for item edit/create
+- **Command palette**: Cmd/Ctrl+K for fast create/update
+- **Editor drawer**: right-side item editor
 
 ---
 
 ## Docs (start here)
 
-- `docs/SPEC.md` — invariants, stored vs computed, worker rules
-- `docs/ARCH.md` — queries, ops, tables, UI entry points
-- `docs/CLI_LANGUAGE.md` — command palette language
-- `docs/CONTEXT.md` — condensed rules/checklists
+- `docs/SPEC.md` - invariants, stored vs computed, ops/query rules
+- `docs/ARCH.md` - API inventory, tables, modules, data flow diagram
+- `docs/CLI_LANGUAGE.md` - command palette language
+- `docs/VIEW_MODELS.md` - view model contracts
+
+---
+
+## Legacy architecture (deprecated)
+
+The old offline-first SQLite/Web Worker code still exists for reference, but it is
+**not** the active system. See `legacy/db-worker/` and `legacy/vite/` for legacy
+artifacts. Do not build new features on the legacy worker path.
 
 ---
 
@@ -85,4 +111,6 @@ Open the dev server URL printed by Vite (usually `http://localhost:5173`).
 ```sh
 pnpm lint
 pnpm typecheck
+pnpm test:parity
+pnpm test:server
 ```

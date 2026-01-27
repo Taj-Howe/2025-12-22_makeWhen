@@ -14,7 +14,7 @@ import CommandPalette from "./CommandPalette";
 import ThemeSettings from "./ThemeSettings";
 import SampleDataPanel from "./SampleDataPanel";
 import { AppButton } from "./controls";
-import { mutate, query } from "../rpc/clientSingleton";
+import { mutate, query } from "../data/api";
 import type { ListItem } from "../domain/listTypes";
 import type { Scope } from "../domain/scope";
 import { ScopeProvider } from "./ScopeContext";

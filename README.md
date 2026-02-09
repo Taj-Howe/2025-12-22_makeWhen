@@ -18,6 +18,42 @@ If Codex (or any agent) loses context, **this README is the source of truth** fo
 
 ---
 
+## Getting started (setup + dev)
+
+### Prerequisites
+- Node.js (LTS recommended)
+- `pnpm@9` (per `package.json` packageManager)
+
+### Install dependencies
+
+```sh
+pnpm install
+```
+
+### Run dev server
+
+```sh
+pnpm dev
+```
+
+Open the URL printed by Vite in the terminal.
+
+### Build + preview
+
+```sh
+pnpm build
+pnpm preview
+```
+
+### Lint + typecheck
+
+```sh
+pnpm lint
+pnpm typecheck
+```
+
+---
+
 ## Non-negotiable requirements (must not drift)
 
 ### 1) Offline-first + speed

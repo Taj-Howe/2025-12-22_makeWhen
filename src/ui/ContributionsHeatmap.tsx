@@ -54,6 +54,7 @@ const ContributionsHeatmap: FC<ContributionsHeatmapProps> = ({
     meta: { max_count: 0 },
   });
   const [loading, setLoading] = useState(false);
+  const [hasLoadedOnce, setHasLoadedOnce] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const startDate = useMemo(() => {
@@ -83,6 +84,7 @@ const ContributionsHeatmap: FC<ContributionsHeatmapProps> = ({
           return;
         }
         setData(result);
+        setHasLoadedOnce(true);
       })
       .catch((err) => {
         if (!isMounted) {
@@ -163,7 +165,9 @@ const ContributionsHeatmap: FC<ContributionsHeatmapProps> = ({
         </label>
       </div>
       {error ? <div className="error">{error}</div> : null}
-      {loading ? <div className="dashboard-empty">Loading…</div> : null}
+      {loading && !hasLoadedOnce ? (
+        <div className="dashboard-empty">Loading…</div>
+      ) : null}
       <div className="heatmap-grid-wrap">
         <div className="heatmap-months">
           {monthLabels.map((label, index) => (

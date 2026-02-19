@@ -1,33 +1,33 @@
 import type { ListItem } from "./listTypes";
 
-type ListViewModel = {
+type ListViewModel<T extends ListItem> = {
   parentTypeMap: Map<string, ListItem["type"]>;
-  itemById: Map<string, ListItem>;
-  tasks: ListItem[];
-  milestones: ListItem[];
-  taskChildren: Map<string, ListItem[]>;
-  tasksUnderMilestone: Map<string, ListItem[]>;
-  ungroupedTasks: ListItem[];
+  itemById: Map<string, T>;
+  tasks: T[];
+  milestones: T[];
+  taskChildren: Map<string, T[]>;
+  tasksUnderMilestone: Map<string, T[]>;
+  ungroupedTasks: T[];
   ungroupedParentId: string | null;
-  getAllTasksUnderMilestone: (milestoneId: string) => ListItem[];
+  getAllTasksUnderMilestone: (milestoneId: string) => T[];
 };
 
-const sortByOrder = (items: ListItem[]) =>
+const sortByOrder = <T extends ListItem>(items: T[]) =>
   items.sort((a, b) => a.sort_order - b.sort_order);
 
-export const buildListViewModel = ({
+export const buildListViewModel = <T extends ListItem>({
   items,
   selectedProjectId,
   ungroupedProjectId,
   mode = "project",
 }: {
-  items: ListItem[];
+  items: T[];
   selectedProjectId: string | null;
   ungroupedProjectId: string;
   mode?: "project" | "user";
-}): ListViewModel => {
+}): ListViewModel<T> => {
   const parentTypeMap = new Map<string, ListItem["type"]>();
-  const itemById = new Map<string, ListItem>();
+  const itemById = new Map<string, T>();
 
   for (const item of items) {
     parentTypeMap.set(item.id, item.type);
@@ -45,7 +45,7 @@ export const buildListViewModel = ({
           )
         );
 
-  const taskChildren = new Map<string, ListItem[]>();
+  const taskChildren = new Map<string, T[]>();
   for (const task of tasks) {
     if (!task.parent_id) {
       continue;
@@ -58,7 +58,7 @@ export const buildListViewModel = ({
     taskChildren.set(key, sortByOrder(list));
   }
 
-  const tasksUnderMilestone = new Map<string, ListItem[]>();
+  const tasksUnderMilestone = new Map<string, T[]>();
   if (mode !== "user") {
     for (const task of tasks) {
       if (!task.parent_id) {
@@ -99,7 +99,7 @@ export const buildListViewModel = ({
           )
         );
 
-  const collectTaskDescendants = (taskId: string, acc: ListItem[]) => {
+  const collectTaskDescendants = (taskId: string, acc: T[]) => {
     const children = taskChildren.get(taskId) ?? [];
     for (const child of children) {
       acc.push(child);
@@ -112,7 +112,7 @@ export const buildListViewModel = ({
       ? () => []
       : (milestoneId: string) => {
           const tasksForMilestone = tasksUnderMilestone.get(milestoneId) ?? [];
-          const all: ListItem[] = [];
+          const all: T[] = [];
           for (const task of tasksForMilestone) {
             all.push(task);
             collectTaskDescendants(task.id, all);

@@ -176,6 +176,7 @@ const DashboardView: FC<DashboardViewProps> = ({
     projects: [],
   });
   const [loading, setLoading] = useState(false);
+  const [hasLoadedOnce, setHasLoadedOnce] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const windowRange = useMemo(() => {
@@ -207,6 +208,7 @@ const DashboardView: FC<DashboardViewProps> = ({
       setExecution(executionData);
       setBlocked(blockedData);
       setDueOverdue(dueData);
+      setHasLoadedOnce(true);
     } catch (err) {
       const message = err instanceof Error ? err.message : "Unknown error";
       setError(message);
@@ -254,7 +256,7 @@ const DashboardView: FC<DashboardViewProps> = ({
         </SegmentedControl.Root>
       </div>
       {error ? <div className="error">{error}</div> : null}
-      {loading ? <div className="list-empty">Loading…</div> : null}
+      {loading && !hasLoadedOnce ? <div className="list-empty">Loading…</div> : null}
       <div className="dashboard-grid">
         <section className="dashboard-card">
           <h3>Execution</h3>

@@ -8,7 +8,6 @@ import {
   type ButtonProps,
   type CheckboxProps,
   type IconButtonProps,
-  type SelectProps,
   type SwitchProps,
   type TextAreaProps,
 } from "@radix-ui/themes";
@@ -45,7 +44,10 @@ type AppSelectOption = {
   label: string;
   disabled?: boolean;
 };
-type AppSelectProps = Omit<SelectProps, "value" | "onValueChange"> & {
+type AppSelectProps = Omit<
+  ComponentPropsWithoutRef<typeof Select.Root>,
+  "value" | "onValueChange"
+> & {
   value?: string;
   onChange?: (value: string) => void;
   options: AppSelectOption[];

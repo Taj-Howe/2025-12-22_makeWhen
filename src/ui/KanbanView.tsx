@@ -56,11 +56,12 @@ const KanbanView: FC<KanbanViewProps> = ({
 }) => {
   const [lanes, setLanes] = useState<KanbanLane[]>([]);
   const [loading, setLoading] = useState(false);
+  const [hasLoadedOnce, setHasLoadedOnce] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [swimlaneMode, setSwimlaneMode] = useState<
     "none" | "assignee" | "project" | "health"
   >("none");
-  const [showDone, setShowDone] = useState(false);
+  const [showDone, setShowDone] = useState(true);
   const [showCanceled, setShowCanceled] = useState(false);
 
   const statusColumns = useMemo(() => {
@@ -84,6 +85,7 @@ const KanbanView: FC<KanbanViewProps> = ({
         swimlaneMode,
       });
       setLanes(data.lanes);
+      setHasLoadedOnce(true);
     } catch (err) {
       const message = err instanceof Error ? err.message : "Unknown error";
       setError(message);
@@ -278,7 +280,7 @@ const KanbanView: FC<KanbanViewProps> = ({
       </div>
 
       {error ? <div className="error">{error}</div> : null}
-      {loading ? <div className="loading">Loading…</div> : null}
+      {loading && !hasLoadedOnce ? <div className="loading">Loading…</div> : null}
 
       <div className="kanban-board">
         {lanes.map((lane) => (

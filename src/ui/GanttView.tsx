@@ -107,6 +107,7 @@ const GanttView: FC<GanttViewProps> = ({
   const [blocks, setBlocks] = useState<GanttBlock[]>([]);
   const [edges, setEdges] = useState<GanttEdge[]>([]);
   const [loading, setLoading] = useState(false);
+  const [hasLoadedOnce, setHasLoadedOnce] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [viewMode, setViewMode] = useState<"week" | "month" | "quarter">(
     "month"
@@ -154,6 +155,7 @@ const GanttView: FC<GanttViewProps> = ({
       setItems(data.items);
       setBlocks(data.blocks);
       setEdges(data.edges);
+      setHasLoadedOnce(true);
     } catch (err) {
       const message = err instanceof Error ? err.message : "Unknown error";
       setError(message);
@@ -470,7 +472,7 @@ const GanttView: FC<GanttViewProps> = ({
       ) : null}
 
       {error ? <div className="error">{error}</div> : null}
-      {loading ? <div className="loading">Loading…</div> : null}
+      {loading && !hasLoadedOnce ? <div className="loading">Loading…</div> : null}
 
       <div className="gantt-grid">
         <div className="gantt-header">

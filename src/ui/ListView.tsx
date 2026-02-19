@@ -106,7 +106,7 @@ const ListView: FC<ListViewProps> = ({
   } | null>(null);
   const [inlineAdd, setInlineAdd] = useState<{
     groupKey: string;
-    parentId: string;
+    parentId: string | null;
   } | null>(null);
   const [inlineTitle, setInlineTitle] = useState("");
   const [editing, setEditing] = useState<{
@@ -1338,7 +1338,7 @@ const ListView: FC<ListViewProps> = ({
     setInlineTitle("");
   };
 
-  const startInlineAdd = (groupKey: string, parentId: string) => {
+  const startInlineAdd = (groupKey: string, parentId: string | null) => {
     setInlineAdd({ groupKey, parentId });
     setInlineTitle("");
   };

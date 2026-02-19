@@ -715,7 +715,10 @@ const CommandPalette: FC<CommandPaletteProps> = ({
     }
 
     try {
-      const created = await mutate("create_item", createArgs);
+      const created = await mutate<{
+        id?: string;
+        result?: { id?: string };
+      }>("create_item", createArgs);
       const itemId = created?.result?.id ?? created?.id;
       if (!itemId) {
         throw new Error("Create failed");

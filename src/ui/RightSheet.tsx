@@ -15,15 +15,14 @@ const RightSheet: FC<RightSheetProps> = ({ open, onOpenChange, title, children }
       <Dialog.Content className="sheet-content">
         <div className="sheet-header">
           <Dialog.Title className="sheet-title">{title}</Dialog.Title>
-          <Dialog.Close asChild>
-            <AppIconButton
-              type="button"
-              variant="ghost"
-              aria-label="Close"
-            >
-              ✕
-            </AppIconButton>
-          </Dialog.Close>
+          <AppIconButton
+            type="button"
+            variant="ghost"
+            aria-label="Close"
+            onClick={() => onOpenChange(false)}
+          >
+            ✕
+          </AppIconButton>
         </div>
         <div className="sheet-body">{children}</div>
       </Dialog.Content>

@@ -1,7 +1,7 @@
 import type { RpcRequest, RpcResponse } from "./types";
 
 type Pending = {
-  resolve: (value: unknown) => void;
+  resolve: (value: any) => void;
   reject: (reason?: unknown) => void;
 };
 

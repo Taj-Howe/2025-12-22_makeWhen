@@ -31,10 +31,10 @@ body {
 
 .sidebar {
   border-right: 1px solid var(--color-border);
-  padding: 16px;
+  padding: 20px 18px;
   display: flex;
   flex-direction: column;
-  gap: 16px;
+  gap: 20px;
 }
 
 .sidebar-title {
@@ -46,18 +46,18 @@ body {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 12px;
+  gap: 14px;
 }
 
 .sidebar-section {
   display: grid;
-  gap: 12px;
+  gap: 14px;
 }
 
 .sidebar-list {
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 10px;
 }
 
 .sidebar-footer {
@@ -81,7 +81,7 @@ body {
   color: inherit;
   border: 1px solid var(--color-border);
   border-radius: var(--radius);
-  padding: 8px 10px;
+  padding: 10px 12px;
   text-align: left;
   flex: 1;
 }

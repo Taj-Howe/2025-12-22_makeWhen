@@ -16,7 +16,13 @@ import {
 } from "./scheduleMath";
 import { computeRollupTotals } from "./rollup";
 
-const ctx: DedicatedWorkerGlobalScope = self as DedicatedWorkerGlobalScope;
+const ctx = self as unknown as {
+  addEventListener: (
+    type: "message",
+    listener: (event: MessageEvent<RpcRequest>) => void
+  ) => void;
+  postMessage: (message: RpcResponse) => void;
+};
 
 const DB_FILENAME = "makewhen.sqlite3";
 const VFS_NAME = "opfs-sahpool";
@@ -183,6 +189,24 @@ const ensureDependencyType = (value: unknown, name: string) => {
     throw new Error(`${name} must be FS, SS, FF, or SF`);
   }
   return normalized;
+};
+
+const normalizeDependencyType = (
+  value: unknown
+): "FS" | "SS" | "FF" | "SF" => {
+  if (typeof value !== "string") {
+    return "FS";
+  }
+  const normalized = value.trim().toUpperCase();
+  if (
+    normalized === "FS" ||
+    normalized === "SS" ||
+    normalized === "FF" ||
+    normalized === "SF"
+  ) {
+    return normalized;
+  }
+  return "FS";
 };
 
 const parseEdgeId = (edgeId: string) => {
@@ -4615,16 +4639,26 @@ const handleRequest = async (message: RpcRequest): Promise<RpcResponse> => {
 
           const depsInMap = new Map<
             string,
-            Array<{ edge_id: string; predecessor_id: string; type: string; lag_minutes: number }>
+            Array<{
+              edge_id: string;
+              predecessor_id: string;
+              type: "FS" | "SS" | "FF" | "SF";
+              lag_minutes: number;
+            }>
           >();
           const depsOutMap = new Map<
             string,
-            Array<{ edge_id: string; successor_id: string; type: string; lag_minutes: number }>
+            Array<{
+              edge_id: string;
+              successor_id: string;
+              type: "FS" | "SS" | "FF" | "SF";
+              lag_minutes: number;
+            }>
           >();
           const baseSet = new Set(uniqueBaseIds);
           for (const row of depRows) {
             const edgeId = `${row[0]}->${row[1]}`;
-            const type = row[2] ? String(row[2]).toUpperCase() : "FS";
+            const type = normalizeDependencyType(row[2]);
             const lag = Number.isFinite(row[3]) ? Number(row[3]) : 0;
             if (baseSet.has(row[0])) {
               const list = depsInMap.get(row[0]) ?? [];
@@ -6733,14 +6767,21 @@ const handleRequest = async (message: RpcRequest): Promise<RpcResponse> => {
               groups.set(assignee, list);
             }
           }
-          const resultGroups = Array.from(groups.entries())
+          type AssigneeGroup = {
+            assignee: { id: string; name: null } | null;
+            items: typeof unassigned;
+          };
+          const resultGroups: AssigneeGroup[] = Array.from(groups.entries())
             .filter(([assigneeId]) => !assigneeFilter || assigneeId === assigneeFilter)
             .map(([assigneeId, items]) => ({
               assignee: { id: assigneeId, name: null },
               items,
             }));
           if (!assigneeFilter && includeUnassigned) {
-            resultGroups.push({ assignee: null, items: unassigned });
+            resultGroups.push({
+              assignee: null,
+              items: unassigned,
+            });
           }
           result = {
             ok: true,

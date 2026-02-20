@@ -399,7 +399,7 @@ const App = () => {
           </div>
           {settingsOpen ? (
             <div className="settings-panel">
-              <ThemeSettings />
+              <ThemeSettings onSettingsChanged={triggerRefresh} />
               <SampleDataPanel
                 onSeeded={handleSeededProject}
                 onRefresh={triggerRefresh}

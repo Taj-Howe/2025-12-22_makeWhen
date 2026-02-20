@@ -14,6 +14,7 @@ import UserSelect from "./UserSelect";
 import { AppButton, AppInput, AppSelect, AppTextArea } from "./controls";
 
 type ItemType = "project" | "milestone" | "task";
+type DependencyType = "FS" | "SS" | "FF" | "SF";
 
 type ItemRow = {
   id: string;
@@ -49,6 +50,13 @@ type ItemDetails = {
   health_mode: string;
   notes: string | null;
   dependencies: string[];
+  dependency_edges?: Array<{
+    edge_id: string;
+    predecessor_id: string;
+    type: DependencyType;
+    lag_minutes: number;
+    predecessor_title?: string;
+  }>;
   scheduled_minutes_total: number;
   schedule_start_at: number | null;
   primary_block_id: string | null;
@@ -61,6 +69,13 @@ type ItemDetails = {
     created_at: number;
     cleared_at: number | null;
   }[];
+};
+
+type DependencyDraft = {
+  predecessor_id: string;
+  edge_id?: string;
+  type: DependencyType;
+  lag_minutes: number;
 };
 
 type AddItemFormProps = {
@@ -119,14 +134,23 @@ const AddItemForm: FC<AddItemFormProps> = ({
   const [tagsInput, setTagsInput] = useState("");
   const [tagChips, setTagChips] = useState<string[]>([]);
   const [assigneeId, setAssigneeId] = useState<string | null>(null);
-  const [depChips, setDepChips] = useState<string[]>([]);
+  const [dependencyDrafts, setDependencyDrafts] = useState<DependencyDraft[]>(
+    []
+  );
+  const [newDependencyType, setNewDependencyType] =
+    useState<DependencyType>("FS");
+  const [newDependencyLagMinutes, setNewDependencyLagMinutes] = useState("0");
   const [blockerKind, setBlockerKind] = useState("general");
   const [blockerText, setBlockerText] = useState("");
   const [blockers, setBlockers] = useState<ItemDetails["blockers"]>([]);
-  const [currentDeps, setCurrentDeps] = useState<string[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [loadingDetails, setLoadingDetails] = useState(false);
   const titleInputRef = useRef<HTMLInputElement>(null);
+
+  const itemTitleMap = useMemo(
+    () => new Map(items.map((item) => [item.id, item.title])),
+    [items]
+  );
 
   const parentTypeMap = useMemo(() => {
     const map = new Map<string, ItemType>();
@@ -218,12 +242,12 @@ const AddItemForm: FC<AddItemFormProps> = ({
   }, [tagChips, tagSuggestions, tagsInput]);
 
   const dependencyExcludeIds = useMemo(() => {
-    const exclude = new Set(depChips);
+    const exclude = new Set(dependencyDrafts.map((dep) => dep.predecessor_id));
     if (mode === "edit" && selectedItemId) {
       exclude.add(selectedItemId);
     }
     return Array.from(exclude);
-  }, [depChips, mode, selectedItemId]);
+  }, [dependencyDrafts, mode, selectedItemId]);
 
   useEffect(() => {
     if (mode === "edit" && selectedItemId) {
@@ -255,8 +279,22 @@ const AddItemForm: FC<AddItemFormProps> = ({
           setHealth(data.health);
           setNotes(data.notes ?? "");
           setBlockers(data.blockers);
-          setCurrentDeps(data.dependencies ?? []);
-          setDepChips(data.dependencies ?? []);
+          const edgeDrafts =
+            data.dependency_edges?.map((edge) => ({
+              predecessor_id: edge.predecessor_id,
+              edge_id: edge.edge_id,
+              type: edge.type ?? "FS",
+              lag_minutes: Number.isFinite(edge.lag_minutes)
+                ? Math.max(0, Math.floor(edge.lag_minutes))
+                : 0,
+            })) ??
+            (data.dependencies ?? []).map((dependencyId) => ({
+              predecessor_id: dependencyId,
+              edge_id: `${data.id}->${dependencyId}`,
+              type: "FS" as const,
+              lag_minutes: 0,
+            }));
+          setDependencyDrafts(edgeDrafts);
           const nextScheduledFor = toDateTimeLocal(data.schedule_start_at);
           setScheduledFor(nextScheduledFor);
           setScheduledBlockId(data.primary_block_id ?? null);
@@ -383,11 +421,12 @@ const AddItemForm: FC<AddItemFormProps> = ({
     setTagsInput("");
     setTagChips([]);
     setAssigneeId(null);
-    setDepChips([]);
+    setDependencyDrafts([]);
+    setNewDependencyType("FS");
+    setNewDependencyLagMinutes("0");
     setBlockerKind("general");
     setBlockerText("");
     setBlockers([]);
-    setCurrentDeps([]);
   };
 
   const validate = () => {
@@ -496,10 +535,12 @@ const AddItemForm: FC<AddItemFormProps> = ({
             item_id: itemId,
             user_id: assigneeId ?? null,
           });
-          for (const depId of depChips) {
-            await mutate("add_dependency", {
-              item_id: itemId,
-              depends_on_id: depId,
+          for (const dep of dependencyDrafts) {
+            await mutate("dependency.create", {
+              predecessor_id: dep.predecessor_id,
+              successor_id: itemId,
+              type: dep.type,
+              lag_minutes: dep.lag_minutes,
             });
           }
         }
@@ -553,24 +594,6 @@ const AddItemForm: FC<AddItemFormProps> = ({
           item_id: selectedItemId,
           user_id: assigneeId ?? null,
         });
-        const desiredDeps = new Set(depChips);
-        const existingDeps = new Set(currentDeps);
-        for (const depId of desiredDeps) {
-          if (!existingDeps.has(depId)) {
-            await mutate("add_dependency", {
-              item_id: selectedItemId,
-              depends_on_id: depId,
-            });
-          }
-        }
-        for (const depId of existingDeps) {
-          if (!desiredDeps.has(depId)) {
-            await mutate("remove_dependency", {
-              item_id: selectedItemId,
-              depends_on_id: depId,
-            });
-          }
-        }
         onCreated?.();
       }
       onRefresh();
@@ -581,18 +604,63 @@ const AddItemForm: FC<AddItemFormProps> = ({
   };
 
   const handleDependencySelect = async (dependencyId: string) => {
-    if (depChips.includes(dependencyId)) {
+    if (dependencyDrafts.some((dep) => dep.predecessor_id === dependencyId)) {
       return;
     }
+    const parsedLag = Number(newDependencyLagMinutes.trim());
+    const lagMinutes =
+      Number.isFinite(parsedLag) && parsedLag >= 0 ? Math.floor(parsedLag) : 0;
+    const baseDraft: DependencyDraft = {
+      predecessor_id: dependencyId,
+      type: newDependencyType,
+      lag_minutes: lagMinutes,
+    };
     if (mode === "edit" && selectedItemId) {
       try {
-        await mutate("add_dependency", {
-          item_id: selectedItemId,
-          depends_on_id: dependencyId,
+        const created = await mutate<{
+          edge_id?: string;
+          result?: { edge_id?: string };
+        }>("dependency.create", {
+          predecessor_id: dependencyId,
+          successor_id: selectedItemId,
+          type: newDependencyType,
+          lag_minutes: lagMinutes,
         });
-        setCurrentDeps((prev) =>
-          prev.includes(dependencyId) ? prev : [...prev, dependencyId]
-        );
+        const edgeId = created?.result?.edge_id ?? created?.edge_id;
+        setDependencyDrafts((prev) => [
+          ...prev,
+          { ...baseDraft, edge_id: edgeId ?? `${selectedItemId}->${dependencyId}` },
+        ]);
+        onRefresh();
+      } catch (err) {
+        const message = err instanceof Error ? err.message : "Unknown error";
+        setError(message);
+        return;
+      }
+    } else {
+      setDependencyDrafts((prev) => [...prev, baseDraft]);
+    }
+  };
+
+  const handleUpdateDependency = async (
+    predecessorId: string,
+    updates: Partial<Pick<DependencyDraft, "type" | "lag_minutes">>
+  ) => {
+    const current = dependencyDrafts.find(
+      (dep) => dep.predecessor_id === predecessorId
+    );
+    if (!current) {
+      return;
+    }
+    const nextType = updates.type ?? current.type;
+    const nextLag = updates.lag_minutes ?? current.lag_minutes;
+    if (mode === "edit" && selectedItemId) {
+      try {
+        await mutate("dependency.update", {
+          edge_id: current.edge_id ?? `${selectedItemId}->${predecessorId}`,
+          type: nextType,
+          lag_minutes: nextLag,
+        });
         onRefresh();
       } catch (err) {
         const message = err instanceof Error ? err.message : "Unknown error";
@@ -600,7 +668,37 @@ const AddItemForm: FC<AddItemFormProps> = ({
         return;
       }
     }
-    setDepChips((prev) => [...prev, dependencyId]);
+    setDependencyDrafts((prev) =>
+      prev.map((dep) =>
+        dep.predecessor_id === predecessorId
+          ? { ...dep, type: nextType, lag_minutes: nextLag }
+          : dep
+      )
+    );
+  };
+
+  const handleRemoveDependency = async (predecessorId: string) => {
+    const current = dependencyDrafts.find(
+      (dep) => dep.predecessor_id === predecessorId
+    );
+    if (!current) {
+      return;
+    }
+    if (mode === "edit" && selectedItemId) {
+      try {
+        await mutate("dependency.delete", {
+          edge_id: current.edge_id ?? `${selectedItemId}->${predecessorId}`,
+        });
+        onRefresh();
+      } catch (err) {
+        const message = err instanceof Error ? err.message : "Unknown error";
+        setError(message);
+        return;
+      }
+    }
+    setDependencyDrafts((prev) =>
+      prev.filter((dep) => dep.predecessor_id !== predecessorId)
+    );
   };
 
   const handleAddBlocker = async () => {
@@ -981,40 +1079,104 @@ const AddItemForm: FC<AddItemFormProps> = ({
         </label>
         <label>
           Dependencies
-          <div className="chip-input">
-            <div className="chip-list">
-              {depChips.map((depId) => (
-                <AppButton
-                  key={depId}
-                  type="button"
-                  size="1"
-                  variant="soft"
-                  className="chip"
-                  onClick={async () => {
-                    setDepChips((prev) =>
-                      prev.filter((entry) => entry !== depId)
-                    );
-                    if (mode === "edit" && selectedItemId) {
-                      try {
-                        await mutate("remove_dependency", {
-                          item_id: selectedItemId,
-                          depends_on_id: depId,
-                        });
-                        setCurrentDeps((prev) =>
-                          prev.filter((entry) => entry !== depId)
-                        );
-                        onRefresh();
-                      } catch (err) {
-                        const message =
-                          err instanceof Error ? err.message : "Unknown error";
-                        setError(message);
-                      }
+          <div className="dependency-editor">
+            <div className="dependency-hint">
+              Use dependency type and lag to model precedence constraints.
+            </div>
+            <div className="dependency-section">
+              <div className="dependency-section-title">Current dependencies</div>
+              {dependencyDrafts.length === 0 ? (
+                <div className="dependency-empty">No dependencies</div>
+              ) : (
+                dependencyDrafts.map((dep) => {
+                  const title =
+                    itemTitleMap.get(dep.predecessor_id) ?? dep.predecessor_id;
+                  return (
+                    <div key={dep.predecessor_id} className="dependency-row">
+                      <span className="dependency-title">{title}</span>
+                      <AppSelect
+                        value={dep.type}
+                        onChange={(value) =>
+                          void handleUpdateDependency(dep.predecessor_id, {
+                            type: value as DependencyType,
+                          })
+                        }
+                        options={[
+                          { value: "FS", label: "FS" },
+                          { value: "SS", label: "SS" },
+                          { value: "FF", label: "FF" },
+                          { value: "SF", label: "SF" },
+                        ]}
+                      />
+                      <span className="dependency-label">Lag (min)</span>
+                      <AppInput
+                        key={`${dep.predecessor_id}-${dep.lag_minutes}`}
+                        type="number"
+                        min={0}
+                        defaultValue={dep.lag_minutes}
+                        onBlur={(event) => {
+                          const nextValue = Number(event.currentTarget.value);
+                          if (!Number.isFinite(nextValue) || nextValue < 0) {
+                            event.currentTarget.value = String(dep.lag_minutes);
+                            return;
+                          }
+                          const nextLag = Math.floor(nextValue);
+                          if (nextLag !== dep.lag_minutes) {
+                            void handleUpdateDependency(dep.predecessor_id, {
+                              lag_minutes: nextLag,
+                            });
+                          }
+                        }}
+                      />
+                      <AppButton
+                        type="button"
+                        size="1"
+                        variant="ghost"
+                        onClick={() =>
+                          void handleRemoveDependency(dep.predecessor_id)
+                        }
+                      >
+                        Remove
+                      </AppButton>
+                    </div>
+                  );
+                })
+              )}
+            </div>
+            <div className="dependency-section">
+              <div className="dependency-section-title">Add dependency</div>
+              <div className="dependency-row">
+                <span className="dependency-label">Type</span>
+                <AppSelect
+                  value={newDependencyType}
+                  onChange={(value) =>
+                    setNewDependencyType(value as DependencyType)
+                  }
+                  options={[
+                    { value: "FS", label: "FS" },
+                    { value: "SS", label: "SS" },
+                    { value: "FF", label: "FF" },
+                    { value: "SF", label: "SF" },
+                  ]}
+                />
+                <span className="dependency-label">Lag (min)</span>
+                <AppInput
+                  type="number"
+                  min={0}
+                  value={newDependencyLagMinutes}
+                  onChange={(event) =>
+                    setNewDependencyLagMinutes(event.target.value)
+                  }
+                  onBlur={() => {
+                    const nextValue = Number(newDependencyLagMinutes.trim());
+                    if (!Number.isFinite(nextValue) || nextValue < 0) {
+                      setNewDependencyLagMinutes("0");
+                      return;
                     }
+                    setNewDependencyLagMinutes(String(Math.floor(nextValue)));
                   }}
-                >
-                  {depId.slice(0, 8)} ×
-                </AppButton>
-              ))}
+                />
+              </div>
             </div>
             <ItemAutocomplete
               placeholder="Search items"

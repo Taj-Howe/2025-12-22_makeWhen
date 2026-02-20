@@ -3359,11 +3359,16 @@ const handleRequest = async (message: RpcRequest): Promise<RpcResponse> => {
           }
 
           const depsRows = dbHandle.exec({
-            sql: "SELECT d.depends_on_id, i.status FROM dependencies d LEFT JOIN items i ON i.id = d.depends_on_id WHERE d.item_id = ?;",
+            sql: `SELECT d.depends_on_id, i.status, d.type, d.lag_minutes, i.title
+              FROM dependencies d
+              LEFT JOIN items i ON i.id = d.depends_on_id
+              WHERE d.item_id = ?;`,
             rowMode: "array",
             returnValue: "resultRows",
             bind: [itemId],
-          }) as Array<[string, string | null]>;
+          }) as Array<
+            [string, string | null, string | null, number | null, string | null]
+          >;
 
           const blockersRows = dbHandle.exec({
             sql: "SELECT blocker_id, kind, text, created_at, cleared_at FROM blockers WHERE item_id = ? ORDER BY created_at DESC;",
@@ -3523,6 +3528,18 @@ const handleRequest = async (message: RpcRequest): Promise<RpcResponse> => {
               assignee_id: assigneeId,
               assignee_name: assigneeName,
               dependencies: depsRows.map((row) => row[0]),
+              dependency_edges: depsRows.map((row) => {
+                const predecessorId = row[0];
+                const type = normalizeDependencyType(row[2] ?? "FS");
+                const lagMinutes = Number.isFinite(row[3]) ? Number(row[3]) : 0;
+                return {
+                  edge_id: `${itemId}->${predecessorId}`,
+                  predecessor_id: predecessorId,
+                  type,
+                  lag_minutes: lagMinutes,
+                  predecessor_title: row[4] ?? predecessorId,
+                };
+              }),
               blockers: blockersRows.map((row) => ({
                 blocker_id: row[0],
                 kind: row[1],

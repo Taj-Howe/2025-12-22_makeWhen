@@ -166,8 +166,13 @@ pnpm typecheck
 
 ### 1) Offline-first + speed
 
-- Local persistence is SQLite-WASM in a Web Worker.
-- Storage uses OPFS + `opfs-sahpool` VFS.
+- Local persistence is SQLite in a Web Worker.
+- Browser default is SQLite-WASM + OPFS (`opfs-sahpool` VFS).
+- If OPFS is unavailable at runtime, the app falls back to in-memory SQLite.
+- Build-time storage preference can be set with `VITE_STORAGE_BACKEND`:
+  - `opfs` (default, with memory fallback)
+  - `opfs-strict` (fail if OPFS is unavailable)
+  - `memory` (always memory, useful for test/demo)
 - UI must not block on DB work.
 
 ### 2) AI-safe writes
@@ -200,6 +205,17 @@ pnpm typecheck
 
 - Owns SQLite, migrations, queries, operations, and audit log
 - Exposes `query(name, args)` and `mutate(operationEnvelope)`
+
+### Cross-platform local-first model
+
+- Keep one shared domain model and sync protocol.
+- Use platform-specific local SQLite engines:
+  - Browser: SQLite-WASM + OPFS
+  - Desktop (macOS/Windows): native SQLite file on disk
+  - Mobile (iOS/Android): native SQLite
+- Sync should be op-log + cursor based, not raw DB file replacement.
+
+Reference: `docs/LOCAL_FIRST_ARCHITECTURE.md`
 
 ---
 
@@ -290,6 +306,13 @@ Operation envelope:
 Operation result shape:
 
 - `ok`, `result`, `error`, `warnings`, `invalidate`
+
+Important settings keys now used by UI:
+
+- `ui.workday_start_hour`, `ui.workday_end_hour`
+- `ui.user_colors` (per-user calendar block colors)
+- `ui.calendar_show_user_calendars` (project calendar overlay toggle)
+- `sync.enabled`, `sync.server_url`
 
 Audit log:
 

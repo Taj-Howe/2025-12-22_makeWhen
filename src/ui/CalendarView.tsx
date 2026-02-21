@@ -20,6 +20,10 @@ import {
   DEFAULT_WORKDAY_START_HOUR,
   normalizeWorkdayHours,
 } from "../domain/workHours";
+import {
+  normalizeUserColorMap,
+  resolveUserColor,
+} from "../domain/userColors";
 import { addDays, startOfDay, startOfWeek } from "./dateWindow";
 import { AppButton, AppCheckbox } from "./controls";
 
@@ -52,6 +56,16 @@ type CalendarItem = {
 
 type CalendarRangeResult = {
   blocks: CalendarBlock[];
+  items: CalendarItem[];
+};
+
+type CalendarUserBlock = CalendarBlock & {
+  assignee_id: string;
+  assignee_name: string | null;
+};
+
+type CalendarUsersRangeResult = {
+  blocks: CalendarUserBlock[];
   items: CalendarItem[];
 };
 
@@ -173,6 +187,14 @@ const CalendarView: FC<CalendarViewProps> = ({
     DEFAULT_WORKDAY_START_HOUR
   );
   const [workEndHour, setWorkEndHour] = useState(DEFAULT_WORKDAY_END_HOUR);
+  const [showUserCalendars, setShowUserCalendars] = useState(false);
+  const [userColorMap, setUserColorMap] = useState<Record<string, string>>({});
+  const [userCalendarBlocks, setUserCalendarBlocks] = useState<
+    CalendarUserBlock[]
+  >([]);
+  const [userCalendarItems, setUserCalendarItems] = useState<CalendarItem[]>(
+    []
+  );
 
   const itemTitleMap = useMemo(() => {
     const map = new Map<string, string>();
@@ -184,8 +206,11 @@ const CalendarView: FC<CalendarViewProps> = ({
     for (const item of calendarItems) {
       map.set(item.id, item.title);
     }
+    for (const item of userCalendarItems) {
+      map.set(item.id, item.title);
+    }
     return map;
-  }, [calendarItems, projectItems, scope.kind]);
+  }, [calendarItems, projectItems, scope.kind, userCalendarItems]);
 
   const itemStatusMap = useMemo(() => {
     const map = new Map<string, string>();
@@ -197,11 +222,14 @@ const CalendarView: FC<CalendarViewProps> = ({
     for (const item of calendarItems) {
       map.set(item.id, item.status);
     }
+    for (const item of userCalendarItems) {
+      map.set(item.id, item.status);
+    }
     for (const [id, status] of Object.entries(statusOverrides)) {
       map.set(id, status);
     }
     return map;
-  }, [calendarItems, projectItems, scope.kind, statusOverrides]);
+  }, [calendarItems, projectItems, scope.kind, statusOverrides, userCalendarItems]);
 
   const projectItemIds = useMemo(() => {
     if (scope.kind !== "project") {
@@ -213,6 +241,26 @@ const CalendarView: FC<CalendarViewProps> = ({
   const projectItemMap = useMemo(
     () => new Map(projectItems.map((item) => [item.id, item])),
     [projectItems]
+  );
+  const projectAssignees = useMemo(() => {
+    const byUser = new Map<string, string>();
+    for (const item of projectItems) {
+      const assigneeId = item.assignee_id ?? item.assignees?.[0]?.id ?? null;
+      if (!assigneeId) {
+        continue;
+      }
+      const name =
+        item.assignee_name ?? item.assignees?.[0]?.name ?? assigneeId;
+      byUser.set(assigneeId, name);
+    }
+    return Array.from(byUser.entries()).map(([userId, name]) => ({
+      userId,
+      name,
+    }));
+  }, [projectItems]);
+  const projectAssigneeIds = useMemo(
+    () => projectAssignees.map((entry) => entry.userId),
+    [projectAssignees]
   );
   const calendarItemMap = useMemo(
     () => new Map(calendarItems.map((item) => [item.id, item])),
@@ -318,6 +366,8 @@ const CalendarView: FC<CalendarViewProps> = ({
         );
         setWorkStartHour(normalized.startHour);
         setWorkEndHour(normalized.endHour);
+        setUserColorMap(normalizeUserColorMap(settings["ui.user_colors"]));
+        setShowUserCalendars(settings["ui.calendar_show_user_calendars"] === true);
       })
       .catch(() => {
         if (!isMounted) {
@@ -325,6 +375,8 @@ const CalendarView: FC<CalendarViewProps> = ({
         }
         setWorkStartHour(DEFAULT_WORKDAY_START_HOUR);
         setWorkEndHour(DEFAULT_WORKDAY_END_HOUR);
+        setUserColorMap({});
+        setShowUserCalendars(false);
       });
     return () => {
       isMounted = false;
@@ -439,6 +491,49 @@ const CalendarView: FC<CalendarViewProps> = ({
     scopeUserId,
   ]);
 
+  useEffect(() => {
+    if (scope.kind !== "project" || !showUserCalendars || projectAssigneeIds.length === 0) {
+      setUserCalendarBlocks([]);
+      setUserCalendarItems([]);
+      return;
+    }
+    let isMounted = true;
+    query<CalendarUsersRangeResult>("calendar_range_users", {
+      user_ids: projectAssigneeIds,
+      time_min: range.start.getTime(),
+      time_max: range.end.getTime(),
+    })
+      .then((result) => {
+        if (!isMounted) {
+          return;
+        }
+        const externalBlocks = result.blocks.filter(
+          (block) => !projectItemIds.has(block.item_id)
+        );
+        const externalItemIds = new Set(externalBlocks.map((block) => block.item_id));
+        const externalItems = result.items.filter((item) => externalItemIds.has(item.id));
+        setUserCalendarBlocks(externalBlocks);
+        setUserCalendarItems(externalItems);
+      })
+      .catch((err) => {
+        if (!isMounted) {
+          return;
+        }
+        const message = err instanceof Error ? err.message : "Unknown error";
+        setError(message);
+      });
+    return () => {
+      isMounted = false;
+    };
+  }, [
+    projectAssigneeIds,
+    projectItemIds,
+    range.end,
+    range.start,
+    scope.kind,
+    showUserCalendars,
+  ]);
+
   const handlePrev = () => {
     if (viewMode === "week") {
       setFocusDate((prev) => addDays(prev, -7));
@@ -485,12 +580,19 @@ const CalendarView: FC<CalendarViewProps> = ({
 
   const blocksByDay = new Map<string, CalendarBlock[]>();
   const dueByDay = new Map<string, CalendarItem[]>();
+  const userBlocksByDay = new Map<string, CalendarUserBlock[]>();
 
   for (const block of displayBlocks) {
     const key = dayKey(new Date(block.start_at));
     const list = blocksByDay.get(key) ?? [];
     list.push(block);
     blocksByDay.set(key, list);
+  }
+  for (const block of userCalendarBlocks) {
+    const key = dayKey(new Date(block.start_at));
+    const list = userBlocksByDay.get(key) ?? [];
+    list.push(block);
+    userBlocksByDay.set(key, list);
   }
 
   const timeMin = range.start.getTime();
@@ -586,6 +688,23 @@ const CalendarView: FC<CalendarViewProps> = ({
     }, 200);
   }, [onRefresh]);
 
+  const handleToggleUserCalendars = useCallback(
+    (checked: boolean) => {
+      const next = checked;
+      const previous = showUserCalendars;
+      setShowUserCalendars(next);
+      mutate("set_setting", {
+        key: "ui.calendar_show_user_calendars",
+        value: next,
+      }).catch((err) => {
+        setShowUserCalendars(previous);
+        const message = err instanceof Error ? err.message : "Unknown error";
+        setError(message);
+      });
+    },
+    [showUserCalendars]
+  );
+
   const handleToggleDone = useCallback(
     async (itemId: string, checked: boolean) => {
       const nextStatus = checked ? "done" : "ready";
@@ -623,6 +742,37 @@ const CalendarView: FC<CalendarViewProps> = ({
       }
     },
     [scheduleRefresh]
+  );
+
+  const handleClearDue = useCallback(
+    async (itemId: string) => {
+      setError(null);
+      setCalendarItems((prev) =>
+        prev.map((item) =>
+          item.id === itemId
+            ? {
+                ...item,
+                due_at: null,
+              }
+            : item
+        )
+      );
+      if (dueDraftRef.current?.itemId === itemId) {
+        updateDueDraft(null);
+      }
+      try {
+        await mutate("update_item_fields", {
+          id: itemId,
+          fields: { due_at: null },
+        });
+        scheduleRefresh();
+      } catch (err) {
+        const message = err instanceof Error ? err.message : "Unknown error";
+        setError(message);
+        scheduleRefresh();
+      }
+    },
+    [scheduleRefresh, updateDueDraft]
   );
 
   const handleDuplicateTask = useCallback(
@@ -762,10 +912,7 @@ const CalendarView: FC<CalendarViewProps> = ({
       const snapped = snapMinutes(clampMinutes(minutesFromStart));
       const dayStartMs = startOfDay(day).getTime();
       const startAt = dayStartMs + snapped * 60000;
-      const durationMinutes =
-        Number.isFinite(task.estimate_minutes) && task.estimate_minutes > 0
-          ? Math.max(15, Math.round(task.estimate_minutes))
-          : 30;
+      const durationMinutes = 60;
       setError(null);
       try {
         await mutate("scheduled_block.create", {
@@ -780,12 +927,16 @@ const CalendarView: FC<CalendarViewProps> = ({
         setError(message);
       }
     },
-    [clampMinutes, pxPerMinute, scheduleRefresh, snapMinutes, viewMode]
+    [clampMinutes, pxPerMinute, scheduleRefresh, snapMinutes, viewMode, workStartHour]
   );
 
   const beginDueDrag = useCallback(
     (block: CalendarBlock, event: ReactMouseEvent) => {
-      if (event.button !== 0 || event.ctrlKey || viewMode !== "week") {
+      if (
+        event.button !== 0 ||
+        event.altKey ||
+        viewMode !== "week"
+      ) {
         return;
       }
       event.preventDefault();
@@ -845,13 +996,12 @@ const CalendarView: FC<CalendarViewProps> = ({
           source: "manual",
         });
         scheduleRefresh();
-        onOpenItem(itemId);
       } catch (err) {
         const message = err instanceof Error ? err.message : "Unknown error";
         setError(message);
       }
     },
-    [onOpenItem, scheduleRefresh, scope.kind, scopeProjectId, scopeUserId]
+    [scheduleRefresh, scope.kind, scopeProjectId, scopeUserId]
   );
 
   const beginBlockDrag = useCallback(
@@ -862,7 +1012,7 @@ const CalendarView: FC<CalendarViewProps> = ({
       mode: "move" | "resize",
       event: ReactMouseEvent
     ) => {
-      if (event.button !== 0 || event.ctrlKey || dueDrag) {
+      if (event.button !== 0 || event.altKey || dueDrag) {
         return;
       }
       event.preventDefault();
@@ -897,13 +1047,13 @@ const CalendarView: FC<CalendarViewProps> = ({
       setSelection(null);
       setIsSelecting(false);
     },
-    [dueDrag, pxPerMinute, updateDragPreview]
+    [dueDrag, pxPerMinute, updateDragPreview, workStartHour]
   );
 
   const handleBlockPress = useCallback(
     (block: CalendarBlock, dayStartMs: number, dayKeyValue: string) =>
       (event: ReactMouseEvent) => {
-        if (event.button !== 0 || event.ctrlKey) {
+        if (event.button !== 0 || event.altKey) {
           return;
         }
         if (dragBlock || dueDrag) {
@@ -935,12 +1085,15 @@ const CalendarView: FC<CalendarViewProps> = ({
           duration_minutes: block.duration_minutes,
         });
       },
-    [dragBlock, dueDrag, pxPerMinute, updateDragPreview]
+    [dragBlock, dueDrag, pxPerMinute, updateDragPreview, workStartHour]
   );
 
   const handleBlockClick = useCallback(
-    (itemId: string) => (event: ReactMouseEvent) => {
-      if (event.ctrlKey || event.metaKey) {
+    (block: CalendarBlock) => (event: ReactMouseEvent) => {
+      if (event.altKey) {
+        event.preventDefault();
+        event.stopPropagation();
+        void handleDeleteBlock(block.block_id);
         return;
       }
       if (dragClickGuardRef.current || dragBlock || dueDrag) {
@@ -959,9 +1112,22 @@ const CalendarView: FC<CalendarViewProps> = ({
       setDragCandidate(null);
       dragPreviewRef.current = null;
       setDragPreview(null);
+      onOpenItem(block.item_id);
+    },
+    [dragBlock, dueDrag, handleDeleteBlock, onOpenItem]
+  );
+
+  const handleDueClick = useCallback(
+    (itemId: string) => (event: ReactMouseEvent) => {
+      if (event.altKey) {
+        event.preventDefault();
+        event.stopPropagation();
+        void handleClearDue(itemId);
+        return;
+      }
       onOpenItem(itemId);
     },
-    [dragBlock, dueDrag, onOpenItem]
+    [handleClearDue, onOpenItem]
   );
 
   const handleBlockContextMenu = useCallback(() => {
@@ -1008,6 +1174,9 @@ const CalendarView: FC<CalendarViewProps> = ({
       if (event.button !== 0) {
         return;
       }
+      if (!event.altKey) {
+        return;
+      }
     const target = event.target as HTMLElement;
     if (
       target.closest(".calendar-block") ||
@@ -1037,7 +1206,7 @@ const CalendarView: FC<CalendarViewProps> = ({
     });
     setIsSelecting(true);
     },
-    [clampMinutes, dragBlock, dueDrag, pxPerMinute, snapMinutes, viewMode]
+    [clampMinutes, dragBlock, dueDrag, pxPerMinute, snapMinutes, viewMode, workStartHour]
   );
 
   useEffect(() => {
@@ -1085,7 +1254,7 @@ const CalendarView: FC<CalendarViewProps> = ({
       window.removeEventListener("mousemove", handleMove);
       window.removeEventListener("mouseup", handleUp);
     };
-  }, [createTaskWithBlock, isSelecting, pxPerMinute]);
+  }, [clampMinutes, createTaskWithBlock, isSelecting, pxPerMinute, snapMinutes, workStartHour]);
 
   useEffect(() => {
     if (!dragBlock) {
@@ -1348,6 +1517,15 @@ const CalendarView: FC<CalendarViewProps> = ({
     [onOpenItem]
   );
 
+  const userLegend = useMemo(
+    () =>
+      projectAssignees.map((entry) => ({
+        ...entry,
+        color: resolveUserColor(entry.userId, userColorMap),
+      })),
+    [projectAssignees, userColorMap]
+  );
+
   return (
     <div className="calendar-view">
       {error ? <div className="error">{error}</div> : null}
@@ -1363,14 +1541,40 @@ const CalendarView: FC<CalendarViewProps> = ({
             Next
           </AppButton>
         </div>
-        <SegmentedControl.Root
-          value={viewMode}
-          onValueChange={(value) => setViewMode(value as "week" | "month")}
-        >
-          <SegmentedControl.Item value="week">Week</SegmentedControl.Item>
-          <SegmentedControl.Item value="month">Month</SegmentedControl.Item>
-        </SegmentedControl.Root>
+        <div className="calendar-toolbar-right">
+          {scope.kind === "project" ? (
+            <label className="calendar-toolbar-toggle">
+              <AppCheckbox
+                checked={showUserCalendars}
+                onCheckedChange={(checked) =>
+                  handleToggleUserCalendars(checked === true)
+                }
+              />
+              Show assigned users' other blocks
+            </label>
+          ) : null}
+          <SegmentedControl.Root
+            value={viewMode}
+            onValueChange={(value) => setViewMode(value as "week" | "month")}
+          >
+            <SegmentedControl.Item value="week">Week</SegmentedControl.Item>
+            <SegmentedControl.Item value="month">Month</SegmentedControl.Item>
+          </SegmentedControl.Root>
+        </div>
       </div>
+      {scope.kind === "project" && userLegend.length > 0 ? (
+        <div className="calendar-user-legend">
+          {userLegend.map((user) => (
+            <div key={user.userId} className="calendar-user-chip">
+              <span
+                className="calendar-user-chip-dot"
+                style={{ backgroundColor: user.color }}
+              />
+              {user.name}
+            </div>
+          ))}
+        </div>
+      ) : null}
       {loading && blocks.length === 0 && calendarItems.length === 0 ? (
         <div className="list-empty">Loading…</div>
       ) : null}
@@ -1447,6 +1651,9 @@ const CalendarView: FC<CalendarViewProps> = ({
               {range.days.map((day) => {
                 const key = dayKey(day);
                 const dayBlocks = blocksByDay.get(key) ?? [];
+                const dayUserBlocks = showUserCalendars
+                  ? userBlocksByDay.get(key) ?? []
+                  : [];
                 const dayDue = dueByDay.get(key) ?? [];
                 const dayStart = startOfDay(day).getTime();
                 const selectionForDay =
@@ -1492,6 +1699,53 @@ const CalendarView: FC<CalendarViewProps> = ({
                           New task
                         </div>
                       ) : null}
+                      {dayUserBlocks.map((block) => {
+                        const blockStartMinutes =
+                          (block.start_at - dayStart) / 60000;
+                        const blockEndMinutes =
+                          blockStartMinutes + block.duration_minutes;
+                        const visibleStart = Math.max(
+                          blockStartMinutes,
+                          workStartHour * 60
+                        );
+                        const visibleEnd = Math.min(
+                          blockEndMinutes,
+                          workEndHour * 60
+                        );
+                        if (visibleEnd <= visibleStart) {
+                          return null;
+                        }
+                        const top =
+                          (visibleStart - workStartHour * 60) * pxPerMinute;
+                        const height = Math.max(
+                          16,
+                          (visibleEnd - visibleStart) * pxPerMinute
+                        );
+                        const title =
+                          itemTitleMap.get(block.item_id) ?? block.item_id;
+                        const userColor = resolveUserColor(
+                          block.assignee_id,
+                          userColorMap
+                        );
+                        return (
+                          <div
+                            key={`busy-${block.block_id}-${block.assignee_id}`}
+                            className="calendar-block calendar-user-block"
+                            style={
+                              {
+                                top,
+                                height,
+                                "--calendar-block-color": userColor,
+                              } as React.CSSProperties
+                            }
+                            title={`${block.assignee_name ?? block.assignee_id}: ${title}`}
+                          >
+                            <div className="calendar-user-block-label">
+                              {block.assignee_name ?? "Busy"}: {title}
+                            </div>
+                          </div>
+                        );
+                      })}
                       {dayDue.map((item) => {
                         if (!item.due_at) {
                           return null;
@@ -1522,10 +1776,10 @@ const CalendarView: FC<CalendarViewProps> = ({
                             key={`due-${item.id}`}
                             className={className}
                             style={{ top }}
-                            title={item.title}
+                            title={`${item.title} (Option+Click to clear due date)`}
                             role="button"
                             tabIndex={0}
-                            onClick={() => onOpenItem(item.id)}
+                            onClick={handleDueClick(item.id)}
                             onKeyDown={handleOpenKey(item.id)}
                           >
                             Due {DUE_TIME_LABEL.format(new Date(item.due_at))}:{" "}
@@ -1558,6 +1812,23 @@ const CalendarView: FC<CalendarViewProps> = ({
                         const labelTime = TIME_LABEL.format(
                           new Date(block.start_at)
                         );
+                        const projectItem = projectItemMap.get(block.item_id);
+                        const assigneeId =
+                          scope.kind === "project"
+                            ? projectItem?.assignee_id ??
+                              projectItem?.assignees?.[0]?.id ??
+                              null
+                            : scopeUserId;
+                        const blockColor = assigneeId
+                          ? resolveUserColor(assigneeId, userColorMap)
+                          : null;
+                        const blockStyle = blockColor
+                          ? ({
+                              top,
+                              height,
+                              "--calendar-block-color": blockColor,
+                            } as React.CSSProperties)
+                          : ({ top, height } as React.CSSProperties);
                         const title =
                           itemTitleMap.get(block.item_id) ?? block.item_id;
                         const isDone =
@@ -1584,15 +1855,16 @@ const CalendarView: FC<CalendarViewProps> = ({
                           >
                             <ContextMenu.Trigger asChild>
                               <div
-                                className="calendar-block"
-                                style={{ top, height }}
-                                role="button"
-                                tabIndex={0}
-                                onMouseDown={handleBlockPress(block, dayStart, key)}
-                                onContextMenu={handleBlockContextMenu}
-                                onClick={handleBlockClick(block.item_id)}
-                                onKeyDown={handleOpenKey(block.item_id)}
-                              >
+                              className="calendar-block"
+                              style={blockStyle}
+                              title={`${title} (Option+Click to remove block)`}
+                              role="button"
+                              tabIndex={0}
+                              onMouseDown={handleBlockPress(block, dayStart, key)}
+                              onContextMenu={handleBlockContextMenu}
+                              onClick={handleBlockClick(block)}
+                              onKeyDown={handleOpenKey(block.item_id)}
+                            >
                                 <div className="calendar-block-header">
                                   <AppCheckbox
                                     className="task-checkbox task-checkbox--compact"
@@ -1675,6 +1947,9 @@ const CalendarView: FC<CalendarViewProps> = ({
           {range.days.map((day) => {
             const key = dayKey(day);
             const dayBlocks = blocksByDay.get(key) ?? [];
+            const dayUserBlocks = showUserCalendars
+              ? userBlocksByDay.get(key) ?? []
+              : [];
             const dayDue = dueByDay.get(key) ?? [];
             const isCurrentMonth = day.getMonth() === focusDate.getMonth();
             return (
@@ -1699,16 +1974,49 @@ const CalendarView: FC<CalendarViewProps> = ({
                     }
                     role="button"
                     tabIndex={0}
-                    onClick={() => onOpenItem(item.id)}
+                    title={`${item.title} (Option+Click to clear due date)`}
+                    onClick={handleDueClick(item.id)}
                     onKeyDown={handleOpenKey(item.id)}
                   >
                     Due: {item.title}
                   </div>
                 ))}
+                {dayUserBlocks.slice(0, 3).map((block) => {
+                  const title =
+                    itemTitleMap.get(block.item_id) ?? block.item_id;
+                  const userColor = resolveUserColor(
+                    block.assignee_id,
+                    userColorMap
+                  );
+                  return (
+                    <div
+                      key={`month-busy-${block.block_id}-${block.assignee_id}`}
+                      className="calendar-chip calendar-chip--user-overlay"
+                      style={
+                        {
+                          "--calendar-block-color": userColor,
+                        } as React.CSSProperties
+                      }
+                      title={`${block.assignee_name ?? block.assignee_id}: ${title}`}
+                    >
+                      {block.assignee_name ?? "Busy"}: {title}
+                    </div>
+                  );
+                })}
                 {dayBlocks.map((block) => {
                   const labelTime = TIME_LABEL.format(
                     new Date(block.start_at)
                   );
+                  const projectItem = projectItemMap.get(block.item_id);
+                  const assigneeId =
+                    scope.kind === "project"
+                      ? projectItem?.assignee_id ??
+                        projectItem?.assignees?.[0]?.id ??
+                        null
+                      : scopeUserId;
+                  const blockColor = assigneeId
+                    ? resolveUserColor(assigneeId, userColorMap)
+                    : null;
                   const title =
                     itemTitleMap.get(block.item_id) ?? block.item_id;
                   const isDone =
@@ -1721,9 +2029,17 @@ const CalendarView: FC<CalendarViewProps> = ({
                       <ContextMenu.Trigger asChild>
                         <div
                           className="calendar-chip"
+                          style={
+                            blockColor
+                              ? ({
+                                  "--calendar-block-color": blockColor,
+                                } as React.CSSProperties)
+                              : undefined
+                          }
                           role="button"
                           tabIndex={0}
-                          onClick={() => onOpenItem(block.item_id)}
+                          title={`${title} (Option+Click to remove block)`}
+                          onClick={handleBlockClick(block)}
                           onContextMenu={handleBlockContextMenu}
                           onKeyDown={handleOpenKey(block.item_id)}
                         >

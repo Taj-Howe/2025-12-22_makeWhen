@@ -1,14 +1,22 @@
 import { Card, Flex, Heading, SegmentedControl, Switch, Text } from "@radix-ui/themes";
 import { useEffect, useMemo, useState, type FC } from "react";
 import { loadTheme, setTheme, type ThemeName } from "../theme/themeStore";
-import { mutate, query } from "../rpc/clientSingleton";
+import { mutate, query, request } from "../rpc/clientSingleton";
 import {
   DEFAULT_WORKDAY_END_HOUR,
   DEFAULT_WORKDAY_START_HOUR,
   formatHourLabel,
   normalizeWorkdayHours,
 } from "../domain/workHours";
-import { AppButton, AppSelect } from "./controls";
+import {
+  STORAGE_BACKEND_ENV_KEY,
+  normalizeStorageBackendPreference,
+} from "../domain/storageRuntime";
+import {
+  normalizeUserColorMap,
+  resolveUserColor,
+} from "../domain/userColors";
+import { AppButton, AppInput, AppSelect } from "./controls";
 
 const THEME_OPTIONS: Array<{ value: ThemeName; label: string }> = [
   { value: "light", label: "Light" },
@@ -32,6 +40,24 @@ type ThemeSettingsProps = {
   onSettingsChanged?: () => void;
 };
 
+type DbInfo = {
+  ok: boolean;
+  storageBackend?: string;
+  persistent?: boolean;
+  preference?: string;
+  fallbackFrom?: string | null;
+  fallbackReason?: string | null;
+  vfs?: string;
+  filename?: string;
+  schemaVersion?: number;
+  error?: string;
+};
+
+type UserLite = {
+  user_id: string;
+  display_name: string;
+};
+
 const ThemeSettings: FC<ThemeSettingsProps> = ({ onSettingsChanged }) => {
   const [theme, setThemeState] = useState<ThemeName>("light");
   const [autoArchive, setAutoArchive] = useState(false);
@@ -41,6 +67,16 @@ const ThemeSettings: FC<ThemeSettingsProps> = ({ onSettingsChanged }) => {
   const [workEndHour, setWorkEndHour] = useState(DEFAULT_WORKDAY_END_HOUR);
   const [savingWorkHours, setSavingWorkHours] = useState(false);
   const [workHoursError, setWorkHoursError] = useState<string | null>(null);
+  const [syncEnabled, setSyncEnabled] = useState(false);
+  const [syncServerUrl, setSyncServerUrl] = useState("");
+  const [savingSync, setSavingSync] = useState(false);
+  const [syncError, setSyncError] = useState<string | null>(null);
+  const [users, setUsers] = useState<UserLite[]>([]);
+  const [userColors, setUserColors] = useState<Record<string, string>>({});
+  const [savingUserColors, setSavingUserColors] = useState(false);
+  const [userColorsError, setUserColorsError] = useState<string | null>(null);
+  const [dbInfo, setDbInfo] = useState<DbInfo | null>(null);
+  const [dbInfoError, setDbInfoError] = useState<string | null>(null);
 
   useEffect(() => {
     setThemeState(loadTheme());
@@ -54,6 +90,13 @@ const ThemeSettings: FC<ThemeSettingsProps> = ({ onSettingsChanged }) => {
           return;
         }
         setAutoArchive(settings["ui.auto_archive_on_complete"] === true);
+        setSyncEnabled(settings["sync.enabled"] === true);
+        setSyncServerUrl(
+          typeof settings["sync.server_url"] === "string"
+            ? (settings["sync.server_url"] as string)
+            : ""
+        );
+        setUserColors(normalizeUserColorMap(settings["ui.user_colors"]));
         const normalized = normalizeWorkdayHours(
           settings["ui.workday_start_hour"],
           settings["ui.workday_end_hour"]
@@ -64,9 +107,55 @@ const ThemeSettings: FC<ThemeSettingsProps> = ({ onSettingsChanged }) => {
       .catch(() => {
         if (mounted) {
           setAutoArchive(false);
+          setSyncEnabled(false);
+          setSyncServerUrl("");
+          setUserColors({});
           setWorkStartHour(DEFAULT_WORKDAY_START_HOUR);
           setWorkEndHour(DEFAULT_WORKDAY_END_HOUR);
         }
+      });
+    return () => {
+      mounted = false;
+    };
+  }, []);
+
+  useEffect(() => {
+    let mounted = true;
+    request<DbInfo>("dbInfo")
+      .then((info) => {
+        if (!mounted) {
+          return;
+        }
+        setDbInfo(info);
+        setDbInfoError(null);
+      })
+      .catch((err) => {
+        if (!mounted) {
+          return;
+        }
+        const message = err instanceof Error ? err.message : "Unknown error";
+        setDbInfo(null);
+        setDbInfoError(message);
+      });
+    return () => {
+      mounted = false;
+    };
+  }, []);
+
+  useEffect(() => {
+    let mounted = true;
+    query<{ users: UserLite[] }>("users_list", {})
+      .then((result) => {
+        if (!mounted) {
+          return;
+        }
+        setUsers(result.users ?? []);
+      })
+      .catch(() => {
+        if (!mounted) {
+          return;
+        }
+        setUsers([]);
       });
     return () => {
       mounted = false;
@@ -142,6 +231,51 @@ const ThemeSettings: FC<ThemeSettingsProps> = ({ onSettingsChanged }) => {
     }
   };
 
+  const handleSaveSyncSettings = async () => {
+    setSavingSync(true);
+    setSyncError(null);
+    try {
+      await Promise.all([
+        mutate("set_setting", {
+          key: "sync.enabled",
+          value: syncEnabled,
+        }),
+        mutate("set_setting", {
+          key: "sync.server_url",
+          value: syncServerUrl.trim() || null,
+        }),
+      ]);
+      onSettingsChanged?.();
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Unknown error";
+      setSyncError(message);
+    } finally {
+      setSavingSync(false);
+    }
+  };
+
+  const handleUserColorChange = (userId: string, color: string) => {
+    setUserColors((prev) => ({ ...prev, [userId]: color }));
+    setUserColorsError(null);
+  };
+
+  const handleSaveUserColors = async () => {
+    setSavingUserColors(true);
+    setUserColorsError(null);
+    try {
+      await mutate("set_setting", {
+        key: "ui.user_colors",
+        value: normalizeUserColorMap(userColors),
+      });
+      onSettingsChanged?.();
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Unknown error";
+      setUserColorsError(message);
+    } finally {
+      setSavingUserColors(false);
+    }
+  };
+
   const startHourOptions = useMemo(
     () =>
       START_HOUR_OPTIONS.map((option) => ({
@@ -164,6 +298,17 @@ const ThemeSettings: FC<ThemeSettingsProps> = ({ onSettingsChanged }) => {
   const workHoursSummary = `${formatHourLabel(workStartHour)}-${formatHourLabel(
     workEndHour
   )}`;
+  const envPreference = normalizeStorageBackendPreference(
+    import.meta.env[STORAGE_BACKEND_ENV_KEY]
+  );
+  const dbStorageSummary = dbInfo?.ok
+    ? dbInfo.storageBackend === "sqlite-opfs"
+      ? "SQLite WASM + OPFS (persistent local data)"
+      : "SQLite WASM in memory (non-persistent fallback)"
+    : "Unavailable";
+  const dbStorageDetail = dbInfo?.ok
+    ? `${dbInfo.vfs ?? "unknown"} · schema v${dbInfo.schemaVersion ?? "?"}`
+    : dbInfo?.error ?? dbInfoError ?? "Unavailable";
 
   return (
     <Card size="2">
@@ -196,6 +341,117 @@ const ThemeSettings: FC<ThemeSettingsProps> = ({ onSettingsChanged }) => {
             onCheckedChange={handleAutoArchiveChange}
           />
         </Flex>
+      </Flex>
+      <Flex direction="column" gap="3">
+        <Heading size="3">Storage</Heading>
+        <Text size="2" color="gray">
+          Default mode is local-first SQLite in OPFS. Native desktop/mobile
+          builds should use platform SQLite with the same sync protocol.
+        </Text>
+        <Text size="2">
+          Active backend: {dbStorageSummary}
+        </Text>
+        <Text size="1" color="gray">
+          {dbStorageDetail}
+        </Text>
+        <Text size="1" color="gray">
+          Build preference ({STORAGE_BACKEND_ENV_KEY}): {envPreference}
+        </Text>
+        {dbInfo?.ok && dbInfo.fallbackFrom ? (
+          <Text size="1" color="orange">
+            OPFS unavailable at runtime. Falling back to in-memory SQLite
+            ({dbInfo.fallbackReason ?? "unknown reason"}).
+          </Text>
+        ) : null}
+      </Flex>
+      <Flex direction="column" gap="3">
+        <Heading size="3">User Colors</Heading>
+        <Text size="2" color="gray">
+          Set calendar block colors per assignee.
+        </Text>
+        {users.length === 0 ? (
+          <Text size="1" color="gray">
+            No users found yet.
+          </Text>
+        ) : (
+          users.map((user) => {
+            const color = userColors[user.user_id] ?? resolveUserColor(user.user_id, userColors);
+            return (
+              <div key={user.user_id} className="settings-user-color-row">
+                <Text size="2">{user.display_name}</Text>
+                <input
+                  className="settings-color-input"
+                  type="color"
+                  value={color}
+                  onChange={(event) =>
+                    handleUserColorChange(user.user_id, event.target.value)
+                  }
+                />
+              </div>
+            );
+          })
+        )}
+        <Flex>
+          <AppButton
+            type="button"
+            variant="surface"
+            onClick={() => void handleSaveUserColors()}
+            disabled={savingUserColors}
+          >
+            {savingUserColors ? "Saving..." : "Save user colors"}
+          </AppButton>
+        </Flex>
+        {userColorsError ? (
+          <Text size="1" color="red">
+            {userColorsError}
+          </Text>
+        ) : null}
+      </Flex>
+      <Flex direction="column" gap="3">
+        <Heading size="3">Sync</Heading>
+        <Text size="2" color="gray">
+          Foundation settings for server replica sync. Local app behavior stays
+          fully offline-first.
+        </Text>
+        <Flex align="center" justify="between" gap="3">
+          <div>
+            <Text size="2" weight="bold">
+              Enable sync
+            </Text>
+            <Text size="1" color="gray">
+              Stores sync preference in local settings.
+            </Text>
+          </div>
+          <Switch
+            checked={syncEnabled}
+            onCheckedChange={(checked) => setSyncEnabled(Boolean(checked))}
+          />
+        </Flex>
+        <label style={{ display: "grid", gap: 6 }}>
+          <Text size="1" color="gray">
+            Server URL
+          </Text>
+          <AppInput
+            value={syncServerUrl}
+            onChange={(event) => setSyncServerUrl(event.target.value)}
+            placeholder="https://sync.makewhen.app"
+          />
+        </label>
+        <Flex>
+          <AppButton
+            type="button"
+            variant="surface"
+            onClick={() => void handleSaveSyncSettings()}
+            disabled={savingSync}
+          >
+            {savingSync ? "Saving..." : "Save sync settings"}
+          </AppButton>
+        </Flex>
+        {syncError ? (
+          <Text size="1" color="red">
+            {syncError}
+          </Text>
+        ) : null}
       </Flex>
       <Flex direction="column" gap="3">
         <Heading size="3">Work Hours</Heading>

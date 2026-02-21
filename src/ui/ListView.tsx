@@ -2628,13 +2628,21 @@ const ListView: FC<ListViewProps> = ({
       {showLoading ? <div className="list-empty">Loading…</div> : null}
       {error ? <div className="error">{error}</div> : null}
       <div className="list-scroll" onMouseDown={handleBackgroundMouseDown}>
-        <table className="list-table list-table-wide">
+        <table className="list-table list-table-wide list-table-fixed">
+          <colgroup>
+            {columns.map((column) => (
+              <col
+                key={`col-${column.key}`}
+                style={{ width: `${column.minWidth}px` }}
+              />
+            ))}
+          </colgroup>
           <thead>
             <tr>
               {columns.map((column) => (
                 <th
                   key={column.key}
-                  style={{ minWidth: column.minWidth }}
+                  style={{ width: column.minWidth }}
                   className={column.key === "title" ? "title-header" : undefined}
                 >
                   {column.label}

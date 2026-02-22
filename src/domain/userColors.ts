@@ -40,6 +40,8 @@ export const normalizeUserColorMap = (value: unknown): Record<string, string> =>
   return next;
 };
 
+export const isHexColor = (value: string) => HEX_COLOR_RE.test(value);
+
 export const resolveUserColor = (
   userId: string,
   configured: Record<string, string>

@@ -790,6 +790,7 @@ const CommandPalette: FC<CommandPaletteProps> = ({
             <AppInput
               ref={inputRef}
               rootClassName="palette-input"
+              size="3"
               type="text"
               value={inputValue}
               onChange={(event) => {

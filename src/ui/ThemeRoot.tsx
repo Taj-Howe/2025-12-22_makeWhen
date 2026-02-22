@@ -15,9 +15,11 @@ const ThemeRoot: FC<ThemeRootProps> = ({ children }) => {
 
   useEffect(() => subscribeTheme(setTheme), []);
 
-  const appearance = theme === "light" || theme === "amber" ? "light" : "dark";
-  const accentColor = theme === "amber" ? "amber" : "violet";
-  const grayColor = theme === "amber" ? "sand" : "mauve";
+  const appearance = theme === "light" || theme === "custom" ? "light" : "dark";
+  const accentColor =
+    theme === "custom" ? "amber" : theme === "dark" ? "iris" : "gray";
+  const grayColor =
+    theme === "custom" ? "sand" : theme === "dark" ? "gray" : "mauve";
 
   const readRadiusToken = () => {
     if (typeof window === "undefined") {

@@ -241,6 +241,21 @@ const KanbanView: FC<KanbanViewProps> = ({
     }
   };
 
+  const handleDeleteItem = useCallback(
+    async (itemId: string) => {
+      setError(null);
+      try {
+        await mutate("delete_item", { item_id: itemId });
+        void loadBoard(true);
+        onRefresh();
+      } catch (err) {
+        const message = err instanceof Error ? err.message : "Unknown error";
+        setError(message);
+      }
+    },
+    [loadBoard, onRefresh]
+  );
+
   return (
     <div className="kanban-root">
       <div className="kanban-toolbar">
@@ -319,7 +334,20 @@ const KanbanView: FC<KanbanViewProps> = ({
                           event.dataTransfer.setData("text/plain", card.id);
                           event.dataTransfer.effectAllowed = "move";
                         }}
-                        onClick={() => onOpenItem(card.id)}
+                        onClick={(event) => {
+                          if (
+                            event.altKey &&
+                            event.shiftKey &&
+                            !event.ctrlKey &&
+                            !event.metaKey
+                          ) {
+                            event.preventDefault();
+                            event.stopPropagation();
+                            void handleDeleteItem(card.id);
+                            return;
+                          }
+                          onOpenItem(card.id);
+                        }}
                       >
                         <div className="kanban-card-header">
                           <AppCheckbox

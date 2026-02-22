@@ -1,4 +1,4 @@
-export type ThemeName = "light" | "dark" | "amber";
+export type ThemeName = "light" | "dark" | "custom";
 
 const STORAGE_KEY = "makewhen.theme";
 const DEFAULT_THEME: ThemeName = "light";
@@ -9,8 +9,11 @@ export const loadTheme = (): ThemeName => {
     return DEFAULT_THEME;
   }
   const stored = window.localStorage.getItem(STORAGE_KEY);
-  if (stored === "light" || stored === "dark" || stored === "amber") {
+  if (stored === "light" || stored === "dark" || stored === "custom") {
     return stored;
+  }
+  if (stored === "amber") {
+    return "custom";
   }
   return DEFAULT_THEME;
 };

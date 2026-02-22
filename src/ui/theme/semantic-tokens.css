@@ -1,20 +1,52 @@
 :root {
-  --radius: 10px;
+  --radius: 8px;
+  --radius-pill: 999px;
   --color-bg: var(--neutral-1);
   --color-panel: var(--neutral-2);
   --color-panel-2: var(--neutral-3);
   --color-text: var(--neutral-12);
   --color-muted: var(--neutral-11);
+  --color-muted-text: var(--color-muted);
   --color-text-muted: var(--color-muted);
   --color-border: var(--neutral-6);
   --color-border-hover: var(--neutral-7);
   --color-accent: var(--accent-9);
   --color-accent-text: var(--accent-11);
   --color-accent-border: var(--accent-7);
-  --color-danger: #ff6b6b;
-  --color-warning: #f59e0b;
-  --color-success: #34d399;
-  --shadow-color: rgba(0, 0, 0, 0.6);
+  --color-primary: #5b5bd6;
+  --color-secondary: #29a383;
+  --color-tertiary: #00a2c7;
+  --color-milestone: #6e6ade;
+  --color-task: #27b08b;
+  --color-scheduled: #0090ff;
+  --color-deadline: #e5484d;
+  --color-danger: #e5484d;
+  --color-warning: #ffe629;
+  --color-success: #29a383;
+  --shadow-color: rgba(0, 0, 0, 0);
+  --glass-blur: 14px;
+  --color-glass-bg: color-mix(in srgb, var(--color-panel) 84%, transparent);
+  --color-glass-border: color-mix(in srgb, var(--color-border) 78%, white 22%);
+  --color-glass-highlight: color-mix(in srgb, var(--color-border) 35%, transparent);
+  --color-overlay-scrim: color-mix(in srgb, var(--color-bg) 54%, transparent);
+  --font-family-body: var(
+    --default-font-family,
+    "IBM Plex Mono",
+    "SFMono-Regular",
+    Menlo,
+    Monaco,
+    Consolas,
+    "Liberation Mono",
+    "Courier New",
+    monospace
+  );
+  --font-family-heading: var(--font-family-body);
+  --font-size-body: 17px;
+  --font-size-label: 12px;
+  --font-size-title: 34px;
+  --font-size-base: 17px;
+  --font-weight-body: 400;
+  --font-weight-heading: 600;
 }
 
 [data-theme="light"] {
@@ -32,54 +64,78 @@
   --neutral-11: var(--mauve-11);
   --neutral-12: var(--mauve-12);
 
-  --accent-1: var(--violet-1);
-  --accent-2: var(--violet-2);
-  --accent-3: var(--violet-3);
-  --accent-4: var(--violet-4);
-  --accent-5: var(--violet-5);
-  --accent-6: var(--violet-6);
-  --accent-7: var(--violet-7);
-  --accent-8: var(--violet-8);
-  --accent-9: var(--violet-9);
-  --accent-10: var(--violet-10);
-  --accent-11: var(--violet-11);
-  --accent-12: var(--violet-12);
+  --accent-1: var(--mauve-1);
+  --accent-2: var(--mauve-2);
+  --accent-3: var(--mauve-3);
+  --accent-4: var(--mauve-4);
+  --accent-5: var(--mauve-5);
+  --accent-6: var(--mauve-6);
+  --accent-7: var(--mauve-7);
+  --accent-8: var(--mauve-8);
+  --accent-9: var(--mauve-9);
+  --accent-10: var(--mauve-10);
+  --accent-11: var(--mauve-11);
+  --accent-12: var(--mauve-12);
 
-  --shadow-color: rgba(15, 23, 42, 0.12);
+  --shadow-color: rgba(15, 23, 42, 0);
+  --color-glass-bg: color-mix(in srgb, var(--mauve-1) 72%, white 28%);
+  --color-glass-border: color-mix(in srgb, var(--mauve-7) 72%, white 28%);
+  --color-glass-highlight: color-mix(in srgb, var(--mauve-12) 8%, transparent);
+  --color-overlay-scrim: color-mix(in srgb, var(--mauve-1) 52%, transparent);
 }
 
 [data-theme="dark"] {
   color-scheme: dark;
-  --neutral-1: var(--mauveDark-1);
-  --neutral-2: var(--mauveDark-2);
-  --neutral-3: var(--mauveDark-3);
-  --neutral-4: var(--mauveDark-4);
-  --neutral-5: var(--mauveDark-5);
-  --neutral-6: var(--mauveDark-6);
-  --neutral-7: var(--mauveDark-7);
-  --neutral-8: var(--mauveDark-8);
-  --neutral-9: var(--mauveDark-9);
-  --neutral-10: var(--mauveDark-10);
-  --neutral-11: var(--mauveDark-11);
-  --neutral-12: var(--mauveDark-12);
+  --neutral-1: #050505;
+  --neutral-2: #090909;
+  --neutral-3: #111111;
+  --neutral-4: #171717;
+  --neutral-5: #1f1f1f;
+  --neutral-6: #2b2b2b;
+  --neutral-7: #383838;
+  --neutral-8: #4d4d4d;
+  --neutral-9: #6f6f6f;
+  --neutral-10: #919191;
+  --neutral-11: #bdbdbd;
+  --neutral-12: #f4f4f4;
 
-  --accent-1: var(--violetDark-1);
-  --accent-2: var(--violetDark-2);
-  --accent-3: var(--violetDark-3);
-  --accent-4: var(--violetDark-4);
-  --accent-5: var(--violetDark-5);
-  --accent-6: var(--violetDark-6);
-  --accent-7: var(--violetDark-7);
-  --accent-8: var(--violetDark-8);
-  --accent-9: var(--violetDark-9);
-  --accent-10: var(--violetDark-10);
-  --accent-11: var(--violetDark-11);
-  --accent-12: var(--violetDark-12);
+  --accent-1: var(--irisDark-1);
+  --accent-2: var(--irisDark-2);
+  --accent-3: var(--irisDark-3);
+  --accent-4: var(--irisDark-4);
+  --accent-5: var(--irisDark-5);
+  --accent-6: var(--irisDark-6);
+  --accent-7: var(--irisDark-7);
+  --accent-8: var(--irisDark-8);
+  --accent-9: var(--irisDark-9);
+  --accent-10: var(--irisDark-10);
+  --accent-11: var(--irisDark-11);
+  --accent-12: var(--irisDark-12);
 
-  --shadow-color: rgba(0, 0, 0, 0.6);
+  --color-border: color-mix(in srgb, var(--neutral-7) 78%, var(--neutral-6));
+  --color-border-hover: color-mix(in srgb, var(--neutral-8) 78%, var(--neutral-7));
+  --color-accent: var(--irisDark-9);
+  --color-accent-text: var(--irisDark-12);
+  --color-accent-border: color-mix(in srgb, var(--irisDark-8) 70%, var(--neutral-7));
+  --color-danger: var(--redDark-9);
+  --color-warning: var(--yellowDark-9);
+  --color-success: var(--jadeDark-9);
+  --color-primary: var(--irisDark-9);
+  --color-secondary: var(--jadeDark-9);
+  --color-tertiary: var(--cyanDark-9);
+  --color-milestone: var(--irisDark-10);
+  --color-task: var(--jadeDark-10);
+  --color-scheduled: var(--blueDark-9);
+  --color-deadline: var(--redDark-9);
+
+  --shadow-color: rgba(0, 0, 0, 0);
+  --color-glass-bg: color-mix(in srgb, #050505 82%, transparent);
+  --color-glass-border: color-mix(in srgb, var(--neutral-8) 84%, white 16%);
+  --color-glass-highlight: color-mix(in srgb, var(--neutral-12) 13%, transparent);
+  --color-overlay-scrim: color-mix(in srgb, #000000 74%, transparent);
 }
 
-[data-theme="amber"] {
+[data-theme="custom"] {
   color-scheme: light;
   --neutral-1: var(--amber-1);
   --neutral-2: var(--amber-2);
@@ -107,5 +163,9 @@
   --accent-11: var(--amber-11);
   --accent-12: var(--amber-12);
 
-  --shadow-color: color-mix(in srgb, var(--amber-12) 18%, transparent);
+  --shadow-color: color-mix(in srgb, var(--amber-12) 0%, transparent);
+  --color-glass-bg: color-mix(in srgb, var(--amber-1) 76%, white 24%);
+  --color-glass-border: color-mix(in srgb, var(--amber-7) 68%, white 32%);
+  --color-glass-highlight: color-mix(in srgb, var(--amber-12) 10%, transparent);
+  --color-overlay-scrim: color-mix(in srgb, var(--amber-1) 56%, transparent);
 }

@@ -15,10 +15,6 @@ import {
   evaluateDependencyStatus,
 } from "./scheduleMath";
 import { computeRollupTotals } from "./rollup";
-import {
-  isPersistentBackend,
-  normalizeStorageBackendPreference,
-} from "../domain/storageRuntime";
 
 const ctx = self as unknown as {
   addEventListener: (
@@ -31,20 +27,10 @@ const ctx = self as unknown as {
 const DB_FILENAME = "makewhen.sqlite3";
 const VFS_NAME = "opfs-sahpool";
 const UNGROUPED_PROJECT_ID = "__ungrouped__";
-const storageBackendPreference = normalizeStorageBackendPreference(
-  import.meta.env.VITE_STORAGE_BACKEND
-);
-
-type DbStorageBackend = "sqlite-opfs" | "sqlite-memory";
 
 type DbInfoPayload =
   | {
       ok: true;
-      storageBackend: DbStorageBackend;
-      persistent: boolean;
-      preference: string;
-      fallbackFrom: "sqlite-opfs" | null;
-      fallbackReason: string | null;
       vfs: string;
       filename: string;
       schemaVersion: number;
@@ -1415,38 +1401,6 @@ const ensureScheduledBlocksDurationColumn = (db: any) => {
   return scheduledBlocksSchema;
 };
 
-type OpenedDb = {
-  db: any;
-  storageBackend: DbStorageBackend;
-  vfs: string;
-  filename: string;
-  fallbackFrom: "sqlite-opfs" | null;
-  fallbackReason: string | null;
-};
-
-const openDbInMemory = (sqlite3: any): OpenedDb => ({
-  db: new sqlite3.oo1.DB(":memory:", "c"),
-  storageBackend: "sqlite-memory",
-  vfs: "memdb",
-  filename: ":memory:",
-  fallbackFrom: null,
-  fallbackReason: null,
-});
-
-const openDbWithOpfs = async (sqlite3: any): Promise<OpenedDb> => {
-  const poolUtil = await sqlite3.installOpfsSAHPoolVfs({
-    name: VFS_NAME,
-  });
-  return {
-    db: new poolUtil.OpfsSAHPoolDb(DB_FILENAME),
-    storageBackend: "sqlite-opfs",
-    vfs: VFS_NAME,
-    filename: DB_FILENAME,
-    fallbackFrom: null,
-    fallbackReason: null,
-  };
-};
-
 const initDb = async () => {
   if (initPromise) {
     return initPromise;
@@ -1458,38 +1412,18 @@ const initDb = async () => {
         print: () => {},
         printErr: () => {},
       });
-      let opened: OpenedDb;
-      if (storageBackendPreference === "memory") {
-        opened = openDbInMemory(sqlite3);
-      } else {
-        try {
-          opened = await openDbWithOpfs(sqlite3);
-        } catch (err) {
-          if (storageBackendPreference === "opfs-strict") {
-            throw err;
-          }
-          const fallbackReason =
-            err instanceof Error ? err.message : String(err);
-          opened = {
-            ...openDbInMemory(sqlite3),
-            fallbackFrom: "sqlite-opfs",
-            fallbackReason,
-          };
-        }
-      }
-      dbHandle = opened.db;
-      const schemaVersion = runMigrations(opened.db);
-      ensureScheduledBlocksDurationColumn(opened.db);
+      const poolUtil = await sqlite3.installOpfsSAHPoolVfs({
+        name: VFS_NAME,
+      });
+      const db = new poolUtil.OpfsSAHPoolDb(DB_FILENAME);
+      dbHandle = db;
+      const schemaVersion = runMigrations(db);
+      ensureScheduledBlocksDurationColumn(db);
 
       dbState.info = {
         ok: true,
-        storageBackend: opened.storageBackend,
-        persistent: isPersistentBackend(opened.storageBackend),
-        preference: storageBackendPreference,
-        fallbackFrom: opened.fallbackFrom,
-        fallbackReason: opened.fallbackReason,
-        vfs: opened.vfs,
-        filename: opened.filename,
+        vfs: VFS_NAME,
+        filename: DB_FILENAME,
         schemaVersion,
       };
     } catch (err) {
@@ -7417,11 +7351,14 @@ const handleRequest = async (message: RpcRequest): Promise<RpcResponse> => {
           break;
         }
         case "calendar_range_users": {
+          const userIdsRaw = ensureArray(args.user_ids, "user_ids") as unknown[];
           const userIds = Array.from(
             new Set(
-              ensureArray(args.user_ids, "user_ids").map((value, index) =>
-                ensureString(value, `user_ids[${index}]`)
-              )
+              userIdsRaw
+                .map((value, index) =>
+                  ensureString(value, `user_ids[${index}]`).trim()
+                )
+                .filter((value) => value.length > 0)
             )
           );
           const timeMin = ensureTimeMs(args.time_min, "time_min");
@@ -7434,13 +7371,14 @@ const handleRequest = async (message: RpcRequest): Promise<RpcResponse> => {
             break;
           }
 
-          const placeholders = buildPlaceholders(userIds.length);
+          const userPlaceholders = buildPlaceholders(userIds.length);
           const blockRows = dbHandle.exec({
-            sql: `SELECT DISTINCT
-                b.block_id, b.item_id, b.start_at, b.duration_minutes, a.assignee_id
+            sql: `SELECT b.block_id, b.item_id, b.start_at, b.duration_minutes, a.assignee_id
               FROM scheduled_blocks b
               JOIN item_assignees a ON a.item_id = b.item_id
-              WHERE a.assignee_id IN (${placeholders})
+              JOIN items i ON i.id = b.item_id
+              WHERE i.archived_at IS NULL
+                AND a.assignee_id IN (${userPlaceholders})
                 AND b.start_at < ?
                 AND (b.start_at + b.duration_minutes * 60000) > ?
               ORDER BY b.start_at ASC;`,
@@ -7449,7 +7387,9 @@ const handleRequest = async (message: RpcRequest): Promise<RpcResponse> => {
             bind: [...userIds, timeMax, timeMin],
           }) as Array<[string, string, number, number, string]>;
 
-          const itemIds = Array.from(new Set(blockRows.map((row) => row[1])));
+          const itemIds = Array.from(
+            new Set(blockRows.map((row) => row[1]).filter(Boolean))
+          );
           let itemRows: Array<
             [string, string, string, number | null, string | null, string, number]
           > = [];
@@ -7458,7 +7398,8 @@ const handleRequest = async (message: RpcRequest): Promise<RpcResponse> => {
             itemRows = dbHandle.exec({
               sql: `SELECT id, title, status, due_at, parent_id, type, priority
                 FROM items
-                WHERE id IN (${itemPlaceholders})
+                WHERE archived_at IS NULL
+                  AND id IN (${itemPlaceholders})
                 ORDER BY title ASC;`,
               rowMode: "array",
               returnValue: "resultRows",
@@ -7469,6 +7410,8 @@ const handleRequest = async (message: RpcRequest): Promise<RpcResponse> => {
           }
 
           const userNameMap = getUserMap(dbHandle);
+          const assigneesMap = getAssigneesMap(dbHandle, itemIds);
+
           result = {
             ok: true,
             result: {
@@ -7480,15 +7423,20 @@ const handleRequest = async (message: RpcRequest): Promise<RpcResponse> => {
                 assignee_id: row[4],
                 assignee_name: getUserDisplayName(row[4], userNameMap),
               })),
-              items: itemRows.map((row) => ({
-                id: row[0],
-                title: row[1],
-                status: row[2],
-                due_at: row[3],
-                parent_id: row[4],
-                item_type: row[5],
-                priority: row[6],
-              })),
+              items: itemRows.map((row) => {
+                const assigneeId = (assigneesMap.get(row[0]) ?? [])[0] ?? null;
+                return {
+                  id: row[0],
+                  title: row[1],
+                  status: row[2],
+                  due_at: row[3],
+                  parent_id: row[4],
+                  item_type: row[5],
+                  priority: row[6],
+                  assignee_id: assigneeId,
+                  assignee_name: getUserDisplayName(assigneeId ?? "", userNameMap),
+                };
+              }),
             },
           };
           break;

@@ -11,12 +11,25 @@ import KanbanView from "./KanbanView";
 import AddItemForm from "./AddItemForm";
 import RightSheet from "./RightSheet";
 import CommandPalette from "./CommandPalette";
-import ThemeSettings from "./ThemeSettings";
-import SampleDataPanel from "./SampleDataPanel";
+import SettingsWindow from "./SettingsWindow";
 import { AppButton } from "./controls";
 import { mutate, query } from "../rpc/clientSingleton";
 import type { ListItem } from "../domain/listTypes";
 import type { Scope } from "../domain/scope";
+import {
+  applySemanticColorVars,
+  normalizeSemanticColorMap,
+} from "../domain/semanticColors";
+import {
+  applyThemeTokenVars,
+  clearThemeTokenVars,
+  normalizeThemeTokenOverrides,
+} from "../domain/themeTokens";
+import {
+  DEFAULT_TYPOGRAPHY_SETTINGS,
+  applyTypographySettings,
+  normalizeTypographySettings,
+} from "../domain/typographySettings";
 import { ScopeProvider } from "./ScopeContext";
 
 type UserLite = {
@@ -132,12 +145,53 @@ const App = () => {
   }, [loadUsers, refreshToken]);
 
   useEffect(() => {
+    let mounted = true;
+    query<Record<string, unknown>>("getSettings", {})
+      .then((settings) => {
+        if (!mounted || typeof document === "undefined") {
+          return;
+        }
+        const semanticColors = normalizeSemanticColorMap(
+          settings["ui.semantic_colors"]
+        );
+        const themeTokenOverrides = normalizeThemeTokenOverrides(
+          settings["ui.theme_tokens"]
+        );
+        const typographySettings = normalizeTypographySettings(
+          settings["ui.typography"]
+        );
+        applySemanticColorVars(document.documentElement, semanticColors);
+        clearThemeTokenVars(document.documentElement);
+        applyThemeTokenVars(document.documentElement, themeTokenOverrides);
+        applyTypographySettings(document.documentElement, typographySettings);
+      })
+      .catch(() => {
+        if (!mounted || typeof document === "undefined") {
+          return;
+        }
+        applySemanticColorVars(
+          document.documentElement,
+          normalizeSemanticColorMap(undefined)
+        );
+        clearThemeTokenVars(document.documentElement);
+        applyTypographySettings(
+          document.documentElement,
+          DEFAULT_TYPOGRAPHY_SETTINGS
+        );
+      });
+    return () => {
+      mounted = false;
+    };
+  }, [refreshToken]);
+
+  useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
-      const isK = event.key.toLowerCase() === "k";
-      if (!isK) {
-        return;
-      }
-      if (!(event.metaKey || event.ctrlKey)) {
+      const isOptionK =
+        event.code === "KeyK" &&
+        event.altKey &&
+        !event.metaKey &&
+        !event.ctrlKey;
+      if (!isOptionK) {
         return;
       }
       if (sheetOpen) {
@@ -351,10 +405,12 @@ const App = () => {
           usersError={usersError}
           selectedUserId={selectedUserId ?? currentUser.user_id}
           onSelectUser={handleSelectUser}
+          currentUserName={currentUser.display_name}
+          onOpenSettings={() => setSettingsOpen(true)}
         />
         <main className="main">
-          <div className="top-bar">
-            <div className="top-bar-left">
+          <div className="top-strip">
+            <div className="top-strip-tabs">
               <Tabs.Root
                 value={activeView}
                 onValueChange={(value) =>
@@ -369,43 +425,20 @@ const App = () => {
                   <Tabs.Trigger value="gantt">Gantt</Tabs.Trigger>
                 </Tabs.List>
               </Tabs.Root>
-              <div className="top-title">
-                {activeView === "dashboard"
-                  ? "Dashboard"
-                  : activeScope.kind === "user"
-                    ? currentUser.display_name
-                    : selectedProject
-                      ? selectedProject.title
-                      : "Select a project"}
-              </div>
-            </div>
-            <div className="top-bar-right">
-              <div className="user-chip" title={currentUser.display_name}>
-                <span className="user-chip-icon" aria-hidden="true">
-                  👤
-                </span>
-                <span className="user-chip-label">
-                  {currentUser.display_name}
-                </span>
-              </div>
-              <AppButton
-                type="button"
-                variant="surface"
-                onClick={() => setSettingsOpen((prev) => !prev)}
-              >
-                Settings
-              </AppButton>
             </div>
           </div>
-          {settingsOpen ? (
-            <div className="settings-panel">
-              <ThemeSettings onSettingsChanged={triggerRefresh} />
-              <SampleDataPanel
-                onSeeded={handleSeededProject}
-                onRefresh={triggerRefresh}
-              />
+          <div className="main-content">
+          <div className="top-title-row">
+            <div className="top-title">
+              {activeView === "dashboard"
+                ? "Dashboard"
+                : activeScope.kind === "user"
+                  ? currentUser.display_name
+                  : selectedProject
+                    ? selectedProject.title
+                    : "Select a project"}
             </div>
-          ) : null}
+          </div>
           {activeScope.kind === "project" && activeView !== "dashboard" ? (
             <div className="title-actions">
               <AppButton
@@ -419,42 +452,64 @@ const App = () => {
           ) : null}
           {deleteError ? <div className="error">{deleteError}</div> : null}
           {error ? <div className="error">{error}</div> : null}
-          {activeView === "dashboard" ? (
-            <DashboardView
-              scope={activeScope}
-              refreshToken={refreshToken}
-              onSelectItem={handleDashboardItemSelect}
-            />
-          ) : activeView === "list" ? (
-            <ListView
-              scope={activeScope}
-              refreshToken={refreshToken}
-              onRefresh={triggerRefresh}
-              onOpenItem={openTaskEditor}
-            />
-          ) : activeView === "kanban" ? (
-            <KanbanView
-              scope={activeScope}
-              refreshToken={refreshToken}
-              onRefresh={triggerRefresh}
-              onOpenItem={openTaskEditor}
-            />
-          ) : activeView === "calendar" ? (
-            <CalendarView
-              scope={activeScope}
-              projectItems={projectItems}
-              refreshToken={refreshToken}
-              onRefresh={triggerRefresh}
-              onOpenItem={openTaskEditor}
-            />
-          ) : (
-            <GanttView
-              scope={activeScope}
-              refreshToken={refreshToken}
-              onRefresh={triggerRefresh}
-              onOpenItem={openTaskEditor}
-            />
-          )}
+          <div className="view-stack">
+            <section
+              className={`view-panel${activeView === "dashboard" ? " is-active" : ""}`}
+              aria-hidden={activeView !== "dashboard"}
+            >
+              <DashboardView
+                scope={activeScope}
+                refreshToken={refreshToken}
+                onSelectItem={handleDashboardItemSelect}
+              />
+            </section>
+            <section
+              className={`view-panel${activeView === "list" ? " is-active" : ""}`}
+              aria-hidden={activeView !== "list"}
+            >
+              <ListView
+                scope={activeScope}
+                refreshToken={refreshToken}
+                onRefresh={triggerRefresh}
+                onOpenItem={openTaskEditor}
+              />
+            </section>
+            <section
+              className={`view-panel${activeView === "kanban" ? " is-active" : ""}`}
+              aria-hidden={activeView !== "kanban"}
+            >
+              <KanbanView
+                scope={activeScope}
+                refreshToken={refreshToken}
+                onRefresh={triggerRefresh}
+                onOpenItem={openTaskEditor}
+              />
+            </section>
+            <section
+              className={`view-panel${activeView === "calendar" ? " is-active" : ""}`}
+              aria-hidden={activeView !== "calendar"}
+            >
+              <CalendarView
+                scope={activeScope}
+                projectItems={projectItems}
+                refreshToken={refreshToken}
+                onRefresh={triggerRefresh}
+                onOpenItem={openTaskEditor}
+              />
+            </section>
+            <section
+              className={`view-panel${activeView === "gantt" ? " is-active" : ""}`}
+              aria-hidden={activeView !== "gantt"}
+            >
+              <GanttView
+                scope={activeScope}
+                refreshToken={refreshToken}
+                onRefresh={triggerRefresh}
+                onOpenItem={openTaskEditor}
+              />
+            </section>
+          </div>
+          </div>
           <RightSheet
             open={sheetOpen}
             onOpenChange={handleSheetOpenChange}
@@ -484,6 +539,12 @@ const App = () => {
             onCreated={triggerRefresh}
             onOpenProject={handleOpenProjectFromCommand}
             onOpenView={setActiveView}
+          />
+          <SettingsWindow
+            open={settingsOpen}
+            onOpenChange={setSettingsOpen}
+            onSettingsChanged={triggerRefresh}
+            onSeeded={handleSeededProject}
           />
         </main>
         </div>

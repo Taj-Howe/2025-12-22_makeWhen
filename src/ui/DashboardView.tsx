@@ -6,9 +6,10 @@ import {
   useState,
   type FC,
   type KeyboardEvent,
+  type MouseEvent as ReactMouseEvent,
 } from "react";
 import type { Scope } from "../domain/scope";
-import { query } from "../rpc/clientSingleton";
+import { mutate, query } from "../rpc/clientSingleton";
 import { formatDate } from "../domain/formatters";
 import { getTodayRange, getWeekRange } from "./dateWindow";
 import ContributionsHeatmap from "./ContributionsHeatmap";
@@ -242,6 +243,34 @@ const DashboardView: FC<DashboardViewProps> = ({
     }
   };
 
+  const handleItemRowClick = useCallback(
+    (itemId: string, projectId: string | null) =>
+      (event: ReactMouseEvent) => {
+        if (
+          event.altKey &&
+          event.shiftKey &&
+          !event.ctrlKey &&
+          !event.metaKey
+        ) {
+          event.preventDefault();
+          event.stopPropagation();
+          setError(null);
+          void (async () => {
+            try {
+              await mutate("delete_item", { item_id: itemId });
+              await loadWidgets();
+            } catch (err) {
+              const message = err instanceof Error ? err.message : "Unknown error";
+              setError(message);
+            }
+          })();
+          return;
+        }
+        onSelectItem(itemId, projectId);
+      },
+    [loadWidgets, onSelectItem]
+  );
+
   return (
     <div className="dashboard-view">
       <ContributionsHeatmap scope={scope} refreshToken={refreshToken} />
@@ -269,9 +298,10 @@ const DashboardView: FC<DashboardViewProps> = ({
                 <div
                   key={block.block_id}
                   className="dashboard-row"
-                  onClick={() =>
-                    onSelectItem(block.item_id, block.project_id ?? null)
-                  }
+                  onClick={handleItemRowClick(
+                    block.item_id,
+                    block.project_id ?? null
+                  )}
                   onKeyDown={handleRowKeyDown(() =>
                     onSelectItem(block.item_id, block.project_id ?? null)
                   )}
@@ -314,9 +344,10 @@ const DashboardView: FC<DashboardViewProps> = ({
                 <div
                   key={item.item_id}
                   className="dashboard-row"
-                  onClick={() =>
-                    onSelectItem(item.item_id, item.project_id ?? null)
-                  }
+                  onClick={handleItemRowClick(
+                    item.item_id,
+                    item.project_id ?? null
+                  )}
                   onKeyDown={handleRowKeyDown(() =>
                     onSelectItem(item.item_id, item.project_id ?? null)
                   )}
@@ -359,9 +390,10 @@ const DashboardView: FC<DashboardViewProps> = ({
                 <div
                   key={item.item_id}
                   className="dashboard-row"
-                  onClick={() =>
-                    onSelectItem(item.item_id, item.project_id ?? null)
-                  }
+                  onClick={handleItemRowClick(
+                    item.item_id,
+                    item.project_id ?? null
+                  )}
                   onKeyDown={handleRowKeyDown(() =>
                     onSelectItem(item.item_id, item.project_id ?? null)
                   )}
@@ -408,7 +440,7 @@ const DashboardView: FC<DashboardViewProps> = ({
                 <div
                   key={item.item_id}
                   className="dashboard-row"
-                  onClick={() => onSelectItem(item.item_id, null)}
+                  onClick={handleItemRowClick(item.item_id, null)}
                   onKeyDown={handleRowKeyDown(() =>
                     onSelectItem(item.item_id, null)
                   )}
@@ -442,7 +474,7 @@ const DashboardView: FC<DashboardViewProps> = ({
                 <div
                   key={item.item_id}
                   className="dashboard-row"
-                  onClick={() => onSelectItem(item.item_id, null)}
+                  onClick={handleItemRowClick(item.item_id, null)}
                   onKeyDown={handleRowKeyDown(() =>
                     onSelectItem(item.item_id, null)
                   )}
@@ -479,7 +511,7 @@ const DashboardView: FC<DashboardViewProps> = ({
                 <div
                   key={item.item_id}
                   className="dashboard-row dashboard-row-warning"
-                  onClick={() => onSelectItem(item.item_id, null)}
+                  onClick={handleItemRowClick(item.item_id, null)}
                   onKeyDown={handleRowKeyDown(() =>
                     onSelectItem(item.item_id, null)
                   )}
@@ -517,7 +549,7 @@ const DashboardView: FC<DashboardViewProps> = ({
                 <div
                   key={item.item_id}
                   className="dashboard-row"
-                  onClick={() => onSelectItem(item.item_id, null)}
+                  onClick={handleItemRowClick(item.item_id, null)}
                   onKeyDown={handleRowKeyDown(() =>
                     onSelectItem(item.item_id, null)
                   )}
@@ -554,7 +586,7 @@ const DashboardView: FC<DashboardViewProps> = ({
                 <div
                   key={item.item_id}
                   className="dashboard-row dashboard-row-warning"
-                  onClick={() => onSelectItem(item.item_id, null)}
+                  onClick={handleItemRowClick(item.item_id, null)}
                   onKeyDown={handleRowKeyDown(() =>
                     onSelectItem(item.item_id, null)
                   )}

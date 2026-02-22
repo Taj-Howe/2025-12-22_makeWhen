@@ -261,10 +261,8 @@ const ListView: FC<ListViewProps> = ({
     const cached = listViewCache.get(cacheKey);
     if (cached) {
       setItems(cached);
-    } else {
-      setItems([]);
     }
-    setLoading(!cached);
+    setLoading(true);
     setError(null);
     loadItems()
       .then((merged) => {
@@ -477,6 +475,20 @@ const ListView: FC<ListViewProps> = ({
     setLastFocusedIndex(null);
   }, []);
 
+  const handleQuickDelete = useCallback(
+    async (itemId: string) => {
+      setError(null);
+      try {
+        await deleteItem(itemId);
+        onRefresh();
+      } catch (err) {
+        const message = err instanceof Error ? err.message : "Unknown error";
+        setError(message);
+      }
+    },
+    [onRefresh]
+  );
+
   const handleRowClick = useCallback(
     (event: React.MouseEvent, itemId: string) => {
       if (event.button === 2) {
@@ -486,6 +498,16 @@ const ListView: FC<ListViewProps> = ({
         return;
       }
       if (isInteractiveElement(event.target)) {
+        return;
+      }
+      if (event.altKey && event.shiftKey && !event.metaKey && !event.ctrlKey) {
+        const record = getItemRecord(itemId);
+        if (record?.type !== "task") {
+          return;
+        }
+        event.preventDefault();
+        event.stopPropagation();
+        void handleQuickDelete(itemId);
         return;
       }
       event.preventDefault();
@@ -520,7 +542,14 @@ const ListView: FC<ListViewProps> = ({
       });
       setLastFocusedIndex(rowIndex);
     },
-    [dragging, lastFocusedIndex, rowIndexMap, visibleRowIds]
+    [
+      dragging,
+      getItemRecord,
+      handleQuickDelete,
+      lastFocusedIndex,
+      rowIndexMap,
+      visibleRowIds,
+    ]
   );
 
   const handleBackgroundMouseDown = useCallback(

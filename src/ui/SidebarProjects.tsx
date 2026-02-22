@@ -28,6 +28,8 @@ type SidebarProjectsProps = {
   usersError: string | null;
   selectedUserId: string | null;
   onSelectUser: (userId: string) => void;
+  currentUserName: string;
+  onOpenSettings: () => void;
 };
 
 const SidebarProjects: FC<SidebarProjectsProps> = ({
@@ -42,6 +44,8 @@ const SidebarProjects: FC<SidebarProjectsProps> = ({
   usersError,
   selectedUserId,
   onSelectUser,
+  currentUserName,
+  onOpenSettings,
 }) => {
   const [projects, setProjects] = useState<Project[]>([]);
   const [error, setError] = useState<string | null>(null);
@@ -99,6 +103,22 @@ const SidebarProjects: FC<SidebarProjectsProps> = ({
 
   return (
     <aside className="sidebar">
+      <div className="sidebar-top-controls">
+        <div className="user-chip sidebar-user-chip" title={currentUserName}>
+          <span className="user-chip-icon" aria-hidden="true">
+            👤
+          </span>
+          <span className="user-chip-label">{currentUserName}</span>
+        </div>
+        <AppButton
+          type="button"
+          variant="surface"
+          className="sidebar-settings-button"
+          onClick={onOpenSettings}
+        >
+          Settings
+        </AppButton>
+      </div>
       <div className="sidebar-section">
         <ContextMenu.Root>
           <ContextMenu.Trigger asChild>

@@ -6,6 +6,7 @@ import {
   useRef,
   useState,
   type FC,
+  type MouseEvent as ReactMouseEvent,
 } from "react";
 import { query, mutate } from "../rpc/clientSingleton";
 import type {
@@ -292,7 +293,30 @@ const GanttView: FC<GanttViewProps> = ({
     });
   };
 
-  const handleBarClick = (itemId: string) => {
+  const handleDeleteItem = useCallback(
+    async (itemId: string) => {
+      setError(null);
+      try {
+        await mutate("delete_item", { item_id: itemId });
+        onRefresh();
+      } catch (err) {
+        const message = err instanceof Error ? err.message : "Unknown error";
+        setError(message);
+      }
+    },
+    [onRefresh]
+  );
+
+  const handleBarClick = (event: ReactMouseEvent, itemId: string) => {
+    if (event.altKey && event.shiftKey && !event.ctrlKey && !event.metaKey) {
+      if (itemMap.get(itemId)?.item_type !== "task") {
+        return;
+      }
+      event.preventDefault();
+      event.stopPropagation();
+      void handleDeleteItem(itemId);
+      return;
+    }
     if (dependencyMode) {
       if (!pendingEdge) {
         setPendingEdge(itemId);
@@ -606,7 +630,7 @@ const GanttView: FC<GanttViewProps> = ({
                           left: start,
                           width,
                         }}
-                        onClick={() => handleBarClick(item.id)}
+                        onClick={(event) => handleBarClick(event, item.id)}
                       >
                         <span className="gantt-bar-title">{item.title}</span>
                       </AppButton>
@@ -621,9 +645,26 @@ const GanttView: FC<GanttViewProps> = ({
                         variant="ghost"
                         className="gantt-due-marker"
                         style={{ left: dueX }}
-                        onClick={() => onOpenItem(item.id)}
+                        onClick={(event) => {
+                          if (
+                            event.altKey &&
+                            event.shiftKey &&
+                            !event.ctrlKey &&
+                            !event.metaKey
+                          ) {
+                            if (item.item_type !== "task") {
+                              return;
+                            }
+                            event.preventDefault();
+                            event.stopPropagation();
+                            void handleDeleteItem(item.id);
+                            return;
+                          }
+                          onOpenItem(item.id);
+                        }}
                       >
                         <span className="gantt-due-dot" />
+                        <span className="gantt-due-label">{item.title}</span>
                       </AppButton>
                     ) : null}
                   </div>

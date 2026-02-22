@@ -47,6 +47,9 @@ const DEFAULT_USER: UserLite = {
 
 const App = () => {
   const [projectItems, setProjectItems] = useState<ListItem[]>([]);
+  const [projectTitleById, setProjectTitleById] = useState<Record<string, string>>(
+    () => ({ [UNGROUPED_PROJECT_ID]: UNGROUPED_PROJECT_LABEL })
+  );
   const [selectedProjectId, setSelectedProjectId] = useState<string | null>(
     UNGROUPED_PROJECT_ID
   );
@@ -84,6 +87,24 @@ const App = () => {
     });
     setProjectItems(data.items);
   }, [selectedProjectId]);
+
+  const loadProjectTitleIndex = useCallback(async () => {
+    const data = await query<{ items: ListItem[] }>("listItems", {
+      includeDone: true,
+      includeCanceled: true,
+      orderBy: "due_at",
+      orderDir: "asc",
+    });
+    const next: Record<string, string> = {
+      [UNGROUPED_PROJECT_ID]: UNGROUPED_PROJECT_LABEL,
+    };
+    for (const item of data.items) {
+      if (item.type === "project") {
+        next[item.id] = item.title;
+      }
+    }
+    setProjectTitleById(next);
+  }, []);
 
   const triggerRefresh = useCallback(() => {
     setRefreshToken((value) => value + 1);
@@ -141,6 +162,12 @@ const App = () => {
   }, [loadProjectItems, refreshToken]);
 
   useEffect(() => {
+    loadProjectTitleIndex().catch(() => {
+      // Keep current title cache if this refresh fails.
+    });
+  }, [loadProjectTitleIndex, refreshToken]);
+
+  useEffect(() => {
     void loadUsers();
   }, [loadUsers, refreshToken]);
 
@@ -182,7 +209,7 @@ const App = () => {
     return () => {
       mounted = false;
     };
-  }, [refreshToken]);
+  }, []);
 
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
@@ -237,6 +264,19 @@ const App = () => {
       projectId: selectedProjectId ?? UNGROUPED_PROJECT_ID,
     };
   }, [scope, selectedProjectId, selectedUserId]);
+
+  const activeProjectTitle = useMemo(() => {
+    const projectId =
+      activeScope.kind === "project" ? activeScope.projectId : selectedProjectId;
+    if (!projectId) {
+      return "Select a project";
+    }
+    return (
+      projectTitleById[projectId] ??
+      (projectId === selectedProject?.id ? selectedProject.title : null) ??
+      "Select a project"
+    );
+  }, [activeScope, projectTitleById, selectedProject, selectedProjectId]);
 
   useEffect(() => {
     if (scope) {
@@ -434,9 +474,7 @@ const App = () => {
                 ? "Dashboard"
                 : activeScope.kind === "user"
                   ? currentUser.display_name
-                  : selectedProject
-                    ? selectedProject.title
-                    : "Select a project"}
+                  : activeProjectTitle}
             </div>
           </div>
           {activeScope.kind === "project" && activeView !== "dashboard" ? (

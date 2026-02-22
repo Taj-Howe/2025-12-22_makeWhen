@@ -1,6 +1,11 @@
 :root {
   --radius: 8px;
   --radius-pill: 999px;
+  --control-height: 32px;
+  --control-border-color: var(--color-border);
+  --control-bg: var(--color-panel);
+  --control-bg-hover: var(--color-panel-2);
+  --control-bg-active: color-mix(in srgb, var(--color-accent) 12%, var(--color-panel));
   --color-bg: var(--neutral-1);
   --color-panel: var(--neutral-2);
   --color-panel-2: var(--neutral-3);

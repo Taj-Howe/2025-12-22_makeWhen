@@ -109,7 +109,7 @@ body {
 }
 
 .sidebar-item {
-  background: transparent;
+  background: var(--control-bg);
   color: inherit;
   border: 1px solid var(--color-border);
   border-radius: var(--radius);
@@ -123,7 +123,7 @@ body {
 }
 
 .sidebar-item.is-active {
-  background: var(--color-panel-2);
+  background: var(--control-bg-active);
 }
 
 .icon-button {
@@ -146,6 +146,67 @@ body {
 
 .main-content {
   padding: 0 20px 20px 20px;
+}
+
+.app-control {
+  border-radius: var(--radius) !important;
+  box-shadow: none !important;
+}
+
+.app-button,
+.app-icon-button,
+.settings-nav-button,
+.sidebar-item,
+.user-select-trigger,
+.user-select-option,
+.add-row-button,
+.calendar-toggle-action {
+  min-height: var(--control-height);
+  border: 1px solid var(--control-border-color) !important;
+  background: var(--control-bg) !important;
+  color: var(--color-text) !important;
+  line-height: 1.2;
+  transition: background 120ms ease, border-color 120ms ease, color 120ms ease;
+}
+
+.app-button:hover,
+.app-icon-button:hover,
+.settings-nav-button:hover,
+.sidebar-item:hover,
+.user-select-trigger:hover,
+.user-select-option:hover,
+.add-row-button:hover,
+.calendar-toggle-action:hover {
+  border-color: var(--color-border-hover) !important;
+  background: var(--control-bg-hover) !important;
+}
+
+.app-select-trigger,
+.app-input-control,
+.app-textarea-control {
+  border: 1px solid var(--control-border-color) !important;
+  background: var(--control-bg) !important;
+  color: var(--color-text) !important;
+  box-shadow: none !important;
+}
+
+.app-select-trigger,
+.app-input-control {
+  min-height: var(--control-height);
+}
+
+.app-select-trigger:hover,
+.app-input-control:hover,
+.app-textarea-control:hover {
+  border-color: var(--color-border-hover) !important;
+}
+
+.settings-nav-button.is-active,
+.sidebar-item.is-active,
+.user-select-option.is-active,
+.calendar-toggle-action[aria-pressed="true"] {
+  border-color: var(--color-accent-border) !important;
+  background: var(--control-bg-active) !important;
 }
 
 .view-stack {
@@ -903,11 +964,8 @@ body {
 .user-select-trigger {
   width: 100%;
   text-align: left;
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius);
-  background: var(--color-panel);
-  color: var(--color-text);
-  padding: 8px 10px;
+  height: var(--control-height);
+  padding: 0 10px;
 }
 
 .user-select-popover {
@@ -942,37 +1000,22 @@ body {
 
 .user-select-option {
   text-align: left;
-  border: 1px solid var(--color-border);
+  border: 1px solid var(--control-border-color);
   border-radius: var(--radius);
-  background: transparent;
+  background: var(--control-bg);
   color: var(--color-text);
   padding: 6px 8px;
 }
 
 .user-select-option.is-active {
   border-color: var(--color-accent);
-  background: var(--color-panel-2);
+  background: var(--control-bg-active);
 }
 
 .user-select-empty,
 .user-select-error {
   font-size: 12px;
   opacity: 0.8;
-}
-
-.assignee-pill {
-  width: 100%;
-  text-align: left;
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-pill);
-  background: transparent;
-  color: var(--color-text);
-  padding: 4px 10px;
-  cursor: pointer;
-}
-
-.assignee-pill:hover {
-  border-color: var(--color-border-hover);
 }
 
 .sample-data-panel {
@@ -1134,8 +1177,8 @@ body {
 
 .settings-nav-button {
   appearance: none;
-  border: 1px solid var(--color-border);
-  background: transparent;
+  border: 1px solid var(--control-border-color);
+  background: var(--control-bg);
   color: var(--color-text);
   text-align: left;
   border-radius: var(--radius);
@@ -1148,7 +1191,7 @@ body {
 }
 
 .settings-nav-button.is-active {
-  background: var(--color-panel-2);
+  background: var(--control-bg-active);
   border-color: var(--color-accent-border);
 }
 
@@ -1390,6 +1433,7 @@ body {
   background: var(--color-panel-2);
   padding: 10px;
   display: grid;
+  min-height: 320px;
   gap: 10px;
   align-self: stretch;
 }
@@ -1422,8 +1466,10 @@ body {
 .calendar-task-list {
   display: grid;
   gap: 8px;
+  min-height: 240px;
   max-height: 720px;
   overflow-y: auto;
+  overscroll-behavior: contain;
   padding-right: 2px;
 }
 
@@ -1778,6 +1824,7 @@ body {
   }
 
   .calendar-task-list {
+    min-height: 180px;
     max-height: 220px;
   }
 }
@@ -1973,6 +2020,10 @@ body {
   width: 100%;
 }
 
+.cell-inline-select .rt-SelectTrigger {
+  width: 100%;
+}
+
 .form-row .rt-TextFieldRoot,
 .form-row .rt-SelectTrigger,
 .form-row .rt-TextArea {
@@ -2143,8 +2194,8 @@ body {
   width: 100%;
   text-align: left;
   justify-content: flex-start;
-  background: transparent;
-  border: 1px dashed var(--color-border);
+  background: var(--control-bg);
+  border: 1px solid var(--control-border-color);
   border-radius: var(--radius);
   padding: 8px 10px;
   color: var(--color-muted);

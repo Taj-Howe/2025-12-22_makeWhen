@@ -14,11 +14,24 @@ import {
 import * as RadixThemes from "@radix-ui/themes";
 import { forwardRef, type CSSProperties, type ComponentPropsWithoutRef } from "react";
 
+const mergeClassNames = (...values: Array<string | undefined>) =>
+  values.filter(Boolean).join(" ");
+
 type AppButtonProps = ButtonProps;
-const AppButton = (props: AppButtonProps) => <Button {...props} />;
+const AppButton = ({ className, ...props }: AppButtonProps) => (
+  <Button
+    className={mergeClassNames("app-control", "app-button", className)}
+    {...props}
+  />
+);
 
 type AppIconButtonProps = IconButtonProps;
-const AppIconButton = (props: AppIconButtonProps) => <IconButton {...props} />;
+const AppIconButton = ({ className, ...props }: AppIconButtonProps) => (
+  <IconButton
+    className={mergeClassNames("app-control", "app-icon-button", className)}
+    {...props}
+  />
+);
 
 type AppInputProps = ComponentPropsWithoutRef<typeof RadixThemes.TextField.Root> & {
   rootClassName?: string;
@@ -28,7 +41,12 @@ const AppInput = forwardRef<HTMLInputElement, AppInputProps>(
   ({ rootClassName, rootStyle, className, style, ...props }, ref) => (
     <RadixThemes.TextField.Root
       ref={ref}
-      className={[className, rootClassName].filter(Boolean).join(" ")}
+      className={mergeClassNames(
+        "app-control",
+        "app-input-control",
+        className,
+        rootClassName
+      )}
       style={{ ...(style ?? {}), ...(rootStyle ?? {}) }}
       {...props}
     />
@@ -37,7 +55,12 @@ const AppInput = forwardRef<HTMLInputElement, AppInputProps>(
 AppInput.displayName = "AppInput";
 
 type AppTextAreaProps = TextAreaProps;
-const AppTextArea = (props: AppTextAreaProps) => <TextArea {...props} />;
+const AppTextArea = ({ className, ...props }: AppTextAreaProps) => (
+  <TextArea
+    className={mergeClassNames("app-control", "app-textarea-control", className)}
+    {...props}
+  />
+);
 
 type AppSelectOption = {
   value: string;
@@ -75,19 +98,22 @@ const AppSelect = ({
 
   return (
     <Select.Root value={safeValue} onValueChange={handleChange} {...props}>
-    <Select.Trigger placeholder={placeholder} />
-    <Select.Content>
-      {safeOptions.map((option) => (
-        <Select.Item
-          key={option.value}
-          value={option.value}
-          disabled={option.disabled}
-        >
-          {option.label}
-        </Select.Item>
-      ))}
-    </Select.Content>
-  </Select.Root>
+      <Select.Trigger
+        className="app-control app-select-trigger"
+        placeholder={placeholder}
+      />
+      <Select.Content>
+        {safeOptions.map((option) => (
+          <Select.Item
+            key={option.value}
+            value={option.value}
+            disabled={option.disabled}
+          >
+            {option.label}
+          </Select.Item>
+        ))}
+      </Select.Content>
+    </Select.Root>
   );
 };
 

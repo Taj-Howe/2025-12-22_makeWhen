@@ -1190,6 +1190,12 @@ const CalendarView: FC<CalendarViewProps> = ({
         void handleDeleteItem(block.item_id);
         return;
       }
+      if (event.altKey && !event.shiftKey && !event.ctrlKey && !event.metaKey) {
+        event.preventDefault();
+        event.stopPropagation();
+        void handleDeleteBlock(block.block_id);
+        return;
+      }
       if (event.ctrlKey || event.metaKey) {
         return;
       }
@@ -1215,6 +1221,7 @@ const CalendarView: FC<CalendarViewProps> = ({
       calendarItemMap,
       dragBlock,
       dueDrag,
+      handleDeleteBlock,
       handleDeleteItem,
       onOpenItem,
       projectItemMap,

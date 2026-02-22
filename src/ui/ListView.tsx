@@ -61,6 +61,15 @@ type ListViewItem = ListItem & {
 };
 
 const listViewCache = new Map<string, ListViewItem[]>();
+const STATUS_OPTIONS = [
+  { value: "backlog", label: "backlog" },
+  { value: "ready", label: "ready" },
+  { value: "in_progress", label: "in_progress" },
+  { value: "blocked", label: "blocked" },
+  { value: "review", label: "review" },
+  { value: "done", label: "done" },
+  { value: "canceled", label: "canceled" },
+] as const;
 
 type Column = {
   key: string;
@@ -115,9 +124,6 @@ const ListView: FC<ListViewProps> = ({
   } | null>(null);
   const [editValue, setEditValue] = useState("");
   const [editingBlockId, setEditingBlockId] = useState<string | null>(null);
-  const [editingAssigneeId, setEditingAssigneeId] = useState<string | null>(
-    null
-  );
   const [projects, setProjects] = useState<Array<{ id: string; title: string }>>(
     []
   );
@@ -622,7 +628,20 @@ const ListView: FC<ListViewProps> = ({
       setError(null);
       try {
         await setItemAssignee(itemId, userId);
-        setEditingAssigneeId(null);
+        onRefresh();
+      } catch (err) {
+        const message = err instanceof Error ? err.message : "Unknown error";
+        setError(message);
+      }
+    },
+    [onRefresh]
+  );
+
+  const handleStatusChange = useCallback(
+    async (itemId: string, status: string) => {
+      setError(null);
+      try {
+        await setStatus(itemId, status);
         onRefresh();
       } catch (err) {
         const message = err instanceof Error ? err.message : "Unknown error";
@@ -901,32 +920,11 @@ const ListView: FC<ListViewProps> = ({
         render: (item: ListViewItem) => {
           const currentId =
             item.assignee_id ?? item.assignees[0]?.id ?? null;
-          const currentName =
-            item.assignee_name ??
-            item.assignees[0]?.id ??
-            "unassigned";
-          if (editingAssigneeId === item.id) {
-            return (
-              <UserSelect
-                value={currentId}
-                onChange={(value) => handleAssigneeChange(item.id, value)}
-                onClose={() => setEditingAssigneeId(null)}
-              />
-            );
-          }
           return (
-            <AppButton
-              type="button"
-              size="1"
-              variant="ghost"
-              className="assignee-pill"
-              onClick={(event) => {
-                event.stopPropagation();
-                setEditingAssigneeId(item.id);
-              }}
-            >
-              {currentName}
-            </AppButton>
+            <UserSelect
+              value={currentId}
+              onChange={(value) => handleAssigneeChange(item.id, value)}
+            />
           );
         },
       },
@@ -1125,7 +1123,6 @@ const ListView: FC<ListViewProps> = ({
       formatDependencyList,
       formatDependencySummary,
       formatSlackMinutes,
-      editingAssigneeId,
       handleAssigneeChange,
       handleArchive,
       handleDeletePermanent,
@@ -1842,27 +1839,23 @@ const ListView: FC<ListViewProps> = ({
       );
     }
     if (column.key === "status") {
-      return renderEditableCell(
-        item,
-        "status",
-        column.render(item, 0, null),
-        <AppSelect
-          value={editValue}
-          onChange={(value) => {
-            setEditValue(value);
-            void commitEdit(value);
-          }}
-          options={[
-            { value: "backlog", label: "backlog" },
-            { value: "ready", label: "ready" },
-            { value: "in_progress", label: "in_progress" },
-            { value: "blocked", label: "blocked" },
-            { value: "review", label: "review" },
-            { value: "done", label: "done" },
-            { value: "canceled", label: "canceled" },
-          ]}
-        />,
-        item.status ?? ""
+      const fallback = item.status || "ready";
+      const statusValue = STATUS_OPTIONS.some(
+        (option) => option.value === fallback
+      )
+        ? fallback
+        : "ready";
+      return (
+        <div className="cell-inline-select">
+          <AppSelect
+            value={statusValue}
+            onChange={(value) => void handleStatusChange(item.id, value)}
+            options={STATUS_OPTIONS.map((option) => ({
+              value: option.value,
+              label: option.label,
+            }))}
+          />
+        </div>
       );
     }
     if (column.key === "priority") {

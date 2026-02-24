@@ -9,12 +9,21 @@ import titleSearchSql from "./migrations/0006_title_search.sql?raw";
 import dependenciesTypeLagSql from "./migrations/0007_dependencies_type_lag.sql?raw";
 import completedAtSql from "./migrations/0008_completed_at.sql?raw";
 import archivedAtSql from "./migrations/0010_archived_at.sql?raw";
+import teamPermissionsFoundationSql from "./migrations/0011_team_permissions_foundation.sql?raw";
+import sessionFoundationSql from "./migrations/0012_session_foundation.sql?raw";
+import opOutboxSql from "./migrations/0013_op_outbox.sql?raw";
+import mockRemoteSql from "./migrations/0014_mock_remote.sql?raw";
 import {
   computeSlackMinutes,
   deriveEndAtFromDuration,
   evaluateDependencyStatus,
 } from "./scheduleMath";
 import { computeRollupTotals } from "./rollup";
+import { runSyncOnce } from "../sync/syncEngine";
+import type { OpEnvelope } from "../rpc/types";
+import type { PullRequest, PullResponse, PushRequest, PushResponse } from "../sync/syncTypes";
+import { SYNC_MODE, SYNC_REMOTE_BASE_URL } from "../sync/syncConfig";
+import { createSyncTransport } from "../sync/syncTransport";
 
 const ctx = self as unknown as {
   addEventListener: (
@@ -27,6 +36,8 @@ const ctx = self as unknown as {
 const DB_FILENAME = "makewhen.sqlite3";
 const VFS_NAME = "opfs-sahpool";
 const UNGROUPED_PROJECT_ID = "__ungrouped__";
+const DEFAULT_TEAM_ID = "team_default";
+const DEFAULT_TEAM_NAME = "My Team";
 
 type DbInfoPayload =
   | {
@@ -54,12 +65,25 @@ type MutateEnvelope = {
   args?: unknown;
 };
 
+type PermissionErrorCode =
+  | "NOT_SIGNED_IN"
+  | "NOT_TEAM_MEMBER"
+  | "INSUFFICIENT_ROLE"
+  | "CROSS_TEAM_ACCESS";
+
+type RpcErrorPayload = { code: string; message: string };
+
 type MutateResult = {
   ok: boolean;
   result?: unknown;
-  error?: string | { code: string; message: string };
+  error?: string | RpcErrorPayload;
   warnings?: string[];
   invalidate?: string[];
+};
+
+type HandleMutateOptions = {
+  skipOutbox?: boolean;
+  skipAudit?: boolean;
 };
 
 type QueryEnvelope = {
@@ -70,7 +94,7 @@ type QueryEnvelope = {
 type QueryResult = {
   ok: boolean;
   result?: unknown;
-  error?: string;
+  error?: string | RpcErrorPayload;
 };
 
 const dbState: DbState = {
@@ -119,6 +143,22 @@ const migrations = [
   {
     version: 9,
     sql: archivedAtSql,
+  },
+  {
+    version: 10,
+    sql: teamPermissionsFoundationSql,
+  },
+  {
+    version: 11,
+    sql: sessionFoundationSql,
+  },
+  {
+    version: 12,
+    sql: opOutboxSql,
+  },
+  {
+    version: 13,
+    sql: mockRemoteSql,
   },
 ];
 
@@ -595,19 +635,20 @@ const getBlockedStatusMap = (db: any, ids: string[]) => {
   if (ids.length === 0) {
     return map;
   }
+  const currentTeamId = getCurrentTeamId(db);
   const placeholders = buildPlaceholders(ids.length);
   const rows = db.exec({
     sql: `SELECT id, status,
       EXISTS(SELECT 1 FROM blockers b WHERE b.item_id = items.id AND b.cleared_at IS NULL) AS has_blocker,
       EXISTS(
         SELECT 1 FROM dependencies d
-        LEFT JOIN items di ON di.id = d.depends_on_id
+        LEFT JOIN items di ON di.id = d.depends_on_id AND di.team_id = items.team_id
         WHERE d.item_id = items.id AND (di.id IS NULL OR di.status != 'done')
       ) AS has_unmet_dep
-      FROM items WHERE id IN (${placeholders});`,
+      FROM items WHERE id IN (${placeholders}) AND team_id = ?;`,
     rowMode: "array",
     returnValue: "resultRows",
-    bind: ids,
+    bind: [...ids, currentTeamId],
   }) as Array<[string, string, number, number]>;
   for (const row of rows) {
     const status = row[1];
@@ -674,12 +715,17 @@ const getDependenciesMap = (db: any, ids: string[]) => {
   if (ids.length === 0) {
     return map;
   }
+  const currentTeamId = getCurrentTeamId(db);
   const placeholders = buildPlaceholders(ids.length);
   const rows = db.exec({
-    sql: `SELECT item_id, depends_on_id FROM dependencies WHERE item_id IN (${placeholders});`,
+    sql: `SELECT d.item_id, d.depends_on_id
+      FROM dependencies d
+      JOIN items i ON i.id = d.item_id AND i.team_id = ?
+      JOIN items di ON di.id = d.depends_on_id AND di.team_id = i.team_id
+      WHERE d.item_id IN (${placeholders});`,
     rowMode: "array",
     returnValue: "resultRows",
-    bind: ids,
+    bind: [currentTeamId, ...ids],
   }) as Array<[string, string]>;
   for (const row of rows) {
     const list = map.get(row[0]) ?? [];
@@ -694,14 +740,18 @@ const getDependentsCountMap = (db: any, ids: string[]) => {
   if (ids.length === 0) {
     return map;
   }
+  const currentTeamId = getCurrentTeamId(db);
   const placeholders = buildPlaceholders(ids.length);
   const rows = db.exec({
-    sql: `SELECT depends_on_id, COUNT(*) FROM dependencies
-      WHERE depends_on_id IN (${placeholders})
-      GROUP BY depends_on_id;`,
+    sql: `SELECT d.depends_on_id, COUNT(*) FROM dependencies d
+      JOIN items si ON si.id = d.item_id
+      JOIN items di ON di.id = d.depends_on_id AND di.team_id = si.team_id
+      WHERE d.depends_on_id IN (${placeholders})
+        AND si.team_id = ?
+      GROUP BY d.depends_on_id;`,
     rowMode: "array",
     returnValue: "resultRows",
-    bind: ids,
+    bind: [...ids, currentTeamId],
   }) as Array<[string, number]>;
   for (const row of rows) {
     map.set(row[0], Number(row[1]));
@@ -734,16 +784,18 @@ const getUnmetDependencyMap = (db: any, ids: string[]) => {
   if (ids.length === 0) {
     return map;
   }
+  const currentTeamId = getCurrentTeamId(db);
   const placeholders = buildPlaceholders(ids.length);
   const rows = db.exec({
     sql: `SELECT d.item_id, d.depends_on_id
       FROM dependencies d
-      LEFT JOIN items di ON di.id = d.depends_on_id
+      JOIN items si ON si.id = d.item_id AND si.team_id = ?
+      LEFT JOIN items di ON di.id = d.depends_on_id AND di.team_id = si.team_id
       WHERE d.item_id IN (${placeholders})
         AND (di.id IS NULL OR di.status != 'done');`,
     rowMode: "array",
     returnValue: "resultRows",
-    bind: ids,
+    bind: [currentTeamId, ...ids],
   }) as Array<[string, string]>;
   for (const row of rows) {
     const entry = map.get(row[0]) ?? { count: 0, ids: [] };
@@ -858,80 +910,87 @@ const resolveScopeArgs = (args: Record<string, unknown>) => {
 const getScopeItemIds = (
   db: any,
   scopeProjectId: string | null,
-  scopeUserId: string | null
+  scopeUserId: string | null,
+  teamIdArg?: string | null
 ) => {
+  const teamId = teamIdArg ?? getCurrentTeamId(db);
   if (scopeUserId) {
     const rows = db.exec({
       sql: `SELECT i.id
         FROM items i
         JOIN item_assignees a ON a.item_id = i.id
         WHERE a.assignee_id = ?
+          AND i.team_id = ?
           AND i.archived_at IS NULL;`,
       rowMode: "array",
       returnValue: "resultRows",
-      bind: [scopeUserId],
+      bind: [scopeUserId, teamId],
     }) as Array<[string]>;
     return rows.map((row) => row[0]);
   }
   if (scopeProjectId === UNGROUPED_PROJECT_ID) {
     const rows = db.exec({
       sql: `WITH RECURSIVE tree AS (
-        SELECT * FROM items WHERE parent_id IS NULL AND type = 'task'
+        SELECT * FROM items WHERE parent_id IS NULL AND type = 'task' AND team_id = ?
         UNION ALL
-        SELECT i.* FROM items i JOIN tree t ON i.parent_id = t.id
+        SELECT i.* FROM items i JOIN tree t ON i.parent_id = t.id WHERE i.team_id = ?
       )
       SELECT id FROM tree WHERE archived_at IS NULL;`,
       rowMode: "array",
       returnValue: "resultRows",
+      bind: [teamId, teamId],
     }) as Array<[string]>;
     return rows.map((row) => row[0]);
   }
   if (scopeProjectId) {
     const rows = db.exec({
       sql: `WITH RECURSIVE tree AS (
-        SELECT * FROM items WHERE id = ?
+        SELECT * FROM items WHERE id = ? AND team_id = ?
         UNION ALL
-        SELECT i.* FROM items i JOIN tree t ON i.parent_id = t.id
+        SELECT i.* FROM items i JOIN tree t ON i.parent_id = t.id WHERE i.team_id = ?
       )
       SELECT id FROM tree WHERE archived_at IS NULL;`,
       rowMode: "array",
       returnValue: "resultRows",
-      bind: [scopeProjectId],
+      bind: [scopeProjectId, teamId, teamId],
     }) as Array<[string]>;
     return rows.map((row) => row[0]);
   }
   const rows = db.exec({
-    sql: `SELECT id FROM items WHERE archived_at IS NULL;`,
+    sql: `SELECT id FROM items WHERE archived_at IS NULL AND team_id = ?;`,
     rowMode: "array",
     returnValue: "resultRows",
+    bind: [teamId],
   }) as Array<[string]>;
   return rows.map((row) => row[0]);
 };
 
-const getSubtreeIds = (db: any, seedIds: string[]) => {
+const getSubtreeIds = (db: any, seedIds: string[], teamIdArg?: string | null) => {
   if (seedIds.length === 0) {
     return [];
   }
+  const teamId = teamIdArg ?? getCurrentTeamId(db);
   const placeholders = buildPlaceholders(seedIds.length);
   const rows = db.exec({
     sql: `WITH RECURSIVE subtree AS (
-      SELECT id FROM items WHERE id IN (${placeholders})
+      SELECT id FROM items WHERE id IN (${placeholders}) AND team_id = ?
       UNION ALL
-      SELECT i.id FROM items i JOIN subtree s ON i.parent_id = s.id
+      SELECT i.id FROM items i JOIN subtree s ON i.parent_id = s.id WHERE i.team_id = ?
     )
     SELECT id FROM subtree;`,
     rowMode: "array",
     returnValue: "resultRows",
-    bind: seedIds,
+    bind: [...seedIds, teamId, teamId],
   }) as Array<[string]>;
   return Array.from(new Set(rows.map((row) => row[0])));
 };
 
-const getHierarchyRows = (db: any) =>
+const getHierarchyRows = (db: any, teamIdArg?: string | null) =>
   db.exec({
-    sql: "SELECT id, type, parent_id, title FROM items;",
+    sql: "SELECT id, type, parent_id, title FROM items WHERE team_id = ?;",
     rowMode: "array",
     returnValue: "resultRows",
+    bind: [teamIdArg ?? getCurrentTeamId(db)],
   }) as Array<[string, string, string | null, string]>;
 
 const computeSequenceRank = (data: {
@@ -976,12 +1035,95 @@ const getSettings = (db: any) => {
 
 const USERS_SETTING_KEY = "users_registry";
 const CURRENT_USER_SETTING_KEY = "current_user_id";
+const CURRENT_TEAM_SETTING_KEY = "current_team_id";
+const SESSION_REQUIRED_ERROR =
+  "No active session. Use auth.session.set to activate a session.";
+
+type TeamRole = "owner" | "editor" | "viewer";
+
+const roleRank: Record<TeamRole, number> = {
+  viewer: 1,
+  editor: 2,
+  owner: 3,
+};
+
+class WorkerRpcError extends Error {
+  code: PermissionErrorCode;
+
+  constructor(code: PermissionErrorCode, message: string) {
+    super(message);
+    this.code = code;
+    this.name = "WorkerRpcError";
+  }
+}
+
+const isRpcErrorPayload = (value: unknown): value is RpcErrorPayload => {
+  if (!value || typeof value !== "object") {
+    return false;
+  }
+  const rec = value as Record<string, unknown>;
+  return typeof rec.code === "string" && typeof rec.message === "string";
+};
+
+const asRpcErrorPayload = (err: unknown): RpcErrorPayload | null => {
+  if (err instanceof WorkerRpcError) {
+    return { code: err.code, message: err.message };
+  }
+  if (isRpcErrorPayload(err)) {
+    return err;
+  }
+  return null;
+};
+
+const throwRpcError = (code: PermissionErrorCode, message: string): never => {
+  throw new WorkerRpcError(code, message);
+};
+
+const normalizeTeamRole = (value: unknown): TeamRole | null => {
+  if (typeof value !== "string") {
+    return null;
+  }
+  const role = value.trim().toLowerCase();
+  if (role === "owner") {
+    return "owner";
+  }
+  if (role === "editor" || role === "member") {
+    return "editor";
+  }
+  if (role === "viewer") {
+    return "viewer";
+  }
+  return null;
+};
 
 type UserRecord = {
   user_id: string;
   display_name: string;
   avatar_url: string | null;
 };
+
+type SessionRecord = {
+  session_id: string;
+  user_id: string;
+  team_id: string;
+};
+
+type OutboxStatus = "queued" | "sending" | "acked" | "failed";
+type OutboxEnvelope = {
+  op_id: string;
+  team_id: string;
+  actor_user_id: string;
+  created_at: number;
+  op_name: string;
+  payload: unknown;
+};
+
+// Local/session lifecycle mutations are intentionally excluded from team sync.
+const OUTBOX_SKIPPED_OPS = new Set<string>([
+  "auth.session.set",
+  "auth.session.bootstrap",
+  "auth.logout",
+]);
 
 const normalizeUserList = (value: unknown): UserRecord[] => {
   if (!Array.isArray(value)) {
@@ -1024,7 +1166,418 @@ const writeUserRegistry = (db: any, users: UserRecord[]) => {
   );
 };
 
-const getUserMap = (db: any) => {
+const persistCurrentTeamId = (db: any, teamId: string) => {
+  db.exec(
+    "INSERT INTO settings (key, value_json) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value_json = excluded.value_json;",
+    {
+      bind: [CURRENT_TEAM_SETTING_KEY, JSON.stringify(teamId)],
+    }
+  );
+};
+
+const persistCurrentUserId = (db: any, userId: string) => {
+  db.exec(
+    "INSERT INTO settings (key, value_json) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value_json = excluded.value_json;",
+    {
+      bind: [CURRENT_USER_SETTING_KEY, JSON.stringify(userId)],
+    }
+  );
+};
+
+const upsertTeamRow = (db: any, teamId: string, name: string) => {
+  const now = Date.now();
+  db.exec(
+    "INSERT INTO teams (team_id, name, created_at, updated_at) VALUES (?, ?, ?, ?) ON CONFLICT(team_id) DO UPDATE SET updated_at = excluded.updated_at;",
+    {
+      bind: [teamId, name, now, now],
+    }
+  );
+};
+
+const upsertDefaultTeam = (db: any) => {
+  upsertTeamRow(db, DEFAULT_TEAM_ID, DEFAULT_TEAM_NAME);
+};
+
+const upsertUserRow = (db: any, user: UserRecord) => {
+  const now = Date.now();
+  db.exec(
+    "INSERT INTO users (user_id, display_name, avatar_url, created_at, updated_at) VALUES (?, ?, ?, ?, ?) ON CONFLICT(user_id) DO UPDATE SET display_name = excluded.display_name, avatar_url = excluded.avatar_url, updated_at = excluded.updated_at;",
+    {
+      bind: [user.user_id, user.display_name, user.avatar_url, now, now],
+    }
+  );
+};
+
+const upsertTeamMembership = (
+  db: any,
+  userId: string,
+  role: TeamRole | "member" = "editor",
+  teamIdArg: string = DEFAULT_TEAM_ID
+) => {
+  const normalizedRole = normalizeTeamRole(role) ?? "editor";
+  const now = Date.now();
+  db.exec(
+    "INSERT INTO team_members (team_id, user_id, role, created_at) VALUES (?, ?, ?, ?) ON CONFLICT(team_id, user_id) DO UPDATE SET role = CASE WHEN team_members.role = 'owner' THEN 'owner' ELSE excluded.role END;",
+    {
+      bind: [teamIdArg, userId, normalizedRole, now],
+    }
+  );
+};
+
+const ensureDefaultTeamMembershipFromRegistry = (db: any) => {
+  upsertDefaultTeam(db);
+  const settings = getSettings(db);
+  const users = normalizeUserList(settings.get(USERS_SETTING_KEY));
+  const currentUserId =
+    typeof settings.get(CURRENT_USER_SETTING_KEY) === "string"
+      ? (settings.get(CURRENT_USER_SETTING_KEY) as string)
+      : null;
+  for (const user of users) {
+    upsertUserRow(db, user);
+    const role: TeamRole =
+      currentUserId && currentUserId === user.user_id ? "owner" : "editor";
+    upsertTeamMembership(db, user.user_id, role);
+  }
+  if (typeof settings.get(CURRENT_TEAM_SETTING_KEY) !== "string") {
+    persistCurrentTeamId(db, DEFAULT_TEAM_ID);
+  }
+};
+
+const getActiveSession = (dbArg?: any): SessionRecord | null => {
+  const db = dbArg ?? dbHandle;
+  if (!db) {
+    return null;
+  }
+  const rows = db.exec({
+    sql: `SELECT session_id, user_id, team_id
+      FROM sessions
+      WHERE is_active = 1
+      ORDER BY updated_at DESC, created_at DESC
+      LIMIT 1;`,
+    rowMode: "array",
+    returnValue: "resultRows",
+  }) as Array<[string, string, string]>;
+  if (rows.length === 0) {
+    return null;
+  }
+  return {
+    session_id: rows[0][0],
+    user_id: rows[0][1],
+    team_id: rows[0][2],
+  };
+};
+
+const getTeamMemberRole = (
+  userId: string,
+  teamId: string,
+  dbArg?: any
+): TeamRole | null => {
+  const db = dbArg ?? dbHandle;
+  if (!db) {
+    return null;
+  }
+  const rows = db.exec({
+    sql: "SELECT role FROM team_members WHERE user_id = ? AND team_id = ? LIMIT 1;",
+    rowMode: "array",
+    returnValue: "resultRows",
+    bind: [userId, teamId],
+  }) as Array<[string]>;
+  if (rows.length === 0) {
+    return null;
+  }
+  return normalizeTeamRole(rows[0][0]);
+};
+
+const requireTeamMember = (
+  userId: string,
+  teamId: string,
+  dbArg?: any
+): TeamRole => {
+  const role = getTeamMemberRole(userId, teamId, dbArg);
+  if (!role) {
+    throwRpcError(
+      "NOT_TEAM_MEMBER",
+      "Current user is not a member of the active team."
+    );
+  }
+  return role as TeamRole;
+};
+
+const requireRoleAtLeast = (
+  actualRole: TeamRole,
+  requiredRole: TeamRole
+): TeamRole => {
+  if (roleRank[actualRole] < roleRank[requiredRole]) {
+    throwRpcError(
+      "INSUFFICIENT_ROLE",
+      `This action requires ${requiredRole} role or higher.`
+    );
+  }
+  return actualRole;
+};
+
+const requireCanReadTeam = (
+  session: SessionRecord,
+  teamId: string,
+  dbArg?: any
+): TeamRole => {
+  if (session.team_id !== teamId) {
+    throwRpcError(
+      "CROSS_TEAM_ACCESS",
+      "Requested team is outside the active session scope."
+    );
+  }
+  return requireTeamMember(session.user_id, teamId, dbArg);
+};
+
+const requireCanWriteTeam = (
+  session: SessionRecord,
+  teamId: string,
+  dbArg?: any
+): TeamRole => {
+  const role = requireCanReadTeam(session, teamId, dbArg);
+  return requireRoleAtLeast(role, "editor");
+};
+
+const requireSession = (dbArg?: any): SessionRecord => {
+  const session = getActiveSession(dbArg);
+  if (!session) {
+    throwRpcError("NOT_SIGNED_IN", SESSION_REQUIRED_ERROR);
+  }
+  return session as SessionRecord;
+};
+
+const setActiveSession = (
+  db: any,
+  userId: string,
+  teamId: string
+): SessionRecord => {
+  const userRows = db.exec({
+    sql: "SELECT 1 FROM users WHERE user_id = ? LIMIT 1;",
+    rowMode: "array",
+    returnValue: "resultRows",
+    bind: [userId],
+  }) as Array<[number]>;
+  if (userRows.length === 0) {
+    throw new Error("user_id not found");
+  }
+  const teamRows = db.exec({
+    sql: "SELECT 1 FROM teams WHERE team_id = ? LIMIT 1;",
+    rowMode: "array",
+    returnValue: "resultRows",
+    bind: [teamId],
+  }) as Array<[number]>;
+  if (teamRows.length === 0) {
+    throw new Error("team_id not found");
+  }
+  requireTeamMember(userId, teamId, db);
+
+  const now = Date.now();
+  db.exec("UPDATE sessions SET is_active = 0, updated_at = ? WHERE is_active = 1;", {
+    bind: [now],
+  });
+
+  const existingRows = db.exec({
+    sql: "SELECT session_id FROM sessions WHERE user_id = ? AND team_id = ? ORDER BY updated_at DESC LIMIT 1;",
+    rowMode: "array",
+    returnValue: "resultRows",
+    bind: [userId, teamId],
+  }) as Array<[string]>;
+
+  const sessionId = existingRows[0]?.[0] ?? crypto.randomUUID();
+  if (existingRows.length > 0) {
+    db.exec(
+      "UPDATE sessions SET is_active = 1, updated_at = ? WHERE session_id = ?;",
+      {
+        bind: [now, sessionId],
+      }
+    );
+  } else {
+    db.exec(
+      "INSERT INTO sessions (session_id, user_id, team_id, created_at, updated_at, is_active) VALUES (?, ?, ?, ?, ?, 1);",
+      {
+        bind: [sessionId, userId, teamId, now, now],
+      }
+    );
+  }
+
+  persistCurrentUserId(db, userId);
+  persistCurrentTeamId(db, teamId);
+
+  return {
+    session_id: sessionId,
+    user_id: userId,
+    team_id: teamId,
+  };
+};
+
+const ensureBootstrapSession = (db: any) => {
+  const activeRows = db.exec({
+    sql: `SELECT session_id, user_id, team_id
+      FROM sessions
+      WHERE is_active = 1
+      ORDER BY updated_at DESC, created_at DESC;`,
+    rowMode: "array",
+    returnValue: "resultRows",
+  }) as Array<[string, string, string]>;
+  if (activeRows.length > 0) {
+    const [sessionId, userId, teamId] = activeRows[0];
+    if (activeRows.length > 1) {
+      db.exec(
+        "UPDATE sessions SET is_active = 0, updated_at = ? WHERE is_active = 1 AND session_id != ?;",
+        {
+          bind: [Date.now(), sessionId],
+        }
+      );
+    }
+    persistCurrentUserId(db, userId);
+    persistCurrentTeamId(db, teamId);
+    return {
+      session_id: sessionId,
+      user_id: userId,
+      team_id: teamId,
+    };
+  }
+
+  upsertDefaultTeam(db);
+  ensureDefaultTeamMembershipFromRegistry(db);
+
+  const settings = getSettings(db);
+  const registry = normalizeUserList(settings.get(USERS_SETTING_KEY));
+  const currentUserSetting =
+    typeof settings.get(CURRENT_USER_SETTING_KEY) === "string"
+      ? (settings.get(CURRENT_USER_SETTING_KEY) as string)
+      : null;
+  const currentTeamSetting =
+    typeof settings.get(CURRENT_TEAM_SETTING_KEY) === "string"
+      ? (settings.get(CURRENT_TEAM_SETTING_KEY) as string)
+      : null;
+
+  let teamId = currentTeamSetting ?? DEFAULT_TEAM_ID;
+  const selectedTeamRows = db.exec({
+    sql: "SELECT 1 FROM teams WHERE team_id = ? LIMIT 1;",
+    rowMode: "array",
+    returnValue: "resultRows",
+    bind: [teamId],
+  }) as Array<[number]>;
+  if (selectedTeamRows.length === 0) {
+    teamId = DEFAULT_TEAM_ID;
+  }
+
+  let userId: string | null = currentUserSetting;
+  if (userId) {
+    const userFromRegistry = registry.find((entry) => entry.user_id === userId);
+    if (userFromRegistry) {
+      upsertUserRow(db, userFromRegistry);
+    }
+    const existingUserRows = db.exec({
+      sql: "SELECT 1 FROM users WHERE user_id = ? LIMIT 1;",
+      rowMode: "array",
+      returnValue: "resultRows",
+      bind: [userId],
+    }) as Array<[number]>;
+    if (existingUserRows.length === 0) {
+      userId = null;
+    }
+  }
+
+  if (!userId) {
+    const existingUsers = db.exec({
+      sql: "SELECT user_id FROM users ORDER BY created_at ASC, lower(display_name) ASC LIMIT 1;",
+      rowMode: "array",
+      returnValue: "resultRows",
+    }) as Array<[string]>;
+    userId = existingUsers[0]?.[0] ?? null;
+  }
+
+  if (!userId && registry.length > 0) {
+    upsertUserRow(db, registry[0]);
+    userId = registry[0].user_id;
+  }
+
+  if (!userId) {
+    const localUser: UserRecord = {
+      user_id: "user_local",
+      display_name: "Local User",
+      avatar_url: null,
+    };
+    upsertUserRow(db, localUser);
+    userId = localUser.user_id;
+  }
+
+  upsertTeamMembership(db, userId, "owner", teamId);
+  return setActiveSession(db, userId, teamId);
+};
+
+const getCurrentTeamId = (db: any) => requireSession(db).team_id;
+
+const getItemTeamId = (db: any, itemId: string) => {
+  const rows = db.exec({
+    sql: "SELECT team_id FROM items WHERE id = ? LIMIT 1;",
+    rowMode: "array",
+    returnValue: "resultRows",
+    bind: [itemId],
+  }) as Array<[string | null]>;
+  if (rows.length === 0) {
+    return null;
+  }
+  return rows[0][0] ?? DEFAULT_TEAM_ID;
+};
+
+const ensureItemInTeam = (db: any, itemId: string, teamId: string) => {
+  const itemTeamId = getItemTeamId(db, itemId);
+  if (!itemTeamId) {
+    throw new Error("item not found");
+  }
+  if (itemTeamId !== teamId) {
+    throwRpcError(
+      "CROSS_TEAM_ACCESS",
+      "Item is outside the active team scope."
+    );
+  }
+};
+
+type TeamMemberRecord = {
+  user_id: string;
+  display_name: string;
+  avatar_url: string | null;
+  role: TeamRole;
+};
+
+const readTeamMembers = (db: any, teamId: string): TeamMemberRecord[] => {
+  const rows = db.exec({
+    sql: `SELECT u.user_id, u.display_name, u.avatar_url, tm.role
+          FROM team_members tm
+          JOIN users u ON u.user_id = tm.user_id
+          WHERE tm.team_id = ?
+          ORDER BY CASE tm.role WHEN 'owner' THEN 0 ELSE 1 END, lower(u.display_name) ASC;`,
+    bind: [teamId],
+    rowMode: "array",
+    returnValue: "resultRows",
+  }) as Array<[string, string, string | null, string]>;
+  return rows.map((row) => ({
+    user_id: row[0],
+    display_name: row[1],
+    avatar_url: row[2] ?? null,
+    role: normalizeTeamRole(row[3]) ?? "viewer",
+  }));
+};
+
+const getUserMap = (db: any, teamIdArg?: string | null) => {
+  const teamId = teamIdArg ?? getCurrentTeamId(db);
+  const rows = db.exec({
+    sql: `SELECT u.user_id, u.display_name
+      FROM team_members tm
+      JOIN users u ON u.user_id = tm.user_id
+      WHERE tm.team_id = ?
+      ORDER BY lower(u.display_name) ASC;`,
+    rowMode: "array",
+    returnValue: "resultRows",
+    bind: [teamId],
+  }) as Array<[string, string]>;
+  if (rows.length > 0) {
+    return new Map(rows.map((row) => [row[0], row[1]]));
+  }
   const registry = readUserRegistry(db);
   return new Map(registry.map((user) => [user.user_id, user.display_name]));
 };
@@ -1036,11 +1589,13 @@ const getUserDisplayName = (userId: string, nameMap: Map<string, string>) => {
   return nameMap.get(userId) ?? `User ${userId.slice(0, 6)}`;
 };
 
-const exportData = (db: any) => {
+const exportData = (db: any, teamIdArg?: string | null) => {
+  const teamId = teamIdArg ?? getCurrentTeamId(db);
   const itemsRows = db.exec({
-    sql: "SELECT id, type, title, parent_id, status, priority, due_at, estimate_mode, estimate_minutes, health, health_mode, notes, created_at, updated_at, archived_at FROM items;",
+    sql: "SELECT id, type, title, parent_id, status, priority, due_at, estimate_mode, estimate_minutes, health, health_mode, notes, created_at, updated_at, archived_at FROM items WHERE team_id = ?;",
     rowMode: "array",
     returnValue: "resultRows",
+    bind: [teamId],
   }) as Array<
     [
       string,
@@ -1062,45 +1617,73 @@ const exportData = (db: any) => {
   >;
 
   const dependencyRows = db.exec({
-    sql: "SELECT item_id, depends_on_id, type, lag_minutes FROM dependencies;",
+    sql: `SELECT d.item_id, d.depends_on_id, d.type, d.lag_minutes
+      FROM dependencies d
+      JOIN items si ON si.id = d.item_id AND si.team_id = ?
+      JOIN items di ON di.id = d.depends_on_id AND di.team_id = si.team_id;`,
     rowMode: "array",
     returnValue: "resultRows",
+    bind: [teamId],
   }) as Array<[string, string, string, number]>;
 
   const blockerRows = db.exec({
-    sql: "SELECT blocker_id, item_id, kind, text, created_at, cleared_at FROM blockers;",
+    sql: `SELECT b.blocker_id, b.item_id, b.kind, b.text, b.created_at, b.cleared_at
+      FROM blockers b
+      JOIN items i ON i.id = b.item_id
+      WHERE i.team_id = ?;`,
     rowMode: "array",
     returnValue: "resultRows",
+    bind: [teamId],
   }) as Array<[string, string, string, string, number, number | null]>;
 
   const blockRows = db.exec({
-    sql: "SELECT block_id, item_id, start_at, duration_minutes, locked, source FROM scheduled_blocks;",
+    sql: `SELECT b.block_id, b.item_id, b.start_at, b.duration_minutes, b.locked, b.source
+      FROM scheduled_blocks b
+      JOIN items i ON i.id = b.item_id
+      WHERE i.team_id = ?;`,
     rowMode: "array",
     returnValue: "resultRows",
+    bind: [teamId],
   }) as Array<[string, string, number, number, number, string]>;
 
   const timeRows = db.exec({
-    sql: "SELECT entry_id, item_id, start_at, end_at, duration_minutes, note, source FROM time_entries;",
+    sql: `SELECT t.entry_id, t.item_id, t.start_at, t.end_at, t.duration_minutes, t.note, t.source
+      FROM time_entries t
+      JOIN items i ON i.id = t.item_id
+      WHERE i.team_id = ?;`,
     rowMode: "array",
     returnValue: "resultRows",
+    bind: [teamId],
   }) as Array<[string, string, number, number, number, string | null, string]>;
 
   const runningTimerRows = db.exec({
-    sql: "SELECT item_id, start_at, note FROM running_timers;",
+    sql: `SELECT rt.item_id, rt.start_at, rt.note
+      FROM running_timers rt
+      JOIN items i ON i.id = rt.item_id
+      WHERE i.team_id = ?;`,
     rowMode: "array",
     returnValue: "resultRows",
+    bind: [teamId],
   }) as Array<[string, number, string | null]>;
 
   const tagRows = db.exec({
-    sql: "SELECT item_id, tag FROM item_tags;",
+    sql: `SELECT t.item_id, t.tag
+      FROM item_tags t
+      JOIN items i ON i.id = t.item_id
+      WHERE i.team_id = ?;`,
     rowMode: "array",
     returnValue: "resultRows",
+    bind: [teamId],
   }) as Array<[string, string]>;
 
   const assigneeRows = db.exec({
-    sql: "SELECT item_id, assignee_id FROM item_assignees;",
+    sql: `SELECT a.item_id, a.assignee_id
+      FROM item_assignees a
+      JOIN items i ON i.id = a.item_id
+      WHERE i.team_id = ?;`,
     rowMode: "array",
     returnValue: "resultRows",
+    bind: [teamId],
   }) as Array<[string, string]>;
 
   const settings = Array.from(getSettings(db).entries()).map(([key, value]) => ({
@@ -1219,17 +1802,31 @@ const computeHealth = (
   return "on_track";
 };
 
-const hasDependencyCycle = (db: any, itemId: string, dependsOnId: string) => {
+const hasDependencyCycle = (
+  db: any,
+  itemId: string,
+  dependsOnId: string,
+  teamIdArg?: string | null
+) => {
+  const teamId = teamIdArg ?? getCurrentTeamId(db);
   const rows = db.exec({
     sql: `WITH RECURSIVE deps(id) AS (
-      SELECT depends_on_id FROM dependencies WHERE item_id = ?
+      SELECT d.depends_on_id
+      FROM dependencies d
+      JOIN items si ON si.id = d.item_id AND si.team_id = ?
+      JOIN items di ON di.id = d.depends_on_id AND di.team_id = si.team_id
+      WHERE d.item_id = ?
       UNION ALL
-      SELECT d.depends_on_id FROM dependencies d JOIN deps ON d.item_id = deps.id
+      SELECT d.depends_on_id
+      FROM dependencies d
+      JOIN deps ON d.item_id = deps.id
+      JOIN items si ON si.id = d.item_id AND si.team_id = ?
+      JOIN items di ON di.id = d.depends_on_id AND di.team_id = si.team_id
     )
     SELECT 1 FROM deps WHERE id = ? LIMIT 1;`,
     rowMode: "array",
     returnValue: "resultRows",
-    bind: [dependsOnId, itemId],
+    bind: [teamId, dependsOnId, teamId, itemId],
   }) as Array<[number]>;
 
   return rows.length > 0;
@@ -1260,6 +1857,424 @@ const insertAuditLog = (
       ],
     }
   );
+};
+
+const enqueueOutboxOp = (
+  db: any,
+  opName: string,
+  payload: unknown,
+  session: SessionRecord,
+  opId: string,
+  createdAt: number
+) => {
+  const outbox: OutboxEnvelope = {
+    op_id: opId,
+    team_id: session.team_id,
+    actor_user_id: session.user_id,
+    created_at: createdAt,
+    op_name: opName,
+    payload: payload ?? {},
+  };
+
+  db.exec(
+    "INSERT INTO op_outbox (op_id, team_id, actor_user_id, created_at, op_name, payload_json, status, last_error, server_seq) VALUES (?, ?, ?, ?, ?, ?, ?, NULL, NULL);",
+    {
+      bind: [
+        outbox.op_id,
+        outbox.team_id,
+        outbox.actor_user_id,
+        outbox.created_at,
+        outbox.op_name,
+        JSON.stringify(outbox.payload),
+        "queued" satisfies OutboxStatus,
+      ],
+    }
+  );
+};
+
+const getOrCreateClientId = (db: any, requestedClientId?: string | null) => {
+  const requested =
+    typeof requestedClientId === "string" ? requestedClientId.trim() : "";
+  if (requested) {
+    db.exec(
+      "INSERT OR IGNORE INTO client_info (client_id, created_at) VALUES (?, ?);",
+      {
+        bind: [requested, Date.now()],
+      }
+    );
+    return requested;
+  }
+  const existingRows = db.exec({
+    sql: "SELECT client_id FROM client_info ORDER BY created_at ASC LIMIT 1;",
+    rowMode: "array",
+    returnValue: "resultRows",
+  }) as Array<[string]>;
+  const existing = existingRows[0]?.[0] ?? null;
+  if (existing) {
+    return existing;
+  }
+  const clientId = crypto.randomUUID();
+  db.exec("INSERT INTO client_info (client_id, created_at) VALUES (?, ?);", {
+    bind: [clientId, Date.now()],
+  });
+  return clientId;
+};
+
+const parseJsonObject = (raw: string): Record<string, unknown> => {
+  try {
+    const parsed = JSON.parse(raw);
+    if (parsed && typeof parsed === "object") {
+      return parsed as Record<string, unknown>;
+    }
+  } catch {
+    // fallthrough
+  }
+  return {};
+};
+
+const listPendingOutboxOps = (db: any, teamId: string): OpEnvelope[] => {
+  const rows = db.exec({
+    sql: `SELECT op_id, team_id, actor_user_id, created_at, op_name, payload_json
+      FROM op_outbox
+      WHERE team_id = ?
+        AND status IN ('queued', 'failed')
+      ORDER BY created_at ASC, op_id ASC;`,
+    rowMode: "array",
+    returnValue: "resultRows",
+    bind: [teamId],
+  }) as Array<[string, string, string, number, string, string]>;
+  if (rows.length === 0) {
+    return [];
+  }
+  const ids = rows.map((row) => row[0]);
+  const placeholders = buildPlaceholders(ids.length);
+  db.exec({
+    sql: `UPDATE op_outbox
+      SET status = 'sending', last_error = NULL
+      WHERE op_id IN (${placeholders});`,
+    bind: ids,
+  });
+  return rows.map((row) => ({
+    op_id: row[0],
+    team_id: row[1],
+    actor_user_id: row[2],
+    created_at: row[3],
+    op_name: row[4],
+    payload: parseJsonObject(row[5]),
+  }));
+};
+
+const mockRemotePush = (db: any, request: PushRequest): PushResponse => {
+  const acked: Array<{ op_id: string; server_seq: number }> = [];
+  const rejected: Array<{ op_id: string; reason: string }> = [];
+
+  for (const op of request.ops) {
+    if (!op || typeof op !== "object") {
+      rejected.push({ op_id: "unknown", reason: "invalid op envelope" });
+      continue;
+    }
+    if (op.team_id !== request.team_id) {
+      rejected.push({
+        op_id: op.op_id,
+        reason: "team mismatch between request and op",
+      });
+      continue;
+    }
+    const existingRows = db.exec({
+      sql: "SELECT server_seq FROM mock_remote_oplog WHERE team_id = ? AND op_id = ? LIMIT 1;",
+      rowMode: "array",
+      returnValue: "resultRows",
+      bind: [request.team_id, op.op_id],
+    }) as Array<[number]>;
+    if (existingRows.length > 0) {
+      acked.push({ op_id: op.op_id, server_seq: Number(existingRows[0][0]) });
+      continue;
+    }
+
+    const nextRows = db.exec({
+      sql: "SELECT COALESCE(MAX(server_seq), 0) + 1 FROM mock_remote_oplog WHERE team_id = ?;",
+      rowMode: "array",
+      returnValue: "resultRows",
+      bind: [request.team_id],
+    }) as Array<[number]>;
+    const nextSeq = Number(nextRows[0]?.[0] ?? 1);
+    db.exec(
+      "INSERT INTO mock_remote_oplog (team_id, server_seq, op_id, op_json, created_at) VALUES (?, ?, ?, ?, ?);",
+      {
+        bind: [
+          request.team_id,
+          nextSeq,
+          op.op_id,
+          JSON.stringify(op),
+          Date.now(),
+        ],
+      }
+    );
+    acked.push({ op_id: op.op_id, server_seq: nextSeq });
+  }
+
+  return { acked, rejected };
+};
+
+const applyOutboxPushResult = (
+  db: any,
+  teamId: string,
+  response: PushResponse
+) => {
+  const touchedOpIds = new Set<string>();
+  for (const ack of response.acked) {
+    touchedOpIds.add(ack.op_id);
+    db.exec(
+      "UPDATE op_outbox SET status = 'acked', server_seq = ?, last_error = NULL WHERE team_id = ? AND op_id = ?;",
+      {
+        bind: [ack.server_seq, teamId, ack.op_id],
+      }
+    );
+  }
+  for (const rejected of response.rejected) {
+    touchedOpIds.add(rejected.op_id);
+    db.exec(
+      "UPDATE op_outbox SET status = 'failed', last_error = ? WHERE team_id = ? AND op_id = ?;",
+      {
+        bind: [rejected.reason, teamId, rejected.op_id],
+      }
+    );
+  }
+
+  if (touchedOpIds.size > 0) {
+    const ids = Array.from(touchedOpIds);
+    const placeholders = buildPlaceholders(ids.length);
+    db.exec({
+      sql: `UPDATE op_outbox
+        SET status = 'queued'
+        WHERE team_id = ?
+          AND status = 'sending'
+          AND op_id NOT IN (${placeholders});`,
+      bind: [teamId, ...ids],
+    });
+  } else {
+    db.exec(
+      "UPDATE op_outbox SET status = 'queued' WHERE team_id = ? AND status = 'sending';",
+      {
+        bind: [teamId],
+      }
+    );
+  }
+};
+
+const markSendingOutboxFailed = (db: any, teamId: string, reason: string) => {
+  const message =
+    typeof reason === "string" && reason.trim().length > 0
+      ? reason.trim()
+      : "sync transport error";
+  db.exec(
+    "UPDATE op_outbox SET status = 'failed', last_error = ? WHERE team_id = ? AND status = 'sending';",
+    {
+      bind: [message, teamId],
+    }
+  );
+};
+
+const getLastAppliedSeq = (db: any, teamId: string) => {
+  const rows = db.exec({
+    sql: "SELECT COALESCE(MAX(server_seq), 0) FROM op_applied WHERE team_id = ?;",
+    rowMode: "array",
+    returnValue: "resultRows",
+    bind: [teamId],
+  }) as Array<[number]>;
+  return Number(rows[0]?.[0] ?? 0);
+};
+
+const mockRemotePull = (db: any, request: PullRequest): PullResponse => {
+  const rows = db.exec({
+    sql: `SELECT server_seq, op_json
+      FROM mock_remote_oplog
+      WHERE team_id = ?
+        AND server_seq > ?
+      ORDER BY server_seq ASC;`,
+    rowMode: "array",
+    returnValue: "resultRows",
+    bind: [request.team_id, request.since_seq],
+  }) as Array<[number, string]>;
+  const latestRows = db.exec({
+    sql: "SELECT COALESCE(MAX(server_seq), 0) FROM mock_remote_oplog WHERE team_id = ?;",
+    rowMode: "array",
+    returnValue: "resultRows",
+    bind: [request.team_id],
+  }) as Array<[number]>;
+  const latestSeq = Number(latestRows[0]?.[0] ?? request.since_seq);
+
+  const ops = rows
+    .map((row) => {
+      const parsed = parseJsonObject(row[1]) as unknown as OpEnvelope;
+      if (
+        !parsed ||
+        typeof parsed.op_id !== "string" ||
+        typeof parsed.op_name !== "string" ||
+        typeof parsed.team_id !== "string" ||
+        typeof parsed.actor_user_id !== "string" ||
+        typeof parsed.created_at !== "number"
+      ) {
+        return null;
+      }
+      return { server_seq: Number(row[0]), op: parsed };
+    })
+    .filter((entry): entry is { server_seq: number; op: OpEnvelope } => !!entry);
+
+  return {
+    ops,
+    latest_seq: latestSeq,
+  };
+};
+
+const hasAppliedRemoteSeq = (db: any, teamId: string, serverSeq: number) => {
+  const rows = db.exec({
+    sql: "SELECT 1 FROM op_applied WHERE team_id = ? AND server_seq = ? LIMIT 1;",
+    rowMode: "array",
+    returnValue: "resultRows",
+    bind: [teamId, serverSeq],
+  }) as Array<[number]>;
+  return rows.length > 0;
+};
+
+const applyRemoteOp = (
+  db: any,
+  serverSeq: number,
+  op: OpEnvelope
+): { applied: boolean } => {
+  if (hasAppliedRemoteSeq(db, op.team_id, serverSeq)) {
+    return { applied: false };
+  }
+  const localOpRows = db.exec({
+    sql: "SELECT 1 FROM op_outbox WHERE op_id = ? LIMIT 1;",
+    rowMode: "array",
+    returnValue: "resultRows",
+    bind: [op.op_id],
+  }) as Array<[number]>;
+  if (localOpRows.length > 0) {
+    db.exec(
+      "INSERT OR IGNORE INTO op_applied (team_id, server_seq, applied_at) VALUES (?, ?, ?);",
+      {
+        bind: [op.team_id, serverSeq, Date.now()],
+      }
+    );
+    db.exec(
+      "UPDATE op_outbox SET status = 'acked', server_seq = ?, last_error = NULL WHERE op_id = ?;",
+      {
+        bind: [serverSeq, op.op_id],
+      }
+    );
+    return { applied: false };
+  }
+
+  const envelope: MutateEnvelope = {
+    op_id: op.op_id,
+    op_name: op.op_name,
+    actor_type: "user",
+    actor_id: op.actor_user_id,
+    ts: op.created_at,
+    args: op.payload,
+  };
+  const result = handleMutate(envelope, { skipOutbox: true, skipAudit: true });
+  if (!result.ok) {
+    const reason =
+      typeof result.error === "string"
+        ? result.error
+        : result.error?.message ?? "unknown remote op apply error";
+    throw new Error(`Failed applying remote op ${op.op_id}: ${reason}`);
+  }
+
+  db.exec(
+    "INSERT OR IGNORE INTO op_applied (team_id, server_seq, applied_at) VALUES (?, ?, ?);",
+    {
+      bind: [op.team_id, serverSeq, Date.now()],
+    }
+  );
+  db.exec(
+    "UPDATE op_outbox SET status = 'acked', server_seq = ?, last_error = NULL WHERE op_id = ?;",
+    {
+      bind: [serverSeq, op.op_id],
+    }
+  );
+  return { applied: true };
+};
+
+const getOutboxCounts = (db: any, teamId: string) => {
+  const rows = db.exec({
+    sql: `SELECT
+        COALESCE(SUM(CASE WHEN status = 'queued' THEN 1 ELSE 0 END), 0) AS queued_count,
+        COALESCE(SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END), 0) AS failed_count
+      FROM op_outbox
+      WHERE team_id = ?;`,
+    rowMode: "array",
+    returnValue: "resultRows",
+    bind: [teamId],
+  }) as Array<[number, number]>;
+  return {
+    queued_count: Number(rows[0]?.[0] ?? 0),
+    failed_count: Number(rows[0]?.[1] ?? 0),
+  };
+};
+
+const getLastOutboxError = (db: any, teamId: string) => {
+  const rows = db.exec({
+    sql: `SELECT last_error
+      FROM op_outbox
+      WHERE team_id = ?
+        AND status = 'failed'
+        AND last_error IS NOT NULL
+        AND trim(last_error) != ''
+      ORDER BY created_at DESC
+      LIMIT 1;`,
+    rowMode: "array",
+    returnValue: "resultRows",
+    bind: [teamId],
+  }) as Array<[string]>;
+  return rows[0]?.[0] ?? null;
+};
+
+const deriveOutboxPayload = (
+  opName: string,
+  args: Record<string, unknown>,
+  result: MutateResult
+): Record<string, unknown> => {
+  const payload: Record<string, unknown> = { ...args };
+  if (!result.ok || !result.result || typeof result.result !== "object") {
+    return payload;
+  }
+  const resultRecord = result.result as Record<string, unknown>;
+  const inject = (key: string) => {
+    if (
+      payload[key] === undefined &&
+      typeof resultRecord[key] === "string" &&
+      (resultRecord[key] as string).trim().length > 0
+    ) {
+      payload[key] = resultRecord[key];
+    }
+  };
+
+  switch (opName) {
+    case "create_item":
+      inject("id");
+      break;
+    case "scheduled_block.create":
+    case "create_block":
+      inject("block_id");
+      break;
+    case "add_time_entry":
+    case "stop_timer":
+      inject("entry_id");
+      break;
+    case "add_blocker":
+      inject("blocker_id");
+      break;
+    case "user.create":
+      inject("user_id");
+      break;
+    default:
+      break;
+  }
+  return payload;
 };
 
 const withTransaction = (db: any, fn: () => MutateResult) => {
@@ -1418,6 +2433,8 @@ const initDb = async () => {
       const db = new poolUtil.OpfsSAHPoolDb(DB_FILENAME);
       dbHandle = db;
       const schemaVersion = runMigrations(db);
+      ensureDefaultTeamMembershipFromRegistry(db);
+      ensureBootstrapSession(db);
       ensureScheduledBlocksDurationColumn(db);
 
       dbState.info = {
@@ -1436,18 +2453,33 @@ const initDb = async () => {
   return initPromise;
 };
 
-const handleMutate = (envelope: MutateEnvelope): MutateResult => {
+const handleMutate = (
+  envelope: MutateEnvelope,
+  options: HandleMutateOptions = {}
+): MutateResult => {
   if (!dbHandle) {
     return { ok: false, error: "DB not initialized" };
   }
 
+  const allowsNoSession =
+    envelope.op_name === "auth.session.set" ||
+    envelope.op_name === "auth.session.bootstrap" ||
+    envelope.op_name === "auth.logout";
+
   return withTransaction(dbHandle, () => {
     const args = (envelope.args ?? {}) as Record<string, unknown>;
+    let sessionForOutbox: SessionRecord | null = getActiveSession(dbHandle);
     let result: MutateResult = { ok: false, error: "Unknown error" };
 
     try {
+      if (!allowsNoSession) {
+        const session = requireSession(dbHandle);
+        requireCanWriteTeam(session, session.team_id, dbHandle);
+        sessionForOutbox = session;
+      }
       switch (envelope.op_name) {
         case "create_item": {
+          const currentTeamId = getCurrentTeamId(dbHandle);
           const type = ensureString(args.type, "type");
           if (!["project", "milestone", "task"].includes(type)) {
             result = {
@@ -1467,13 +2499,35 @@ const handleMutate = (envelope: MutateEnvelope): MutateResult => {
           );
           const parentId =
             typeof args.parent_id === "string" ? args.parent_id : null;
-          const id = crypto.randomUUID();
+          let itemTeamId = currentTeamId;
+          if (parentId) {
+            const parentTeamId = getItemTeamId(dbHandle, parentId);
+            if (!parentTeamId) {
+              result = { ok: false, error: "parent item not found" };
+              break;
+            }
+            if (parentTeamId !== currentTeamId) {
+              result = {
+                ok: false,
+                error: {
+                  code: "CROSS_TEAM_ACCESS",
+                  message: "Parent item is outside the active team scope.",
+                },
+              };
+              break;
+            }
+            itemTeamId = parentTeamId;
+          }
+          const id =
+            typeof args.id === "string" && args.id.trim()
+              ? args.id.trim()
+              : crypto.randomUUID();
           const now = Date.now();
           const sortOrderRows = dbHandle.exec({
-            sql: "SELECT parent_id, MAX(sort_order) FROM items WHERE parent_id IS ?;",
+            sql: "SELECT parent_id, MAX(sort_order) FROM items WHERE parent_id IS ? AND team_id = ?;",
             rowMode: "array",
             returnValue: "resultRows",
-            bind: [parentId],
+            bind: [parentId, itemTeamId],
           }) as Array<[string | null, number | null]>;
           const maxSortOrder =
             sortOrderRows.length > 0 && sortOrderRows[0][1] !== null
@@ -1498,13 +2552,14 @@ const handleMutate = (envelope: MutateEnvelope): MutateResult => {
           const notes = typeof args.notes === "string" ? args.notes : null;
 
           dbHandle.exec(
-            "INSERT INTO items (id, type, title, parent_id, status, priority, due_at, estimate_mode, estimate_minutes, health, health_mode, notes, created_at, updated_at, sort_order, completed_at, archived_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);",
+            "INSERT INTO items (id, type, title, parent_id, team_id, status, priority, due_at, estimate_mode, estimate_minutes, health, health_mode, notes, created_at, updated_at, sort_order, completed_at, archived_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);",
             {
               bind: [
                 id,
                 type,
                 title,
                 parentId,
+                itemTeamId,
                 status,
                 priority,
                 dueAt,
@@ -1530,7 +2585,9 @@ const handleMutate = (envelope: MutateEnvelope): MutateResult => {
           break;
         }
         case "update_item_fields": {
+          const currentTeamId = getCurrentTeamId(dbHandle);
           const id = ensureString(args.id, "id");
+          ensureItemInTeam(dbHandle, id, currentTeamId);
           const fields = args.fields as Record<string, unknown>;
           if (!fields || typeof fields !== "object") {
             result = { ok: false, error: "fields must be an object" };
@@ -1572,6 +2629,33 @@ const handleMutate = (envelope: MutateEnvelope): MutateResult => {
             bind.push(value ?? null);
           }
 
+          if (Object.prototype.hasOwnProperty.call(fields, "parent_id")) {
+            const nextParentId =
+              typeof fields.parent_id === "string" ? fields.parent_id : null;
+            if (nextParentId) {
+              const parentTeamId = getItemTeamId(dbHandle, nextParentId);
+              if (!parentTeamId) {
+                result = { ok: false, error: "parent item not found" };
+                break;
+              }
+              if (parentTeamId !== currentTeamId) {
+                result = {
+                  ok: false,
+                  error: {
+                    code: "CROSS_TEAM_ACCESS",
+                    message: "Parent item is outside the active team scope.",
+                  },
+                };
+                break;
+              }
+              updates.push("team_id = ?");
+              bind.push(parentTeamId);
+            } else {
+              updates.push("team_id = ?");
+              bind.push(currentTeamId);
+            }
+          }
+
           if (updates.length === 0) {
             result = { ok: false, error: "no valid fields to update" };
             break;
@@ -1580,9 +2664,10 @@ const handleMutate = (envelope: MutateEnvelope): MutateResult => {
           updates.push("updated_at = ?");
           bind.push(Date.now());
           bind.push(id);
+          bind.push(currentTeamId);
 
           dbHandle.exec(
-            `UPDATE items SET ${updates.join(", ")} WHERE id = ?;`,
+            `UPDATE items SET ${updates.join(", ")} WHERE id = ? AND team_id = ?;`,
             {
               bind,
             }
@@ -1596,7 +2681,9 @@ const handleMutate = (envelope: MutateEnvelope): MutateResult => {
           break;
         }
         case "set_status": {
+          const currentTeamId = getCurrentTeamId(dbHandle);
           const id = ensureString(args.id, "id");
+          ensureItemInTeam(dbHandle, id, currentTeamId);
           const status = ensureString(args.status, "status");
           const override = args.override === true;
           const settings = getSettings(dbHandle);
@@ -1608,12 +2695,12 @@ const handleMutate = (envelope: MutateEnvelope): MutateResult => {
                 EXISTS(SELECT 1 FROM blockers b WHERE b.item_id = ? AND b.cleared_at IS NULL) AS has_blocker,
                 EXISTS(
                   SELECT 1 FROM dependencies d
-                  LEFT JOIN items di ON di.id = d.depends_on_id
+                  LEFT JOIN items di ON di.id = d.depends_on_id AND di.team_id = ?
                   WHERE d.item_id = ? AND (di.id IS NULL OR di.status != 'done')
                 ) AS has_unmet;`,
               rowMode: "array",
               returnValue: "resultRows",
-              bind: [id, id],
+              bind: [id, currentTeamId, id],
             }) as Array<[number, number]>;
             const hasBlocker = blockRows[0]?.[0] === 1;
             const hasUnmet = blockRows[0]?.[1] === 1;
@@ -1671,14 +2758,19 @@ const handleMutate = (envelope: MutateEnvelope): MutateResult => {
           break;
         }
         case "scheduled_block.create": {
+          const currentTeamId = getCurrentTeamId(dbHandle);
           const itemId = ensureString(args.item_id, "item_id");
+          ensureItemInTeam(dbHandle, itemId, currentTeamId);
           const startAt = ensureInteger(args.start_at, "start_at");
           const durationMinutes = resolveDurationMinutes(
             startAt,
             args.duration_minutes,
             args.end_at
           );
-          const blockId = crypto.randomUUID();
+          const blockId =
+            typeof args.block_id === "string" && args.block_id.trim()
+              ? args.block_id.trim()
+              : crypto.randomUUID();
           const locked = typeof args.locked === "number" ? args.locked : 0;
           const source = typeof args.source === "string" ? args.source : "manual";
           enforceSingleScheduledBlock(dbHandle, itemId);
@@ -1696,6 +2788,7 @@ const handleMutate = (envelope: MutateEnvelope): MutateResult => {
           break;
         }
         case "scheduled_block.update": {
+          const currentTeamId = getCurrentTeamId(dbHandle);
           const blockId = ensureString(args.block_id, "block_id");
           const currentRows = dbHandle.exec({
             sql: "SELECT item_id, start_at, duration_minutes FROM scheduled_blocks WHERE block_id = ?;",
@@ -1708,6 +2801,7 @@ const handleMutate = (envelope: MutateEnvelope): MutateResult => {
             break;
           }
           const current = currentRows[0];
+          ensureItemInTeam(dbHandle, current[0], currentTeamId);
           const nextStartAt =
             args.start_at === undefined || args.start_at === null
               ? current[1]
@@ -1749,6 +2843,7 @@ const handleMutate = (envelope: MutateEnvelope): MutateResult => {
           break;
         }
         case "scheduled_block.delete": {
+          const currentTeamId = getCurrentTeamId(dbHandle);
           const blockId = ensureString(args.block_id, "block_id");
           const rows = dbHandle.exec({
             sql: "SELECT item_id FROM scheduled_blocks WHERE block_id = ?;",
@@ -1761,6 +2856,7 @@ const handleMutate = (envelope: MutateEnvelope): MutateResult => {
             result = { ok: false, error: "scheduled block not found" };
             break;
           }
+          ensureItemInTeam(dbHandle, itemId, currentTeamId);
           dbHandle.exec("DELETE FROM scheduled_blocks WHERE block_id = ?;", {
             bind: [blockId],
           });
@@ -1772,14 +2868,19 @@ const handleMutate = (envelope: MutateEnvelope): MutateResult => {
           break;
         }
         case "create_block": {
+          const currentTeamId = getCurrentTeamId(dbHandle);
           const itemId = ensureString(args.item_id, "item_id");
+          ensureItemInTeam(dbHandle, itemId, currentTeamId);
           const startAt = ensureInteger(args.start_at, "start_at");
           const durationMinutes = resolveDurationMinutes(
             startAt,
             args.duration_minutes,
             args.end_at
           );
-          const blockId = crypto.randomUUID();
+          const blockId =
+            typeof args.block_id === "string" && args.block_id.trim()
+              ? args.block_id.trim()
+              : crypto.randomUUID();
           const locked = typeof args.locked === "number" ? args.locked : 0;
           const source = typeof args.source === "string" ? args.source : "manual";
           enforceSingleScheduledBlock(dbHandle, itemId);
@@ -1797,6 +2898,7 @@ const handleMutate = (envelope: MutateEnvelope): MutateResult => {
           break;
         }
         case "move_block": {
+          const currentTeamId = getCurrentTeamId(dbHandle);
           const blockId = ensureString(args.block_id, "block_id");
           const startAt = ensureNumber(args.start_at, "start_at");
           const rows = dbHandle.exec({
@@ -1810,6 +2912,7 @@ const handleMutate = (envelope: MutateEnvelope): MutateResult => {
             result = { ok: false, error: "scheduled block not found" };
             break;
           }
+          ensureItemInTeam(dbHandle, itemId, currentTeamId);
           dbHandle.exec(
             "UPDATE scheduled_blocks SET start_at = ? WHERE block_id = ?;",
             { bind: [startAt, blockId] }
@@ -1823,6 +2926,7 @@ const handleMutate = (envelope: MutateEnvelope): MutateResult => {
           break;
         }
         case "resize_block": {
+          const currentTeamId = getCurrentTeamId(dbHandle);
           const blockId = ensureString(args.block_id, "block_id");
           const durationMinutes = ensurePositiveInteger(
             args.duration_minutes,
@@ -1839,6 +2943,7 @@ const handleMutate = (envelope: MutateEnvelope): MutateResult => {
             result = { ok: false, error: "scheduled block not found" };
             break;
           }
+          ensureItemInTeam(dbHandle, itemId, currentTeamId);
           dbHandle.exec(
             "UPDATE scheduled_blocks SET duration_minutes = ? WHERE block_id = ?;",
             { bind: [durationMinutes, blockId] }
@@ -1852,7 +2957,20 @@ const handleMutate = (envelope: MutateEnvelope): MutateResult => {
           break;
         }
         case "delete_block": {
+          const currentTeamId = getCurrentTeamId(dbHandle);
           const blockId = ensureString(args.block_id, "block_id");
+          const rows = dbHandle.exec({
+            sql: "SELECT item_id FROM scheduled_blocks WHERE block_id = ? LIMIT 1;",
+            rowMode: "array",
+            returnValue: "resultRows",
+            bind: [blockId],
+          }) as Array<[string]>;
+          const itemId = rows[0]?.[0] ?? null;
+          if (!itemId) {
+            result = { ok: false, error: "scheduled block not found" };
+            break;
+          }
+          ensureItemInTeam(dbHandle, itemId, currentTeamId);
           dbHandle.exec("DELETE FROM scheduled_blocks WHERE block_id = ?;", {
             bind: [blockId],
           });
@@ -1972,19 +3090,9 @@ const handleMutate = (envelope: MutateEnvelope): MutateResult => {
           break;
         }
         case "delete_item": {
+          const currentTeamId = getCurrentTeamId(dbHandle);
           const itemId = ensureString(args.item_id, "item_id");
-          const idsRows = dbHandle.exec({
-            sql: `WITH RECURSIVE subtree AS (
-              SELECT id FROM items WHERE id = ?
-              UNION ALL
-              SELECT i.id FROM items i JOIN subtree s ON i.parent_id = s.id
-            )
-            SELECT id FROM subtree;`,
-            rowMode: "array",
-            returnValue: "resultRows",
-            bind: [itemId],
-          }) as Array<[string]>;
-          const deletedIds = idsRows.map((row) => row[0]);
+          const deletedIds = getSubtreeIds(dbHandle, [itemId], currentTeamId);
           if (deletedIds.length === 0) {
             result = { ok: false, error: "item not found" };
             break;
@@ -2029,6 +3137,7 @@ const handleMutate = (envelope: MutateEnvelope): MutateResult => {
           break;
         }
         case "items.delete_many": {
+          const currentTeamId = getCurrentTeamId(dbHandle);
           const idsInput = ensureArray(args.ids, "ids")
             .map((value, index) => ensureString(value, `ids[${index}]`))
             .filter((value) => value.trim().length > 0);
@@ -2037,21 +3146,7 @@ const handleMutate = (envelope: MutateEnvelope): MutateResult => {
             result = { ok: false, error: "ids must be a non-empty array" };
             break;
           }
-          const seedPlaceholders = buildPlaceholders(uniqueIds.length);
-          const idsRows = dbHandle.exec({
-            sql: `WITH RECURSIVE subtree AS (
-              SELECT id FROM items WHERE id IN (${seedPlaceholders})
-              UNION ALL
-              SELECT i.id FROM items i JOIN subtree s ON i.parent_id = s.id
-            )
-            SELECT id FROM subtree;`,
-            rowMode: "array",
-            returnValue: "resultRows",
-            bind: uniqueIds,
-          }) as Array<[string]>;
-          const deletedIds = Array.from(
-            new Set(idsRows.map((row) => row[0]))
-          );
+          const deletedIds = getSubtreeIds(dbHandle, uniqueIds, currentTeamId);
           if (deletedIds.length === 0) {
             result = { ok: false, error: "items not found" };
             break;
@@ -2117,17 +3212,19 @@ const handleMutate = (envelope: MutateEnvelope): MutateResult => {
           break;
         }
         case "reorder_item": {
+          const currentTeamId = getCurrentTeamId(dbHandle);
           const itemId = ensureString(args.item_id, "item_id");
+          ensureItemInTeam(dbHandle, itemId, currentTeamId);
           const direction = ensureString(args.direction, "direction");
           if (direction !== "up" && direction !== "down") {
             result = { ok: false, error: "direction must be up or down" };
             break;
           }
           const rows = dbHandle.exec({
-            sql: "SELECT parent_id, sort_order FROM items WHERE id = ? LIMIT 1;",
+            sql: "SELECT parent_id, sort_order FROM items WHERE id = ? AND team_id = ? LIMIT 1;",
             rowMode: "array",
             returnValue: "resultRows",
-            bind: [itemId],
+            bind: [itemId, currentTeamId],
           }) as Array<[string | null, number]>;
           if (rows.length === 0) {
             result = { ok: false, error: "item not found" };
@@ -2137,10 +3234,10 @@ const handleMutate = (envelope: MutateEnvelope): MutateResult => {
           const sortOrder = Number(rows[0][1]);
           const siblingRows = dbHandle.exec({
             sql:
-              "SELECT id, sort_order FROM items WHERE parent_id IS ? ORDER BY sort_order ASC, CASE WHEN due_at IS NULL THEN 1 ELSE 0 END, due_at ASC, title ASC;",
+              "SELECT id, sort_order FROM items WHERE parent_id IS ? AND team_id = ? ORDER BY sort_order ASC, CASE WHEN due_at IS NULL THEN 1 ELSE 0 END, due_at ASC, title ASC;",
             rowMode: "array",
             returnValue: "resultRows",
-            bind: [parentId],
+            bind: [parentId, currentTeamId],
           }) as Array<[string, number]>;
           const index = siblingRows.findIndex((row) => row[0] === itemId);
           if (index === -1) {
@@ -2169,7 +3266,9 @@ const handleMutate = (envelope: MutateEnvelope): MutateResult => {
           break;
         }
         case "move_item": {
+          const currentTeamId = getCurrentTeamId(dbHandle);
           const itemId = ensureString(args.item_id, "item_id");
+          ensureItemInTeam(dbHandle, itemId, currentTeamId);
           const parentId =
             typeof args.parent_id === "string" ? args.parent_id : null;
           const beforeId =
@@ -2185,10 +3284,10 @@ const handleMutate = (envelope: MutateEnvelope): MutateResult => {
             break;
           }
           const itemRows = dbHandle.exec({
-            sql: "SELECT parent_id FROM items WHERE id = ? LIMIT 1;",
+            sql: "SELECT parent_id FROM items WHERE id = ? AND team_id = ? LIMIT 1;",
             rowMode: "array",
             returnValue: "resultRows",
-            bind: [itemId],
+            bind: [itemId, currentTeamId],
           }) as Array<[string | null]>;
           if (itemRows.length === 0) {
             result = { ok: false, error: "item not found" };
@@ -2199,12 +3298,29 @@ const handleMutate = (envelope: MutateEnvelope): MutateResult => {
             result = { ok: false, error: "parent_id must match current parent" };
             break;
           }
+          if (parentId) {
+            const parentTeamId = getItemTeamId(dbHandle, parentId);
+            if (!parentTeamId) {
+              result = { ok: false, error: "parent not found" };
+              break;
+            }
+            if (parentTeamId !== currentTeamId) {
+              result = {
+                ok: false,
+                error: {
+                  code: "CROSS_TEAM_ACCESS",
+                  message: "Parent item is outside the active team scope.",
+                },
+              };
+              break;
+            }
+          }
           const siblingRows = dbHandle.exec({
             sql:
-              "SELECT id FROM items WHERE parent_id IS ? ORDER BY sort_order ASC, CASE WHEN due_at IS NULL THEN 1 ELSE 0 END, due_at ASC, title ASC;",
+              "SELECT id FROM items WHERE parent_id IS ? AND team_id = ? ORDER BY sort_order ASC, CASE WHEN due_at IS NULL THEN 1 ELSE 0 END, due_at ASC, title ASC;",
             rowMode: "array",
             returnValue: "resultRows",
-            bind: [currentParent],
+            bind: [currentParent, currentTeamId],
           }) as Array<[string]>;
           const siblings = siblingRows.map((row) => row[0]);
           const currentIndex = siblings.indexOf(itemId);
@@ -2239,14 +3355,19 @@ const handleMutate = (envelope: MutateEnvelope): MutateResult => {
           break;
         }
         case "add_time_entry": {
+          const currentTeamId = getCurrentTeamId(dbHandle);
           const itemId = ensureString(args.item_id, "item_id");
+          ensureItemInTeam(dbHandle, itemId, currentTeamId);
           const startAt = ensureNumber(args.start_at, "start_at");
           const endAt = ensureNumber(args.end_at, "end_at");
           const durationMinutes = ensureNumber(
             args.duration_minutes,
             "duration_minutes"
           );
-          const entryId = crypto.randomUUID();
+          const entryId =
+            typeof args.entry_id === "string" && args.entry_id.trim()
+              ? args.entry_id.trim()
+              : crypto.randomUUID();
           const note = typeof args.note === "string" ? args.note : null;
           const source = typeof args.source === "string" ? args.source : "manual";
           dbHandle.exec(
@@ -2271,16 +3392,21 @@ const handleMutate = (envelope: MutateEnvelope): MutateResult => {
           break;
         }
         case "start_timer": {
+          const currentTeamId = getCurrentTeamId(dbHandle);
           const itemId = ensureString(args.item_id, "item_id");
+          ensureItemInTeam(dbHandle, itemId, currentTeamId);
           const startAt =
             typeof args.start_at === "number"
               ? ensureInteger(args.start_at, "start_at")
               : Date.now();
           const note = typeof args.note === "string" ? args.note : null;
           const runningRows = dbHandle.exec({
-            sql: "SELECT COUNT(*) FROM running_timers;",
+            sql: `SELECT COUNT(*) FROM running_timers rt
+              JOIN items i ON i.id = rt.item_id
+              WHERE i.team_id = ?;`,
             rowMode: "array",
             returnValue: "resultRows",
+            bind: [currentTeamId],
           }) as Array<[number]>;
           const runningCount = Number(runningRows[0]?.[0] ?? 0);
           if (runningCount > 0) {
@@ -2307,7 +3433,9 @@ const handleMutate = (envelope: MutateEnvelope): MutateResult => {
           break;
         }
         case "stop_timer": {
+          const currentTeamId = getCurrentTeamId(dbHandle);
           const itemId = ensureString(args.item_id, "item_id");
+          ensureItemInTeam(dbHandle, itemId, currentTeamId);
           const endAt =
             typeof args.end_at === "number"
               ? ensureInteger(args.end_at, "end_at")
@@ -2333,7 +3461,10 @@ const handleMutate = (envelope: MutateEnvelope): MutateResult => {
             0,
             Math.ceil((endAt - startAt) / 60000)
           );
-          const entryId = crypto.randomUUID();
+          const entryId =
+            typeof args.entry_id === "string" && args.entry_id.trim()
+              ? args.entry_id.trim()
+              : crypto.randomUUID();
           dbHandle.exec(
             "INSERT INTO time_entries (entry_id, item_id, start_at, end_at, duration_minutes, note, source) VALUES (?, ?, ?, ?, ?, ?, ?);",
             {
@@ -2376,7 +3507,8 @@ const handleMutate = (envelope: MutateEnvelope): MutateResult => {
           break;
         }
         case "export_data": {
-          const data = exportData(dbHandle);
+          const currentTeamId = getCurrentTeamId(dbHandle);
+          const data = exportData(dbHandle, currentTeamId);
           result = {
             ok: true,
             result: data,
@@ -2385,6 +3517,7 @@ const handleMutate = (envelope: MutateEnvelope): MutateResult => {
           break;
         }
         case "import_data": {
+          const currentTeamId = getCurrentTeamId(dbHandle);
           const payload = args.payload as unknown;
           if (!payload || typeof payload !== "object") {
             result = { ok: false, error: "payload must be an object" };
@@ -2641,25 +3774,84 @@ const handleMutate = (envelope: MutateEnvelope): MutateResult => {
             }
           );
 
-          dbHandle.exec("DELETE FROM item_assignees;");
-          dbHandle.exec("DELETE FROM item_tags;");
-          dbHandle.exec("DELETE FROM dependencies;");
-          dbHandle.exec("DELETE FROM blockers;");
-          dbHandle.exec("DELETE FROM scheduled_blocks;");
-          dbHandle.exec("DELETE FROM time_entries;");
-          dbHandle.exec("DELETE FROM running_timers;");
-          dbHandle.exec("DELETE FROM items;");
-          dbHandle.exec("DELETE FROM settings;");
+          const importedItemIds = new Set(items.map((item) => item.id));
+          const scopedDependencies = dependencies.filter(
+            (dep) =>
+              importedItemIds.has(dep.item_id) &&
+              importedItemIds.has(dep.depends_on_id)
+          );
+          const scopedBlockers = blockers.filter((blocker) =>
+            importedItemIds.has(blocker.item_id)
+          );
+          const scopedScheduledBlocks = scheduledBlocks.filter((block) =>
+            importedItemIds.has(block.item_id)
+          );
+          const scopedTimeEntries = timeEntries.filter((entry) =>
+            importedItemIds.has(entry.item_id)
+          );
+          const scopedRunningTimers = runningTimers.filter((timer) =>
+            importedItemIds.has(timer.item_id)
+          );
+          const scopedItemTags = itemTags.filter((tag) =>
+            importedItemIds.has(tag.item_id)
+          );
+          const scopedItemAssignees = itemAssignees.filter((assignee) =>
+            importedItemIds.has(assignee.item_id)
+          );
+
+          const existingItemRows = dbHandle.exec({
+            sql: "SELECT id FROM items WHERE team_id = ?;",
+            rowMode: "array",
+            returnValue: "resultRows",
+            bind: [currentTeamId],
+          }) as Array<[string]>;
+          const existingItemIds = existingItemRows.map((row) => row[0]);
+          if (existingItemIds.length > 0) {
+            const placeholders = buildPlaceholders(existingItemIds.length);
+            dbHandle.exec(
+              `DELETE FROM dependencies WHERE item_id IN (${placeholders}) OR depends_on_id IN (${placeholders});`,
+              { bind: [...existingItemIds, ...existingItemIds] }
+            );
+            dbHandle.exec(
+              `DELETE FROM blockers WHERE item_id IN (${placeholders});`,
+              { bind: existingItemIds }
+            );
+            dbHandle.exec(
+              `DELETE FROM scheduled_blocks WHERE item_id IN (${placeholders});`,
+              { bind: existingItemIds }
+            );
+            dbHandle.exec(
+              `DELETE FROM time_entries WHERE item_id IN (${placeholders});`,
+              { bind: existingItemIds }
+            );
+            dbHandle.exec(
+              `DELETE FROM running_timers WHERE item_id IN (${placeholders});`,
+              { bind: existingItemIds }
+            );
+            dbHandle.exec(
+              `DELETE FROM item_tags WHERE item_id IN (${placeholders});`,
+              { bind: existingItemIds }
+            );
+            dbHandle.exec(
+              `DELETE FROM item_assignees WHERE item_id IN (${placeholders});`,
+              { bind: existingItemIds }
+            );
+            dbHandle.exec(
+              `DELETE FROM items WHERE id IN (${placeholders});`,
+              { bind: existingItemIds }
+            );
+          }
 
           for (const item of items) {
             dbHandle.exec(
-              "INSERT INTO items (id, type, title, parent_id, status, priority, due_at, estimate_mode, estimate_minutes, health, health_mode, notes, created_at, updated_at, archived_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);",
+              "INSERT INTO items (id, type, title, parent_id, team_id, status, priority, due_at, estimate_mode, estimate_minutes, health, health_mode, notes, created_at, updated_at, archived_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);",
               {
                 bind: [
                   item.id,
                   item.type,
                   item.title,
                   item.parent_id,
+                  currentTeamId,
                   item.status,
                   item.priority,
                   item.due_at,
@@ -2676,7 +3868,7 @@ const handleMutate = (envelope: MutateEnvelope): MutateResult => {
             );
           }
 
-          for (const dep of dependencies) {
+          for (const dep of scopedDependencies) {
             dbHandle.exec(
               "INSERT INTO dependencies (item_id, depends_on_id, type, lag_minutes) VALUES (?, ?, ?, ?);",
               {
@@ -2685,7 +3877,7 @@ const handleMutate = (envelope: MutateEnvelope): MutateResult => {
             );
           }
 
-          for (const blocker of blockers) {
+          for (const blocker of scopedBlockers) {
             dbHandle.exec(
               "INSERT INTO blockers (blocker_id, item_id, kind, text, created_at, cleared_at) VALUES (?, ?, ?, ?, ?, ?);",
               {
@@ -2701,7 +3893,7 @@ const handleMutate = (envelope: MutateEnvelope): MutateResult => {
             );
           }
 
-          for (const block of scheduledBlocks) {
+          for (const block of scopedScheduledBlocks) {
             dbHandle.exec(
               "INSERT INTO scheduled_blocks (block_id, item_id, start_at, duration_minutes, locked, source) VALUES (?, ?, ?, ?, ?, ?);",
               {
@@ -2717,7 +3909,7 @@ const handleMutate = (envelope: MutateEnvelope): MutateResult => {
             );
           }
 
-          for (const entry of timeEntries) {
+          for (const entry of scopedTimeEntries) {
             dbHandle.exec(
               "INSERT INTO time_entries (entry_id, item_id, start_at, end_at, duration_minutes, note, source) VALUES (?, ?, ?, ?, ?, ?, ?);",
               {
@@ -2734,7 +3926,7 @@ const handleMutate = (envelope: MutateEnvelope): MutateResult => {
             );
           }
 
-          for (const timer of runningTimers) {
+          for (const timer of scopedRunningTimers) {
             dbHandle.exec(
               "INSERT INTO running_timers (item_id, start_at, note) VALUES (?, ?, ?);",
               {
@@ -2743,13 +3935,13 @@ const handleMutate = (envelope: MutateEnvelope): MutateResult => {
             );
           }
 
-          for (const tag of itemTags) {
+          for (const tag of scopedItemTags) {
             dbHandle.exec("INSERT INTO item_tags (item_id, tag) VALUES (?, ?);", {
               bind: [tag.item_id, tag.tag],
             });
           }
 
-          for (const assignee of itemAssignees) {
+          for (const assignee of scopedItemAssignees) {
             dbHandle.exec(
               "INSERT INTO item_assignees (item_id, assignee_id) VALUES (?, ?);",
               { bind: [assignee.item_id, assignee.assignee_id] }
@@ -2768,13 +3960,13 @@ const handleMutate = (envelope: MutateEnvelope): MutateResult => {
             result: {
               counts: {
                 items: items.length,
-                dependencies: dependencies.length,
-                blockers: blockers.length,
-                scheduled_blocks: scheduledBlocks.length,
-                time_entries: timeEntries.length,
-                running_timers: runningTimers.length,
-                item_tags: itemTags.length,
-                item_assignees: itemAssignees.length,
+                dependencies: scopedDependencies.length,
+                blockers: scopedBlockers.length,
+                scheduled_blocks: scopedScheduledBlocks.length,
+                time_entries: scopedTimeEntries.length,
+                running_timers: scopedRunningTimers.length,
+                item_tags: scopedItemTags.length,
+                item_assignees: scopedItemAssignees.length,
                 settings: settings.length,
               },
             },
@@ -2791,6 +3983,7 @@ const handleMutate = (envelope: MutateEnvelope): MutateResult => {
           break;
         }
         case "dependency.create": {
+          const currentTeamId = getCurrentTeamId(dbHandle);
           const predecessorId = ensureString(
             args.predecessor_id,
             "predecessor_id"
@@ -2799,6 +3992,8 @@ const handleMutate = (envelope: MutateEnvelope): MutateResult => {
             args.successor_id,
             "successor_id"
           );
+          ensureItemInTeam(dbHandle, predecessorId, currentTeamId);
+          ensureItemInTeam(dbHandle, successorId, currentTeamId);
           if (predecessorId === successorId) {
             result = { ok: false, error: "cannot depend on itself" };
             break;
@@ -2850,8 +4045,11 @@ const handleMutate = (envelope: MutateEnvelope): MutateResult => {
           break;
         }
         case "dependency.update": {
+          const currentTeamId = getCurrentTeamId(dbHandle);
           const edgeId = ensureString(args.edge_id, "edge_id");
           const { successorId, predecessorId } = parseEdgeId(edgeId);
+          ensureItemInTeam(dbHandle, predecessorId, currentTeamId);
+          ensureItemInTeam(dbHandle, successorId, currentTeamId);
           const rows = dbHandle.exec({
             sql: "SELECT type, lag_minutes FROM dependencies WHERE item_id = ? AND depends_on_id = ?;",
             rowMode: "array",
@@ -2903,8 +4101,11 @@ const handleMutate = (envelope: MutateEnvelope): MutateResult => {
           break;
         }
         case "dependency.delete": {
+          const currentTeamId = getCurrentTeamId(dbHandle);
           const edgeId = ensureString(args.edge_id, "edge_id");
           const { successorId, predecessorId } = parseEdgeId(edgeId);
+          ensureItemInTeam(dbHandle, predecessorId, currentTeamId);
+          ensureItemInTeam(dbHandle, successorId, currentTeamId);
           const rows = dbHandle.exec({
             sql: "SELECT 1 FROM dependencies WHERE item_id = ? AND depends_on_id = ? LIMIT 1;",
             rowMode: "array",
@@ -2938,8 +4139,11 @@ const handleMutate = (envelope: MutateEnvelope): MutateResult => {
           break;
         }
         case "add_dependency": {
+          const currentTeamId = getCurrentTeamId(dbHandle);
           const itemId = ensureString(args.item_id, "item_id");
           const dependsOnId = ensureString(args.depends_on_id, "depends_on_id");
+          ensureItemInTeam(dbHandle, itemId, currentTeamId);
+          ensureItemInTeam(dbHandle, dependsOnId, currentTeamId);
           if (itemId === dependsOnId) {
             result = { ok: false, error: "cannot depend on itself" };
             break;
@@ -2962,8 +4166,11 @@ const handleMutate = (envelope: MutateEnvelope): MutateResult => {
           break;
         }
         case "remove_dependency": {
+          const currentTeamId = getCurrentTeamId(dbHandle);
           const itemId = ensureString(args.item_id, "item_id");
           const dependsOnId = ensureString(args.depends_on_id, "depends_on_id");
+          ensureItemInTeam(dbHandle, itemId, currentTeamId);
+          ensureItemInTeam(dbHandle, dependsOnId, currentTeamId);
           dbHandle.exec(
             "DELETE FROM dependencies WHERE item_id = ? AND depends_on_id = ?;",
             {
@@ -2978,7 +4185,9 @@ const handleMutate = (envelope: MutateEnvelope): MutateResult => {
           break;
         }
         case "add_blocker": {
+          const currentTeamId = getCurrentTeamId(dbHandle);
           const itemId = ensureString(args.item_id, "item_id");
+          ensureItemInTeam(dbHandle, itemId, currentTeamId);
           const kind =
             typeof args.kind === "string" && args.kind.trim()
               ? args.kind.trim()
@@ -2987,7 +4196,10 @@ const handleMutate = (envelope: MutateEnvelope): MutateResult => {
           if (!text) {
             throw new Error("text must be a non-empty string");
           }
-          const blockerId = crypto.randomUUID();
+          const blockerId =
+            typeof args.blocker_id === "string" && args.blocker_id.trim()
+              ? args.blocker_id.trim()
+              : crypto.randomUUID();
           dbHandle.exec(
             "INSERT INTO blockers (blocker_id, item_id, kind, text, created_at, cleared_at) VALUES (?, ?, ?, ?, ?, ?);",
             {
@@ -3002,7 +4214,20 @@ const handleMutate = (envelope: MutateEnvelope): MutateResult => {
           break;
         }
         case "clear_blocker": {
+          const currentTeamId = getCurrentTeamId(dbHandle);
           const blockerId = ensureString(args.blocker_id, "blocker_id");
+          const blockerRows = dbHandle.exec({
+            sql: "SELECT item_id FROM blockers WHERE blocker_id = ? LIMIT 1;",
+            rowMode: "array",
+            returnValue: "resultRows",
+            bind: [blockerId],
+          }) as Array<[string]>;
+          const blockerItemId = blockerRows[0]?.[0] ?? null;
+          if (!blockerItemId) {
+            result = { ok: false, error: "blocker not found" };
+            break;
+          }
+          ensureItemInTeam(dbHandle, blockerItemId, currentTeamId);
           dbHandle.exec("UPDATE blockers SET cleared_at = ? WHERE blocker_id = ?;", {
             bind: [envelope.ts, blockerId],
           });
@@ -3014,7 +4239,9 @@ const handleMutate = (envelope: MutateEnvelope): MutateResult => {
           break;
         }
         case "set_item_tags": {
+          const currentTeamId = getCurrentTeamId(dbHandle);
           const itemId = ensureString(args.item_id, "item_id");
+          ensureItemInTeam(dbHandle, itemId, currentTeamId);
           const tagsRaw = ensureArray(args.tags, "tags") as unknown[];
           const tags = Array.from(
             new Set(
@@ -3047,29 +4274,33 @@ const handleMutate = (envelope: MutateEnvelope): MutateResult => {
           const avatarUrl =
             typeof args.avatar_url === "string" ? args.avatar_url : null;
           const users = readUserRegistry(dbHandle);
-          const userId = crypto.randomUUID();
-          users.push({
+          const userId =
+            typeof args.user_id === "string" && args.user_id.trim()
+              ? args.user_id.trim()
+              : crypto.randomUUID();
+          const nextUser: UserRecord = {
             user_id: userId,
             display_name: displayName,
             avatar_url: avatarUrl,
-          });
+          };
+          const existingIndex = users.findIndex((user) => user.user_id === userId);
+          if (existingIndex >= 0) {
+            users[existingIndex] = nextUser;
+          } else {
+            users.push(nextUser);
+          }
           writeUserRegistry(dbHandle, users);
-          const settings = getSettings(dbHandle);
-          if (typeof settings.get(CURRENT_USER_SETTING_KEY) !== "string") {
-            dbHandle.exec(
-              "INSERT INTO settings (key, value_json) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value_json = excluded.value_json;",
-              {
-                bind: [
-                  CURRENT_USER_SETTING_KEY,
-                  JSON.stringify(userId),
-                ],
-              }
-            );
+          upsertDefaultTeam(dbHandle);
+          upsertUserRow(dbHandle, nextUser);
+          upsertTeamMembership(dbHandle, userId, "member");
+          if (!getActiveSession(dbHandle)) {
+            upsertTeamMembership(dbHandle, userId, "owner");
+            setActiveSession(dbHandle, userId, DEFAULT_TEAM_ID);
           }
           result = {
             ok: true,
             result: { user_id: userId },
-            invalidate: ["users"],
+            invalidate: ["users", "team", "session"],
           };
           break;
         }
@@ -3100,15 +4331,165 @@ const handleMutate = (envelope: MutateEnvelope): MutateResult => {
           }
           users[index] = next;
           writeUserRegistry(dbHandle, users);
+          upsertUserRow(dbHandle, next);
           result = {
             ok: true,
             result: { user_id: userId },
-            invalidate: ["users"],
+            invalidate: ["users", "team"],
+          };
+          break;
+        }
+        case "auth.session.bootstrap": {
+          const userId = ensureString(args.user_id, "user_id");
+          const displayName = ensureString(args.display_name, "display_name").trim();
+          if (!displayName) {
+            result = { ok: false, error: "display_name must be non-empty" };
+            break;
+          }
+          const teamId = ensureString(args.team_id, "team_id");
+          const teamNameRaw =
+            typeof args.team_name === "string" ? args.team_name.trim() : "";
+          const teamName = teamNameRaw || "Team";
+          const avatarUrl =
+            typeof args.avatar_url === "string" ? args.avatar_url : null;
+          const role = normalizeTeamRole(args.role) ?? "editor";
+
+          const users = readUserRegistry(dbHandle);
+          const nextUser: UserRecord = {
+            user_id: userId,
+            display_name: displayName,
+            avatar_url: avatarUrl,
+          };
+          const existingIndex = users.findIndex((user) => user.user_id === userId);
+          if (existingIndex >= 0) {
+            users[existingIndex] = nextUser;
+          } else {
+            users.push(nextUser);
+          }
+          writeUserRegistry(dbHandle, users);
+          upsertUserRow(dbHandle, nextUser);
+
+          upsertTeamRow(dbHandle, teamId, teamName);
+          upsertTeamMembership(dbHandle, userId, role, teamId);
+
+          const membershipsRaw = Array.isArray(args.memberships)
+            ? (args.memberships as unknown[])
+            : [];
+          for (const membership of membershipsRaw) {
+            if (!membership || typeof membership !== "object") {
+              continue;
+            }
+            const membershipRec = membership as Record<string, unknown>;
+            if (typeof membershipRec.team_id !== "string") {
+              continue;
+            }
+            const membershipTeamId = membershipRec.team_id.trim();
+            if (!membershipTeamId) {
+              continue;
+            }
+            const membershipTeamName =
+              typeof membershipRec.team_name === "string" &&
+              membershipRec.team_name.trim().length > 0
+                ? membershipRec.team_name.trim()
+                : membershipTeamId;
+            const membershipRole =
+              normalizeTeamRole(membershipRec.role) ?? "viewer";
+
+            upsertTeamRow(dbHandle, membershipTeamId, membershipTeamName);
+            upsertTeamMembership(
+              dbHandle,
+              userId,
+              membershipRole,
+              membershipTeamId
+            );
+          }
+
+          const session = setActiveSession(dbHandle, userId, teamId);
+          result = {
+            ok: true,
+            result: session,
+            invalidate: ["session", "team", "users", "items"],
+          };
+          break;
+        }
+        case "auth.session.set": {
+          const userId = ensureString(args.user_id, "user_id");
+          const teamId = ensureString(args.team_id, "team_id");
+          const session = setActiveSession(dbHandle, userId, teamId);
+          result = {
+            ok: true,
+            result: session,
+            invalidate: ["session", "team", "users", "items"],
+          };
+          break;
+        }
+        case "auth.logout": {
+          const activeSession = getActiveSession(dbHandle);
+          if (!activeSession) {
+            result = {
+              ok: true,
+              result: { logged_out: false, session_id: null },
+              invalidate: ["session"],
+            };
+            break;
+          }
+          dbHandle.exec(
+            "UPDATE sessions SET is_active = 0, updated_at = ? WHERE session_id = ?;",
+            {
+              bind: [Date.now(), activeSession.session_id],
+            }
+          );
+          result = {
+            ok: true,
+            result: { logged_out: true, session_id: activeSession.session_id },
+            invalidate: ["session", "team", "users", "items"],
+          };
+          break;
+        }
+        case "team.member.set_role": {
+          const currentTeamId = getCurrentTeamId(dbHandle);
+          const userId = ensureString(args.user_id, "user_id");
+          const requestedRole = ensureString(args.role, "role").toLowerCase();
+          const roleValue = normalizeTeamRole(requestedRole);
+          if (!roleValue) {
+            result = { ok: false, error: "role must be owner, editor, or viewer" };
+            break;
+          }
+          upsertDefaultTeam(dbHandle);
+          dbHandle.exec(
+            "INSERT INTO team_members (team_id, user_id, role, created_at) VALUES (?, ?, ?, ?) ON CONFLICT(team_id, user_id) DO UPDATE SET role = excluded.role;",
+            {
+              bind: [currentTeamId, userId, roleValue, Date.now()],
+            }
+          );
+          result = {
+            ok: true,
+            result: { team_id: currentTeamId, user_id: userId, role: roleValue },
+            invalidate: ["team", "users"],
+          };
+          break;
+        }
+        case "team.member.add": {
+          const currentTeamId = getCurrentTeamId(dbHandle);
+          const userId = ensureString(args.user_id, "user_id");
+          upsertDefaultTeam(dbHandle);
+          dbHandle.exec(
+            "INSERT INTO team_members (team_id, user_id, role, created_at) VALUES (?, ?, ?, ?) ON CONFLICT(team_id, user_id) DO NOTHING;",
+            {
+              bind: [currentTeamId, userId, "editor", Date.now()],
+            }
+          );
+          result = {
+            ok: true,
+            result: { team_id: currentTeamId, user_id: userId },
+            invalidate: ["team", "users"],
           };
           break;
         }
         case "item.set_assignee": {
+          const currentTeamId = getCurrentTeamId(dbHandle);
           const itemId = ensureString(args.item_id, "item_id");
+          ensureItemInTeam(dbHandle, itemId, currentTeamId);
           const userId =
             args.user_id === null || args.user_id === undefined
               ? null
@@ -3132,7 +4513,9 @@ const handleMutate = (envelope: MutateEnvelope): MutateResult => {
           break;
         }
         case "set_item_assignees": {
+          const currentTeamId = getCurrentTeamId(dbHandle);
           const itemId = ensureString(args.item_id, "item_id");
+          ensureItemInTeam(dbHandle, itemId, currentTeamId);
           const assigneesRaw = ensureArray(
             args.assignee_ids,
             "assignee_ids"
@@ -3167,15 +4550,43 @@ const handleMutate = (envelope: MutateEnvelope): MutateResult => {
           break;
         }
         default:
-          result = { ok: false, error: `Unknown operation: ${envelope.op_name}` };
+        result = { ok: false, error: `Unknown operation: ${envelope.op_name}` };
           break;
       }
     } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      result = { ok: false, error: message };
+      const codedError = asRpcErrorPayload(err);
+      if (codedError) {
+        result = { ok: false, error: codedError };
+      } else {
+        const message = err instanceof Error ? err.message : String(err);
+        result = { ok: false, error: message };
+      }
     }
 
-    insertAuditLog(dbHandle, envelope, result);
+    if (
+      result.ok &&
+      !options.skipOutbox &&
+      !OUTBOX_SKIPPED_OPS.has(envelope.op_name)
+    ) {
+      const activeSession = sessionForOutbox ?? getActiveSession(dbHandle);
+      if (!activeSession) {
+        throw new Error(
+          `Unable to resolve active session for outbox op: ${envelope.op_name}`
+        );
+      }
+      enqueueOutboxOp(
+        dbHandle,
+        envelope.op_name,
+        deriveOutboxPayload(envelope.op_name, args, result),
+        activeSession,
+        envelope.op_id,
+        envelope.ts
+      );
+    }
+
+    if (!options.skipAudit) {
+      insertAuditLog(dbHandle, envelope, result);
+    }
     return result;
   });
 };
@@ -3275,6 +4686,15 @@ const handleRequest = async (message: RpcRequest): Promise<RpcResponse> => {
       ensureString(envelope.actor_type, "actor_type");
       ensureNumber(envelope.ts, "ts");
     } catch (err) {
+      const codedError = asRpcErrorPayload(err);
+      if (codedError) {
+        return {
+          id: message.id,
+          kind: "response",
+          ok: true,
+          result: { ok: false, error: codedError },
+        };
+      }
       const messageText = err instanceof Error ? err.message : String(err);
       return {
         id: message.id,
@@ -3327,15 +4747,23 @@ const handleRequest = async (message: RpcRequest): Promise<RpcResponse> => {
     try {
       const args = (envelope.args ?? {}) as Record<string, unknown>;
       let result: QueryResult = { ok: false, error: "Unknown query" };
+      const allowsNoSession =
+        envelope.name === "auth.session.current" ||
+        envelope.name === "auth.session.options";
+      if (!allowsNoSession) {
+        const session = requireSession(dbHandle);
+        requireCanReadTeam(session, session.team_id, dbHandle);
+      }
 
       switch (envelope.name) {
         case "getItemDetails": {
+          const currentTeamId = getCurrentTeamId(dbHandle);
           const itemId = ensureString(args.itemId, "itemId");
           const rows = dbHandle.exec({
-            sql: "SELECT id, type, title, parent_id, status, priority, due_at, estimate_mode, estimate_minutes, health, health_mode, notes FROM items WHERE id = ? LIMIT 1;",
+            sql: "SELECT id, type, title, parent_id, status, priority, due_at, estimate_mode, estimate_minutes, health, health_mode, notes FROM items WHERE id = ? AND team_id = ? LIMIT 1;",
             rowMode: "array",
             returnValue: "resultRows",
-            bind: [itemId],
+            bind: [itemId, currentTeamId],
           }) as Array<
             [
               string,
@@ -3361,11 +4789,12 @@ const handleRequest = async (message: RpcRequest): Promise<RpcResponse> => {
           const depsRows = dbHandle.exec({
             sql: `SELECT d.depends_on_id, i.status, d.type, d.lag_minutes, i.title
               FROM dependencies d
-              LEFT JOIN items i ON i.id = d.depends_on_id
+              JOIN items owner ON owner.id = d.item_id AND owner.team_id = ?
+              LEFT JOIN items i ON i.id = d.depends_on_id AND i.team_id = owner.team_id
               WHERE d.item_id = ?;`,
             rowMode: "array",
             returnValue: "resultRows",
-            bind: [itemId],
+            bind: [currentTeamId, itemId],
           }) as Array<
             [string, string | null, string | null, number | null, string | null]
           >;
@@ -3409,15 +4838,16 @@ const handleRequest = async (message: RpcRequest): Promise<RpcResponse> => {
           const actualMinutes = actualRows[0]?.[0] ? Number(actualRows[0][0]) : 0;
           const treeRows = dbHandle.exec({
             sql: `WITH RECURSIVE tree AS (
-              SELECT id, parent_id, estimate_mode, estimate_minutes, status, due_at FROM items WHERE id = ?
+              SELECT id, parent_id, estimate_mode, estimate_minutes, status, due_at FROM items WHERE id = ? AND team_id = ?
               UNION ALL
               SELECT i.id, i.parent_id, i.estimate_mode, i.estimate_minutes, i.status, i.due_at
               FROM items i JOIN tree t ON i.parent_id = t.id
+              WHERE i.team_id = ?
             )
             SELECT id, parent_id, estimate_mode, estimate_minutes, status, due_at FROM tree;`,
             rowMode: "array",
             returnValue: "resultRows",
-            bind: [itemId],
+            bind: [itemId, currentTeamId, currentTeamId],
           }) as Array<[string, string | null, string, number, string, number | null]>;
           const treeIds = treeRows.map((row) => row[0]);
           const treeScheduleMap = getScheduleSummaryMap(dbHandle, treeIds);
@@ -3578,10 +5008,17 @@ const handleRequest = async (message: RpcRequest): Promise<RpcResponse> => {
           break;
         }
         case "get_running_timer": {
+          const currentTeamId = getCurrentTeamId(dbHandle);
           const rows = dbHandle.exec({
-            sql: "SELECT item_id, start_at, note FROM running_timers ORDER BY start_at ASC LIMIT 1;",
+            sql: `SELECT rt.item_id, rt.start_at, rt.note
+              FROM running_timers rt
+              JOIN items i ON i.id = rt.item_id
+              WHERE i.team_id = ?
+              ORDER BY rt.start_at ASC
+              LIMIT 1;`,
             rowMode: "array",
             returnValue: "resultRows",
+            bind: [currentTeamId],
           }) as Array<[string, number, string | null]>;
           result = {
             ok: true,
@@ -3597,19 +5034,20 @@ const handleRequest = async (message: RpcRequest): Promise<RpcResponse> => {
           break;
         }
         case "getProjectTree": {
+          const currentTeamId = getCurrentTeamId(dbHandle);
           const projectId = ensureString(args.projectId, "projectId");
           const rows = dbHandle.exec({
             sql: `WITH RECURSIVE tree AS (
-              SELECT * FROM items WHERE id = ?
+              SELECT * FROM items WHERE id = ? AND team_id = ?
               UNION ALL
-              SELECT i.* FROM items i JOIN tree t ON i.parent_id = t.id
+              SELECT i.* FROM items i JOIN tree t ON i.parent_id = t.id WHERE i.team_id = ?
             )
             SELECT id, type, title, parent_id, status, priority, due_at, estimate_mode, estimate_minutes, health, health_mode, notes
             FROM tree
             ORDER BY sort_order ASC, CASE WHEN due_at IS NULL THEN 1 ELSE 0 END, due_at ASC, title ASC;`,
             rowMode: "array",
             returnValue: "resultRows",
-            bind: [projectId],
+            bind: [projectId, currentTeamId, currentTeamId],
           }) as Array<[string, string, string, string | null, string, number, number, string, number, string, string, string | null]>;
 
           const ids = rows.map((row) => row[0]);
@@ -3722,6 +5160,7 @@ const handleRequest = async (message: RpcRequest): Promise<RpcResponse> => {
           break;
         }
         case "listKanban": {
+          const currentTeamId = getCurrentTeamId(dbHandle);
           const projectId =
             typeof args.projectId === "string" ? args.projectId : null;
           const rows = dbHandle.exec({
@@ -3731,24 +5170,26 @@ const handleRequest = async (message: RpcRequest): Promise<RpcResponse> => {
                   EXISTS(SELECT 1 FROM blockers b WHERE b.item_id = items.id AND b.cleared_at IS NULL)
                   OR EXISTS(
                     SELECT 1 FROM dependencies d
-                    LEFT JOIN items di ON di.id = d.depends_on_id
+                    LEFT JOIN items di ON di.id = d.depends_on_id AND di.team_id = items.team_id
                     WHERE d.item_id = items.id AND (di.id IS NULL OR di.status != 'done')
                   )
                 ) AS is_blocked
-                FROM items WHERE parent_id = ? ORDER BY sort_order ASC, CASE WHEN due_at IS NULL THEN 1 ELSE 0 END, due_at ASC, title ASC;`
+                FROM items WHERE parent_id = ? AND team_id = ? ORDER BY sort_order ASC, CASE WHEN due_at IS NULL THEN 1 ELSE 0 END, due_at ASC, title ASC;`
               : `SELECT id, type, title, parent_id, status, priority, due_at,
                 (
                   EXISTS(SELECT 1 FROM blockers b WHERE b.item_id = items.id AND b.cleared_at IS NULL)
                   OR EXISTS(
                     SELECT 1 FROM dependencies d
-                    LEFT JOIN items di ON di.id = d.depends_on_id
+                    LEFT JOIN items di ON di.id = d.depends_on_id AND di.team_id = items.team_id
                     WHERE d.item_id = items.id AND (di.id IS NULL OR di.status != 'done')
                   )
                 ) AS is_blocked
-                FROM items ORDER BY sort_order ASC, CASE WHEN due_at IS NULL THEN 1 ELSE 0 END, due_at ASC, title ASC;`,
+                FROM items
+                WHERE team_id = ?
+                ORDER BY sort_order ASC, CASE WHEN due_at IS NULL THEN 1 ELSE 0 END, due_at ASC, title ASC;`,
             rowMode: "array",
             returnValue: "resultRows",
-            bind: projectId ? [projectId] : undefined,
+            bind: projectId ? [projectId, currentTeamId] : [currentTeamId],
           }) as Array<
             [
               string,
@@ -3839,6 +5280,7 @@ const handleRequest = async (message: RpcRequest): Promise<RpcResponse> => {
           break;
         }
         case "listItems": {
+          const currentTeamId = getCurrentTeamId(dbHandle);
           const projectIdArg =
             typeof args.projectId === "string" ? args.projectId : null;
           const isUngrouped = projectIdArg === UNGROUPED_PROJECT_ID;
@@ -3868,9 +5310,9 @@ const handleRequest = async (message: RpcRequest): Promise<RpcResponse> => {
           const rows = dbHandle.exec({
             sql: isUngrouped
               ? `WITH RECURSIVE tree AS (
-                  SELECT * FROM items WHERE parent_id IS NULL AND type = 'task'
+                  SELECT * FROM items WHERE parent_id IS NULL AND type = 'task' AND team_id = ?
                   UNION ALL
-                  SELECT i.* FROM items i JOIN tree t ON i.parent_id = t.id
+                  SELECT i.* FROM items i JOIN tree t ON i.parent_id = t.id WHERE i.team_id = ?
                 )
                 SELECT * FROM (
                   SELECT id, type, title, parent_id, status, priority, due_at,
@@ -3884,9 +5326,9 @@ const handleRequest = async (message: RpcRequest): Promise<RpcResponse> => {
                   title ASC;`
               : projectId
                 ? `WITH RECURSIVE tree AS (
-                    SELECT * FROM items WHERE id = ?
+                    SELECT * FROM items WHERE id = ? AND team_id = ?
                     UNION ALL
-                    SELECT i.* FROM items i JOIN tree t ON i.parent_id = t.id
+                    SELECT i.* FROM items i JOIN tree t ON i.parent_id = t.id WHERE i.team_id = ?
                   )
                   SELECT * FROM (
                     SELECT id, type, title, parent_id, status, priority, due_at,
@@ -3901,14 +5343,19 @@ const handleRequest = async (message: RpcRequest): Promise<RpcResponse> => {
                 : `SELECT id, type, title, parent_id, status, priority, due_at,
                     estimate_mode, estimate_minutes, health, health_mode, notes, updated_at, sort_order, archived_at
                   FROM items
-                  WHERE ${archiveWhere}
+                  WHERE team_id = ?
+                    AND ${archiveWhere}
                   ORDER BY sort_order ASC,
                     CASE WHEN due_at IS NULL THEN 1 ELSE 0 END,
                     due_at ASC,
                     title ASC;`,
             rowMode: "array",
             returnValue: "resultRows",
-            bind: projectId ? [projectId] : undefined,
+            bind: isUngrouped
+              ? [currentTeamId, currentTeamId]
+              : projectId
+                ? [projectId, currentTeamId, currentTeamId]
+                : [currentTeamId],
           }) as Array<
             [
               string,
@@ -4164,6 +5611,7 @@ const handleRequest = async (message: RpcRequest): Promise<RpcResponse> => {
         }
         case "list_view_complete":
         case "list_view_scope": {
+          const currentTeamId = getCurrentTeamId(dbHandle);
           const { scopeProjectId, scopeUserId } = resolveScopeArgs(
             args as Record<string, unknown>
           );
@@ -4184,9 +5632,9 @@ const handleRequest = async (message: RpcRequest): Promise<RpcResponse> => {
           const fetchTree = (rootId: string) =>
             dbHandle.exec({
               sql: `WITH RECURSIVE tree AS (
-                SELECT * FROM items WHERE id = ?
+                SELECT * FROM items WHERE id = ? AND team_id = ?
                 UNION ALL
-                SELECT i.* FROM items i JOIN tree t ON i.parent_id = t.id
+                SELECT i.* FROM items i JOIN tree t ON i.parent_id = t.id WHERE i.team_id = ?
               )
               SELECT id, type, title, parent_id, status, priority, due_at,
                 estimate_mode, estimate_minutes, notes, created_at, updated_at, sort_order, completed_at
@@ -4198,7 +5646,7 @@ const handleRequest = async (message: RpcRequest): Promise<RpcResponse> => {
                 title ASC;`,
               rowMode: "array",
               returnValue: "resultRows",
-              bind: [rootId],
+              bind: [rootId, currentTeamId, currentTeamId],
             }) as Array<
               [
                 string,
@@ -4221,9 +5669,9 @@ const handleRequest = async (message: RpcRequest): Promise<RpcResponse> => {
           const fetchUngrouped = () =>
             dbHandle.exec({
               sql: `WITH RECURSIVE tree AS (
-                SELECT * FROM items WHERE parent_id IS NULL AND type = 'task'
+                SELECT * FROM items WHERE parent_id IS NULL AND type = 'task' AND team_id = ?
                 UNION ALL
-                SELECT i.* FROM items i JOIN tree t ON i.parent_id = t.id
+                SELECT i.* FROM items i JOIN tree t ON i.parent_id = t.id WHERE i.team_id = ?
               )
               SELECT id, type, title, parent_id, status, priority, due_at,
                 estimate_mode, estimate_minutes, notes, created_at, updated_at, sort_order, completed_at
@@ -4235,6 +5683,7 @@ const handleRequest = async (message: RpcRequest): Promise<RpcResponse> => {
                 title ASC;`,
               rowMode: "array",
               returnValue: "resultRows",
+              bind: [currentTeamId, currentTeamId],
             }) as Array<
               [
                 string,
@@ -4259,13 +5708,15 @@ const handleRequest = async (message: RpcRequest): Promise<RpcResponse> => {
               sql: `SELECT id, type, title, parent_id, status, priority, due_at,
                 estimate_mode, estimate_minutes, notes, created_at, updated_at, sort_order, completed_at
               FROM items
-              WHERE ${archiveWhere}
+              WHERE team_id = ?
+                AND ${archiveWhere}
               ORDER BY sort_order ASC,
                 CASE WHEN due_at IS NULL THEN 1 ELSE 0 END,
                 due_at ASC,
                 title ASC;`,
               rowMode: "array",
               returnValue: "resultRows",
+              bind: [currentTeamId],
             }) as Array<
               [
                 string,
@@ -4288,15 +5739,16 @@ const handleRequest = async (message: RpcRequest): Promise<RpcResponse> => {
           const fetchTreeForUser = (rootId: string, userId: string) =>
             dbHandle.exec({
               sql: `WITH RECURSIVE tree AS (
-                SELECT * FROM items WHERE id = ?
+                SELECT * FROM items WHERE id = ? AND team_id = ?
                 UNION ALL
-                SELECT i.* FROM items i JOIN tree t ON i.parent_id = t.id
+                SELECT i.* FROM items i JOIN tree t ON i.parent_id = t.id WHERE i.team_id = ?
               )
               SELECT i.id, i.type, i.title, i.parent_id, i.status, i.priority, i.due_at,
                 i.estimate_mode, i.estimate_minutes, i.notes, i.created_at, i.updated_at, i.sort_order, i.completed_at
               FROM tree i
               JOIN item_assignees a ON a.item_id = i.id
               WHERE a.assignee_id = ?
+                AND i.team_id = ?
                 AND ${archiveWhereAlias}
               ORDER BY i.sort_order ASC,
                 CASE WHEN i.due_at IS NULL THEN 1 ELSE 0 END,
@@ -4304,7 +5756,7 @@ const handleRequest = async (message: RpcRequest): Promise<RpcResponse> => {
                 i.title ASC;`,
               rowMode: "array",
               returnValue: "resultRows",
-              bind: [rootId, userId],
+              bind: [rootId, currentTeamId, currentTeamId, userId, currentTeamId],
             }) as Array<
               [
                 string,
@@ -4327,15 +5779,16 @@ const handleRequest = async (message: RpcRequest): Promise<RpcResponse> => {
           const fetchUngroupedForUser = (userId: string) =>
             dbHandle.exec({
               sql: `WITH RECURSIVE tree AS (
-                SELECT * FROM items WHERE parent_id IS NULL AND type = 'task'
+                SELECT * FROM items WHERE parent_id IS NULL AND type = 'task' AND team_id = ?
                 UNION ALL
-                SELECT i.* FROM items i JOIN tree t ON i.parent_id = t.id
+                SELECT i.* FROM items i JOIN tree t ON i.parent_id = t.id WHERE i.team_id = ?
               )
               SELECT i.id, i.type, i.title, i.parent_id, i.status, i.priority, i.due_at,
                 i.estimate_mode, i.estimate_minutes, i.notes, i.created_at, i.updated_at, i.sort_order, i.completed_at
               FROM tree i
               JOIN item_assignees a ON a.item_id = i.id
               WHERE a.assignee_id = ?
+                AND i.team_id = ?
                 AND ${archiveWhereAlias}
               ORDER BY i.sort_order ASC,
                 CASE WHEN i.due_at IS NULL THEN 1 ELSE 0 END,
@@ -4343,7 +5796,7 @@ const handleRequest = async (message: RpcRequest): Promise<RpcResponse> => {
                 i.title ASC;`,
               rowMode: "array",
               returnValue: "resultRows",
-              bind: [userId],
+              bind: [currentTeamId, currentTeamId, userId, currentTeamId],
             }) as Array<
               [
                 string,
@@ -4370,6 +5823,7 @@ const handleRequest = async (message: RpcRequest): Promise<RpcResponse> => {
               FROM items i
               JOIN item_assignees a ON a.item_id = i.id
               WHERE a.assignee_id = ?
+                AND i.team_id = ?
                 AND ${archiveWhereAlias}
               ORDER BY i.sort_order ASC,
                 CASE WHEN i.due_at IS NULL THEN 1 ELSE 0 END,
@@ -4377,7 +5831,7 @@ const handleRequest = async (message: RpcRequest): Promise<RpcResponse> => {
                 i.title ASC;`,
               rowMode: "array",
               returnValue: "resultRows",
-              bind: [userId],
+              bind: [userId, currentTeamId],
             }) as Array<
               [
                 string,
@@ -4616,10 +6070,12 @@ const handleRequest = async (message: RpcRequest): Promise<RpcResponse> => {
           if (missingIds.length > 0) {
             const metaRows = dbHandle.exec({
               sql: `SELECT id, title, type, status, parent_id, due_at, updated_at
-                FROM items WHERE id IN (${buildPlaceholders(missingIds.length)});`,
+                FROM items
+                WHERE team_id = ?
+                  AND id IN (${buildPlaceholders(missingIds.length)});`,
               rowMode: "array",
               returnValue: "resultRows",
-              bind: missingIds,
+              bind: [currentTeamId, ...missingIds],
             }) as Array<
               [string, string, string, string, string | null, number | null, number]
             >;
@@ -5507,6 +6963,7 @@ const handleRequest = async (message: RpcRequest): Promise<RpcResponse> => {
           break;
         }
         case "kanban_view": {
+          const currentTeamId = getCurrentTeamId(dbHandle);
           const { scopeProjectId, scopeUserId } = resolveScopeArgs(
             args as Record<string, unknown>
           );
@@ -5537,33 +6994,40 @@ const handleRequest = async (message: RpcRequest): Promise<RpcResponse> => {
           if (scopeProjectId) {
             hierarchyRows = dbHandle.exec({
               sql: `WITH RECURSIVE tree AS (
-                SELECT id, type, title, parent_id FROM items WHERE id = ?
+                SELECT id, type, title, parent_id FROM items WHERE id = ? AND team_id = ?
                 UNION ALL
                 SELECT i.id, i.type, i.title, i.parent_id
                 FROM items i JOIN tree t ON i.parent_id = t.id
+                WHERE i.team_id = ?
               )
               SELECT id, type, parent_id, title FROM tree;`,
               rowMode: "array",
               returnValue: "resultRows",
-              bind: [scopeProjectId],
+              bind: [scopeProjectId, currentTeamId, currentTeamId],
             }) as Array<[string, string, string | null, string]>;
 
             if (scopeUserId) {
               taskRows = dbHandle.exec({
                 sql: `WITH RECURSIVE tree AS (
-                  SELECT * FROM items WHERE id = ?
+                  SELECT * FROM items WHERE id = ? AND team_id = ?
                   UNION ALL
-                  SELECT i.* FROM items i JOIN tree t ON i.parent_id = t.id
+                  SELECT i.* FROM items i JOIN tree t ON i.parent_id = t.id WHERE i.team_id = ?
                 )
                 SELECT i.id, i.type, i.title, i.parent_id, i.status, i.priority,
                   i.due_at, i.health, i.updated_at
                 FROM tree i
                 JOIN item_assignees a ON a.item_id = i.id
-                WHERE i.type = 'task' AND a.assignee_id = ?
+                WHERE i.type = 'task' AND a.assignee_id = ? AND i.team_id = ?
                 ORDER BY i.updated_at DESC;`,
                 rowMode: "array",
                 returnValue: "resultRows",
-                bind: [scopeProjectId, scopeUserId],
+                bind: [
+                  scopeProjectId,
+                  currentTeamId,
+                  currentTeamId,
+                  scopeUserId,
+                  currentTeamId,
+                ],
               }) as Array<
                 [
                   string,
@@ -5580,9 +7044,9 @@ const handleRequest = async (message: RpcRequest): Promise<RpcResponse> => {
             } else {
               taskRows = dbHandle.exec({
                 sql: `WITH RECURSIVE tree AS (
-                  SELECT * FROM items WHERE id = ?
+                  SELECT * FROM items WHERE id = ? AND team_id = ?
                   UNION ALL
-                  SELECT i.* FROM items i JOIN tree t ON i.parent_id = t.id
+                  SELECT i.* FROM items i JOIN tree t ON i.parent_id = t.id WHERE i.team_id = ?
                 )
                 SELECT id, type, title, parent_id, status, priority,
                   due_at, health, updated_at
@@ -5591,7 +7055,7 @@ const handleRequest = async (message: RpcRequest): Promise<RpcResponse> => {
                 ORDER BY updated_at DESC;`,
                 rowMode: "array",
                 returnValue: "resultRows",
-                bind: [scopeProjectId],
+                bind: [scopeProjectId, currentTeamId, currentTeamId],
               }) as Array<
                 [
                   string,
@@ -5608,9 +7072,10 @@ const handleRequest = async (message: RpcRequest): Promise<RpcResponse> => {
             }
           } else {
             hierarchyRows = dbHandle.exec({
-              sql: "SELECT id, type, parent_id, title FROM items;",
+              sql: "SELECT id, type, parent_id, title FROM items WHERE team_id = ?;",
               rowMode: "array",
               returnValue: "resultRows",
+              bind: [currentTeamId],
             }) as Array<[string, string, string | null, string]>;
 
             if (scopeUserId) {
@@ -5619,11 +7084,11 @@ const handleRequest = async (message: RpcRequest): Promise<RpcResponse> => {
                   i.priority, i.due_at, i.health, i.updated_at
                 FROM items i
                 JOIN item_assignees a ON a.item_id = i.id
-                WHERE i.type = 'task' AND a.assignee_id = ?
+                WHERE i.type = 'task' AND a.assignee_id = ? AND i.team_id = ?
                 ORDER BY i.updated_at DESC;`,
                 rowMode: "array",
                 returnValue: "resultRows",
-                bind: [scopeUserId],
+                bind: [scopeUserId, currentTeamId],
               }) as Array<
                 [
                   string,
@@ -5642,10 +7107,11 @@ const handleRequest = async (message: RpcRequest): Promise<RpcResponse> => {
                 sql: `SELECT id, type, title, parent_id, status,
                   priority, due_at, health, updated_at
                 FROM items
-                WHERE type = 'task'
+                WHERE type = 'task' AND team_id = ?
                 ORDER BY updated_at DESC;`,
                 rowMode: "array",
                 returnValue: "resultRows",
+                bind: [currentTeamId],
               }) as Array<
                 [
                   string,
@@ -5863,6 +7329,7 @@ const handleRequest = async (message: RpcRequest): Promise<RpcResponse> => {
           break;
         }
         case "searchItems": {
+          const currentTeamId = getCurrentTeamId(dbHandle);
           const rawQuery = typeof args.q === "string" ? args.q : "";
           const normalized = rawQuery.trim().toLowerCase();
           if (!normalized) {
@@ -5880,13 +7347,14 @@ const handleRequest = async (message: RpcRequest): Promise<RpcResponse> => {
           const prefixRows = dbHandle.exec({
             sql: `SELECT id, title, type, parent_id, status, due_at, completed_at, updated_at
               FROM items
-              WHERE type != 'project'
+              WHERE team_id = ?
+                AND type != 'project'
                 AND title LIKE ? ESCAPE '\\' COLLATE NOCASE
               ORDER BY LENGTH(title) ASC, updated_at DESC
               LIMIT ?;`,
             rowMode: "array",
             returnValue: "resultRows",
-            bind: [prefixPattern, fetchLimit],
+            bind: [currentTeamId, prefixPattern, fetchLimit],
           }) as Array<
             [
               string,
@@ -5911,7 +7379,8 @@ const handleRequest = async (message: RpcRequest): Promise<RpcResponse> => {
             const substringRows = dbHandle.exec({
               sql: `SELECT id, title, type, parent_id, status, due_at, completed_at, updated_at
                 FROM items
-                WHERE type != 'project'
+                WHERE team_id = ?
+                  AND type != 'project'
                   AND title LIKE ? ESCAPE '\\' COLLATE NOCASE
                   ${excludeClause}
                 ORDER BY LENGTH(title) ASC, updated_at DESC
@@ -5920,8 +7389,8 @@ const handleRequest = async (message: RpcRequest): Promise<RpcResponse> => {
               returnValue: "resultRows",
               bind:
                 excludeIds.length > 0
-                  ? [likePattern, ...excludeIds, remaining]
-                  : [likePattern, remaining],
+                  ? [currentTeamId, likePattern, ...excludeIds, remaining]
+                  : [currentTeamId, likePattern, remaining],
             }) as Array<
               [
                 string,
@@ -5943,9 +7412,10 @@ const handleRequest = async (message: RpcRequest): Promise<RpcResponse> => {
           }
 
           const hierarchyRows = dbHandle.exec({
-            sql: "SELECT id, type, parent_id FROM items;",
+            sql: "SELECT id, type, parent_id FROM items WHERE team_id = ?;",
             rowMode: "array",
             returnValue: "resultRows",
+            bind: [currentTeamId],
           }) as Array<[string, string, string | null]>;
           const { projectMap } = buildHierarchyMaps(hierarchyRows, null);
           let scopeProjectId: string | null = null;
@@ -6013,14 +7483,15 @@ const handleRequest = async (message: RpcRequest): Promise<RpcResponse> => {
           break;
         }
         case "listGantt": {
+          const currentTeamId = getCurrentTeamId(dbHandle);
           const projectId =
             typeof args.projectId === "string" ? args.projectId : null;
           const rows = dbHandle.exec({
             sql: projectId
               ? `WITH RECURSIVE tree AS (
-                  SELECT * FROM items WHERE id = ?
+                  SELECT * FROM items WHERE id = ? AND team_id = ?
                   UNION ALL
-                  SELECT i.* FROM items i JOIN tree t ON i.parent_id = t.id
+                  SELECT i.* FROM items i JOIN tree t ON i.parent_id = t.id WHERE i.team_id = ?
                 )
                 SELECT id, type, title, parent_id, status, priority, due_at,
                   estimate_mode, estimate_minutes, health, health_mode, notes
@@ -6029,10 +7500,13 @@ const handleRequest = async (message: RpcRequest): Promise<RpcResponse> => {
               : `SELECT id, type, title, parent_id, status, priority, due_at,
                   estimate_mode, estimate_minutes, health, health_mode, notes
                 FROM items
+                WHERE team_id = ?
                 ORDER BY sort_order ASC, CASE WHEN due_at IS NULL THEN 1 ELSE 0 END, due_at ASC, title ASC;`,
             rowMode: "array",
             returnValue: "resultRows",
-            bind: projectId ? [projectId] : undefined,
+            bind: projectId
+              ? [projectId, currentTeamId, currentTeamId]
+              : [currentTeamId],
           }) as Array<
             [
               string,
@@ -6192,6 +7666,7 @@ const handleRequest = async (message: RpcRequest): Promise<RpcResponse> => {
           break;
         }
         case "listExecution": {
+          const currentTeamId = getCurrentTeamId(dbHandle);
           const projectId =
             typeof args.projectId === "string" ? args.projectId : null;
           const assigneeId =
@@ -6201,19 +7676,22 @@ const handleRequest = async (message: RpcRequest): Promise<RpcResponse> => {
           const itemsRows = dbHandle.exec({
             sql: projectId
               ? `WITH RECURSIVE tree AS (
-                  SELECT * FROM items WHERE id = ?
+                  SELECT * FROM items WHERE id = ? AND team_id = ?
                   UNION ALL
-                  SELECT i.* FROM items i JOIN tree t ON i.parent_id = t.id
+                  SELECT i.* FROM items i JOIN tree t ON i.parent_id = t.id WHERE i.team_id = ?
                 )
                 SELECT id, type, title, parent_id, status, priority, due_at,
                   estimate_mode, estimate_minutes, health, health_mode, notes
                 FROM tree;`
               : `SELECT id, type, title, parent_id, status, priority, due_at,
                   estimate_mode, estimate_minutes, health, health_mode, notes
-                FROM items;`,
+                FROM items
+                WHERE team_id = ?;`,
             rowMode: "array",
             returnValue: "resultRows",
-            bind: projectId ? [projectId] : undefined,
+            bind: projectId
+              ? [projectId, currentTeamId, currentTeamId]
+              : [currentTeamId],
           }) as Array<
             [
               string,
@@ -6431,6 +7909,7 @@ const handleRequest = async (message: RpcRequest): Promise<RpcResponse> => {
           break;
         }
         case "listBlocked": {
+          const currentTeamId = getCurrentTeamId(dbHandle);
           const projectId =
             typeof args.projectId === "string" ? args.projectId : null;
           const assigneeId =
@@ -6442,9 +7921,9 @@ const handleRequest = async (message: RpcRequest): Promise<RpcResponse> => {
           const rows = dbHandle.exec({
             sql: projectId
               ? `WITH RECURSIVE tree AS (
-                  SELECT * FROM items WHERE id = ?
+                  SELECT * FROM items WHERE id = ? AND team_id = ?
                   UNION ALL
-                  SELECT i.* FROM items i JOIN tree t ON i.parent_id = t.id
+                  SELECT i.* FROM items i JOIN tree t ON i.parent_id = t.id WHERE i.team_id = ?
                 )
                 SELECT id, type, title, parent_id, status, priority, due_at,
                   estimate_mode, estimate_minutes, health, health_mode, notes
@@ -6453,10 +7932,13 @@ const handleRequest = async (message: RpcRequest): Promise<RpcResponse> => {
               : `SELECT id, type, title, parent_id, status, priority, due_at,
                   estimate_mode, estimate_minutes, health, health_mode, notes
                 FROM items
+                WHERE team_id = ?
                 ORDER BY sort_order ASC, CASE WHEN due_at IS NULL THEN 1 ELSE 0 END, due_at ASC, title ASC;`,
             rowMode: "array",
             returnValue: "resultRows",
-            bind: projectId ? [projectId] : undefined,
+            bind: projectId
+              ? [projectId, currentTeamId, currentTeamId]
+              : [currentTeamId],
           }) as Array<
             [
               string,
@@ -6616,6 +8098,7 @@ const handleRequest = async (message: RpcRequest): Promise<RpcResponse> => {
           break;
         }
         case "listByUser": {
+          const currentTeamId = getCurrentTeamId(dbHandle);
           const projectId =
             typeof args.projectId === "string" ? args.projectId : null;
           const assigneeFilter =
@@ -6631,19 +8114,22 @@ const handleRequest = async (message: RpcRequest): Promise<RpcResponse> => {
           const rows = dbHandle.exec({
             sql: projectId
               ? `WITH RECURSIVE tree AS (
-                  SELECT * FROM items WHERE id = ?
+                  SELECT * FROM items WHERE id = ? AND team_id = ?
                   UNION ALL
-                  SELECT i.* FROM items i JOIN tree t ON i.parent_id = t.id
+                  SELECT i.* FROM items i JOIN tree t ON i.parent_id = t.id WHERE i.team_id = ?
                 )
                 SELECT id, type, title, parent_id, status, priority, due_at,
                   estimate_mode, estimate_minutes, health, health_mode, notes
                 FROM tree;`
               : `SELECT id, type, title, parent_id, status, priority, due_at,
                   estimate_mode, estimate_minutes, health, health_mode, notes
-                FROM items;`,
+                FROM items
+                WHERE team_id = ?;`,
             rowMode: "array",
             returnValue: "resultRows",
-            bind: projectId ? [projectId] : undefined,
+            bind: projectId
+              ? [projectId, currentTeamId, currentTeamId]
+              : [currentTeamId],
           }) as Array<
             [
               string,
@@ -6807,12 +8293,13 @@ const handleRequest = async (message: RpcRequest): Promise<RpcResponse> => {
           break;
         }
         case "listOverdue": {
+          const currentTeamId = getCurrentTeamId(dbHandle);
           const now = Date.now();
           const rows = dbHandle.exec({
-            sql: "SELECT id, type, title, parent_id, status, priority, due_at FROM items WHERE due_at IS NOT NULL AND due_at < ? AND status NOT IN ('done', 'canceled') ORDER BY due_at ASC;",
+            sql: "SELECT id, type, title, parent_id, status, priority, due_at FROM items WHERE team_id = ? AND due_at IS NOT NULL AND due_at < ? AND status NOT IN ('done', 'canceled') ORDER BY due_at ASC;",
             rowMode: "array",
             returnValue: "resultRows",
-            bind: [now],
+            bind: [currentTeamId, now],
           }) as Array<[string, string, string, string | null, string, number, number]>;
 
           result = {
@@ -6834,14 +8321,15 @@ const handleRequest = async (message: RpcRequest): Promise<RpcResponse> => {
           break;
         }
         case "listDueSoon": {
+          const currentTeamId = getCurrentTeamId(dbHandle);
           const days = ensureNumber(args.days, "days");
           const now = Date.now();
           const end = now + days * 24 * 60 * 60 * 1000;
           const rows = dbHandle.exec({
-            sql: "SELECT id, type, title, parent_id, status, priority, due_at FROM items WHERE due_at IS NOT NULL AND due_at >= ? AND due_at <= ? ORDER BY due_at ASC;",
+            sql: "SELECT id, type, title, parent_id, status, priority, due_at FROM items WHERE team_id = ? AND due_at IS NOT NULL AND due_at >= ? AND due_at <= ? ORDER BY due_at ASC;",
             rowMode: "array",
             returnValue: "resultRows",
-            bind: [now, end],
+            bind: [currentTeamId, now, end],
           }) as Array<[string, string, string, string | null, string, number, number]>;
 
           result = {
@@ -6871,13 +8359,20 @@ const handleRequest = async (message: RpcRequest): Promise<RpcResponse> => {
           break;
         }
         case "listCalendarBlocks": {
+          const currentTeamId = getCurrentTeamId(dbHandle);
           const startAt = ensureNumber(args.startAt, "startAt");
           const endAt = ensureNumber(args.endAt, "endAt");
           const rows = dbHandle.exec({
-            sql: "SELECT block_id, item_id, start_at, duration_minutes, locked, source FROM scheduled_blocks WHERE start_at < ? AND (start_at + duration_minutes * 60000) > ? ORDER BY start_at ASC;",
+            sql: `SELECT b.block_id, b.item_id, b.start_at, b.duration_minutes, b.locked, b.source
+              FROM scheduled_blocks b
+              JOIN items i ON i.id = b.item_id
+              WHERE i.team_id = ?
+                AND b.start_at < ?
+                AND (b.start_at + b.duration_minutes * 60000) > ?
+              ORDER BY b.start_at ASC;`,
             rowMode: "array",
             returnValue: "resultRows",
-            bind: [endAt, startAt],
+            bind: [currentTeamId, endAt, startAt],
           }) as Array<[string, string, number, number, number, string]>;
 
           result = {
@@ -6894,6 +8389,7 @@ const handleRequest = async (message: RpcRequest): Promise<RpcResponse> => {
           break;
         }
         case "calendar_range": {
+          const currentTeamId = getCurrentTeamId(dbHandle);
           const timeMin = ensureTimeMs(args.time_min, "time_min");
           const timeMax = ensureTimeMs(args.time_max, "time_max");
           if (timeMax <= timeMin) {
@@ -6906,14 +8402,14 @@ const handleRequest = async (message: RpcRequest): Promise<RpcResponse> => {
           if (scopeProjectId) {
             const treeRows = dbHandle.exec({
               sql: `WITH RECURSIVE tree AS (
-                SELECT id FROM items WHERE id = ?
+                SELECT id FROM items WHERE id = ? AND team_id = ?
                 UNION ALL
-                SELECT i.id FROM items i JOIN tree t ON i.parent_id = t.id
+                SELECT i.id FROM items i JOIN tree t ON i.parent_id = t.id WHERE i.team_id = ?
               )
               SELECT id FROM tree;`,
               rowMode: "array",
               returnValue: "resultRows",
-              bind: [scopeProjectId],
+              bind: [scopeProjectId, currentTeamId, currentTeamId],
             }) as Array<[string]>;
             scopedIds = treeRows.map((row) => row[0]);
           }
@@ -6927,7 +8423,8 @@ const handleRequest = async (message: RpcRequest): Promise<RpcResponse> => {
             ? `SELECT b.block_id, b.item_id, b.start_at, b.duration_minutes
                 FROM scheduled_blocks b
                 JOIN items i ON i.id = b.item_id
-                WHERE i.archived_at IS NULL
+                WHERE i.team_id = ?
+                  AND i.archived_at IS NULL
                   AND b.start_at < ?
                   AND (b.start_at + b.duration_minutes * 60000) > ?
                   AND b.item_id IN (${buildPlaceholders(scopedIds.length)})
@@ -6935,7 +8432,8 @@ const handleRequest = async (message: RpcRequest): Promise<RpcResponse> => {
             : `SELECT b.block_id, b.item_id, b.start_at, b.duration_minutes
                 FROM scheduled_blocks b
                 JOIN items i ON i.id = b.item_id
-                WHERE i.archived_at IS NULL
+                WHERE i.team_id = ?
+                  AND i.archived_at IS NULL
                   AND b.start_at < ?
                   AND (b.start_at + b.duration_minutes * 60000) > ?
                 ORDER BY b.start_at ASC;`;
@@ -6944,13 +8442,16 @@ const handleRequest = async (message: RpcRequest): Promise<RpcResponse> => {
             sql: blockSql,
             rowMode: "array",
             returnValue: "resultRows",
-            bind: scopedIds ? [timeMax, timeMin, ...scopedIds] : [timeMax, timeMin],
+            bind: scopedIds
+              ? [currentTeamId, timeMax, timeMin, ...scopedIds]
+              : [currentTeamId, timeMax, timeMin],
           }) as Array<[string, string, number, number]>;
 
           const itemSql = scopedIds
             ? `SELECT id, title, status, due_at, parent_id, type, priority
                 FROM items
-                WHERE archived_at IS NULL
+                WHERE team_id = ?
+                  AND archived_at IS NULL
                   AND due_at IS NOT NULL
                   AND due_at >= ?
                   AND due_at < ?
@@ -6958,7 +8459,8 @@ const handleRequest = async (message: RpcRequest): Promise<RpcResponse> => {
                 ORDER BY due_at ASC;`
             : `SELECT id, title, status, due_at, parent_id, type, priority
                 FROM items
-                WHERE archived_at IS NULL
+                WHERE team_id = ?
+                  AND archived_at IS NULL
                   AND due_at IS NOT NULL
                   AND due_at >= ?
                   AND due_at < ?
@@ -6968,7 +8470,9 @@ const handleRequest = async (message: RpcRequest): Promise<RpcResponse> => {
             sql: itemSql,
             rowMode: "array",
             returnValue: "resultRows",
-            bind: scopedIds ? [timeMin, timeMax, ...scopedIds] : [timeMin, timeMax],
+            bind: scopedIds
+              ? [currentTeamId, timeMin, timeMax, ...scopedIds]
+              : [currentTeamId, timeMin, timeMax],
           }) as Array<
             [string, string, string, number, string | null, string, number]
           >;
@@ -7004,6 +8508,7 @@ const handleRequest = async (message: RpcRequest): Promise<RpcResponse> => {
           break;
         }
         case "gantt_range": {
+          const currentTeamId = getCurrentTeamId(dbHandle);
           const timeMin = ensureTimeMs(args.time_min, "time_min");
           const timeMax = ensureTimeMs(args.time_max, "time_max");
           if (timeMax <= timeMin) {
@@ -7040,15 +8545,16 @@ const handleRequest = async (message: RpcRequest): Promise<RpcResponse> => {
             if (scopeUserId) {
               rows = dbHandle.exec({
                 sql: `WITH RECURSIVE tree AS (
-                  SELECT * FROM items WHERE id = ?
+                  SELECT * FROM items WHERE id = ? AND team_id = ?
                   UNION ALL
-                  SELECT i.* FROM items i JOIN tree t ON i.parent_id = t.id
+                  SELECT i.* FROM items i JOIN tree t ON i.parent_id = t.id WHERE i.team_id = ?
                 )
                 SELECT i.id, i.type, i.title, i.parent_id, i.status, i.due_at,
                   i.estimate_mode, i.estimate_minutes, i.sort_order, i.updated_at
                 FROM tree i
                 JOIN item_assignees a ON a.item_id = i.id
                 WHERE a.assignee_id = ?
+                  AND i.team_id = ?
                   ${statusFilter}
                 ORDER BY i.sort_order ASC,
                   CASE WHEN i.due_at IS NULL THEN 1 ELSE 0 END,
@@ -7056,7 +8562,13 @@ const handleRequest = async (message: RpcRequest): Promise<RpcResponse> => {
                   i.title ASC;`,
                 rowMode: "array",
                 returnValue: "resultRows",
-                bind: [scopeProjectId, scopeUserId],
+                bind: [
+                  scopeProjectId,
+                  currentTeamId,
+                  currentTeamId,
+                  scopeUserId,
+                  currentTeamId,
+                ],
               }) as Array<
                 [
                   string,
@@ -7074,9 +8586,9 @@ const handleRequest = async (message: RpcRequest): Promise<RpcResponse> => {
             } else {
               rows = dbHandle.exec({
                 sql: `WITH RECURSIVE tree AS (
-                  SELECT * FROM items WHERE id = ?
+                  SELECT * FROM items WHERE id = ? AND team_id = ?
                   UNION ALL
-                  SELECT i.* FROM items i JOIN tree t ON i.parent_id = t.id
+                  SELECT i.* FROM items i JOIN tree t ON i.parent_id = t.id WHERE i.team_id = ?
                 )
                 SELECT id, type, title, parent_id, status, due_at,
                   estimate_mode, estimate_minutes, sort_order, updated_at
@@ -7088,7 +8600,7 @@ const handleRequest = async (message: RpcRequest): Promise<RpcResponse> => {
                   i.title ASC;`,
                 rowMode: "array",
                 returnValue: "resultRows",
-                bind: [scopeProjectId],
+                bind: [scopeProjectId, currentTeamId, currentTeamId],
               }) as Array<
                 [
                   string,
@@ -7111,6 +8623,7 @@ const handleRequest = async (message: RpcRequest): Promise<RpcResponse> => {
                 FROM items i
                 JOIN item_assignees a ON a.item_id = i.id
                 WHERE a.assignee_id = ?
+                  AND i.team_id = ?
                   ${statusFilter}
                 ORDER BY i.sort_order ASC,
                   CASE WHEN i.due_at IS NULL THEN 1 ELSE 0 END,
@@ -7118,7 +8631,7 @@ const handleRequest = async (message: RpcRequest): Promise<RpcResponse> => {
                   i.title ASC;`,
               rowMode: "array",
               returnValue: "resultRows",
-              bind: [scopeUserId],
+              bind: [scopeUserId, currentTeamId],
             }) as Array<
               [
                 string,
@@ -7138,13 +8651,14 @@ const handleRequest = async (message: RpcRequest): Promise<RpcResponse> => {
               sql: `SELECT id, type, title, parent_id, status, due_at,
                   estimate_mode, estimate_minutes, sort_order, updated_at
                 FROM items i
-                WHERE 1=1 ${statusFilter}
+                WHERE i.team_id = ? ${statusFilter}
                 ORDER BY i.sort_order ASC,
                   CASE WHEN i.due_at IS NULL THEN 1 ELSE 0 END,
                   i.due_at ASC,
                   i.title ASC;`,
               rowMode: "array",
               returnValue: "resultRows",
+              bind: [currentTeamId],
             }) as Array<
               [
                 string,
@@ -7261,6 +8775,7 @@ const handleRequest = async (message: RpcRequest): Promise<RpcResponse> => {
           break;
         }
         case "calendar_range_user": {
+          const currentTeamId = getCurrentTeamId(dbHandle);
           const userId = ensureString(args.user_id, "user_id");
           const timeMin = ensureTimeMs(args.time_min, "time_min");
           const timeMax = ensureTimeMs(args.time_max, "time_max");
@@ -7272,13 +8787,15 @@ const handleRequest = async (message: RpcRequest): Promise<RpcResponse> => {
             sql: `SELECT b.block_id, b.item_id, b.start_at, b.duration_minutes
               FROM scheduled_blocks b
               JOIN item_assignees a ON a.item_id = b.item_id
+              JOIN items i ON i.id = b.item_id
               WHERE a.assignee_id = ?
+                AND i.team_id = ?
                 AND b.start_at < ?
                 AND (b.start_at + b.duration_minutes * 60000) > ?
               ORDER BY b.start_at ASC;`,
             rowMode: "array",
             returnValue: "resultRows",
-            bind: [userId, timeMax, timeMin],
+            bind: [userId, currentTeamId, timeMax, timeMin],
           }) as Array<[string, string, number, number]>;
 
           const dueRows = dbHandle.exec({
@@ -7286,13 +8803,14 @@ const handleRequest = async (message: RpcRequest): Promise<RpcResponse> => {
               FROM items i
               JOIN item_assignees a ON a.item_id = i.id
               WHERE a.assignee_id = ?
+                AND i.team_id = ?
                 AND i.due_at IS NOT NULL
                 AND i.due_at >= ?
                 AND i.due_at < ?
               ORDER BY i.due_at ASC;`,
             rowMode: "array",
             returnValue: "resultRows",
-            bind: [userId, timeMin, timeMax],
+            bind: [userId, currentTeamId, timeMin, timeMax],
           }) as Array<
             [string, string, string, number, string | null, string, number]
           >;
@@ -7314,11 +8832,12 @@ const handleRequest = async (message: RpcRequest): Promise<RpcResponse> => {
             itemRows = dbHandle.exec({
               sql: `SELECT id, title, status, due_at, parent_id, type, priority
                 FROM items
-                WHERE id IN (${placeholders})
+                WHERE team_id = ?
+                  AND id IN (${placeholders})
                 ORDER BY title ASC;`,
               rowMode: "array",
               returnValue: "resultRows",
-              bind: ids,
+              bind: [currentTeamId, ...ids],
             }) as Array<
               [string, string, string, number | null, string | null, string, number]
             >;
@@ -7351,6 +8870,7 @@ const handleRequest = async (message: RpcRequest): Promise<RpcResponse> => {
           break;
         }
         case "calendar_range_users": {
+          const currentTeamId = getCurrentTeamId(dbHandle);
           const userIdsRaw = ensureArray(args.user_ids, "user_ids") as unknown[];
           const userIds = Array.from(
             new Set(
@@ -7377,14 +8897,15 @@ const handleRequest = async (message: RpcRequest): Promise<RpcResponse> => {
               FROM scheduled_blocks b
               JOIN item_assignees a ON a.item_id = b.item_id
               JOIN items i ON i.id = b.item_id
-              WHERE i.archived_at IS NULL
+              WHERE i.team_id = ?
+                AND i.archived_at IS NULL
                 AND a.assignee_id IN (${userPlaceholders})
                 AND b.start_at < ?
                 AND (b.start_at + b.duration_minutes * 60000) > ?
               ORDER BY b.start_at ASC;`,
             rowMode: "array",
             returnValue: "resultRows",
-            bind: [...userIds, timeMax, timeMin],
+            bind: [currentTeamId, ...userIds, timeMax, timeMin],
           }) as Array<[string, string, number, number, string]>;
 
           const itemIds = Array.from(
@@ -7398,12 +8919,13 @@ const handleRequest = async (message: RpcRequest): Promise<RpcResponse> => {
             itemRows = dbHandle.exec({
               sql: `SELECT id, title, status, due_at, parent_id, type, priority
                 FROM items
-                WHERE archived_at IS NULL
+                WHERE team_id = ?
+                  AND archived_at IS NULL
                   AND id IN (${itemPlaceholders})
                 ORDER BY title ASC;`,
               rowMode: "array",
               returnValue: "resultRows",
-              bind: itemIds,
+              bind: [currentTeamId, ...itemIds],
             }) as Array<
               [string, string, string, number | null, string | null, string, number]
             >;
@@ -7441,14 +8963,246 @@ const handleRequest = async (message: RpcRequest): Promise<RpcResponse> => {
           };
           break;
         }
-        case "users_list": {
-          const settings = getSettings(dbHandle);
-          const registry = normalizeUserList(settings.get(USERS_SETTING_KEY));
-          const userMap = new Map(registry.map((user) => [user.user_id, user]));
-          const rows = dbHandle.exec({
-            sql: "SELECT DISTINCT assignee_id FROM item_assignees ORDER BY assignee_id ASC;",
+        case "auth.session.current": {
+          const session = getActiveSession(dbHandle);
+          if (!session) {
+            result = {
+              ok: true,
+              result: {
+                session: null,
+                user: null,
+                team: null,
+                role: null,
+              },
+            };
+            break;
+          }
+
+          const userRows = dbHandle.exec({
+            sql: "SELECT user_id, display_name, avatar_url FROM users WHERE user_id = ? LIMIT 1;",
             rowMode: "array",
             returnValue: "resultRows",
+            bind: [session.user_id],
+          }) as Array<[string, string, string | null]>;
+          const teamRows = dbHandle.exec({
+            sql: "SELECT team_id, name FROM teams WHERE team_id = ? LIMIT 1;",
+            rowMode: "array",
+            returnValue: "resultRows",
+            bind: [session.team_id],
+          }) as Array<[string, string]>;
+          const roleRows = dbHandle.exec({
+            sql: "SELECT role FROM team_members WHERE team_id = ? AND user_id = ? LIMIT 1;",
+            rowMode: "array",
+            returnValue: "resultRows",
+            bind: [session.team_id, session.user_id],
+          }) as Array<[string]>;
+
+          result = {
+            ok: true,
+            result: {
+              session,
+              user:
+                userRows.length > 0
+                  ? {
+                      user_id: userRows[0][0],
+                      display_name: userRows[0][1],
+                      avatar_url: userRows[0][2] ?? null,
+                    }
+                  : null,
+              team:
+                teamRows.length > 0
+                  ? {
+                      team_id: teamRows[0][0],
+                      name: teamRows[0][1],
+                    }
+                  : null,
+              role:
+                normalizeTeamRole(roleRows[0]?.[0] ?? null),
+            },
+          };
+          break;
+        }
+        case "auth.session.options": {
+          ensureDefaultTeamMembershipFromRegistry(dbHandle);
+          const usersRows = dbHandle.exec({
+            sql: `SELECT user_id, display_name, avatar_url
+              FROM users
+              ORDER BY lower(display_name) ASC, created_at ASC;`,
+            rowMode: "array",
+            returnValue: "resultRows",
+          }) as Array<[string, string, string | null]>;
+          const teamRows = dbHandle.exec({
+            sql: `SELECT team_id, name
+              FROM teams
+              ORDER BY lower(name) ASC, created_at ASC;`,
+            rowMode: "array",
+            returnValue: "resultRows",
+          }) as Array<[string, string]>;
+          const membershipRows = dbHandle.exec({
+            sql: `SELECT tm.user_id, tm.team_id, tm.role
+              FROM team_members tm
+              JOIN users u ON u.user_id = tm.user_id
+              JOIN teams t ON t.team_id = tm.team_id
+              ORDER BY lower(u.display_name) ASC, lower(t.name) ASC;`,
+            rowMode: "array",
+            returnValue: "resultRows",
+          }) as Array<[string, string, string]>;
+
+          result = {
+            ok: true,
+            result: {
+              users: usersRows.map((row) => ({
+                user_id: row[0],
+                display_name: row[1],
+                avatar_url: row[2] ?? null,
+              })),
+              teams: teamRows.map((row) => ({
+                team_id: row[0],
+                name: row[1],
+              })),
+              memberships: membershipRows.map((row) => ({
+                user_id: row[0],
+                team_id: row[1],
+                role: normalizeTeamRole(row[2]) ?? "viewer",
+              })),
+            },
+          };
+          break;
+        }
+        case "sync.outbox.status": {
+          const currentTeamId = getCurrentTeamId(dbHandle);
+          const counts = getOutboxCounts(dbHandle, currentTeamId);
+          const lastError = getLastOutboxError(dbHandle, currentTeamId);
+
+          result = {
+            ok: true,
+            result: {
+              queued_count: counts.queued_count,
+              failed_count: counts.failed_count,
+              last_error: lastError,
+            },
+          };
+          break;
+        }
+        case "sync.status": {
+          const currentTeamId = getCurrentTeamId(dbHandle);
+          const counts = getOutboxCounts(dbHandle, currentTeamId);
+          const lastError = getLastOutboxError(dbHandle, currentTeamId);
+          const lastAppliedSeq = getLastAppliedSeq(dbHandle, currentTeamId);
+
+          result = {
+            ok: true,
+            result: {
+              team_id: currentTeamId,
+              queued_count: counts.queued_count,
+              failed_count: counts.failed_count,
+              last_error: lastError,
+              last_applied_seq: lastAppliedSeq,
+              sync_mode: SYNC_MODE,
+              sync_remote_base_url:
+                SYNC_REMOTE_BASE_URL.trim().length > 0
+                  ? SYNC_REMOTE_BASE_URL
+                  : null,
+            },
+          };
+          break;
+        }
+        case "sync.runOnce": {
+          const session = requireSession(dbHandle);
+          requireCanWriteTeam(session, session.team_id, dbHandle);
+          const requestedClientId =
+            typeof args.client_id === "string" ? args.client_id : null;
+          const clientId = getOrCreateClientId(dbHandle, requestedClientId);
+          const currentTeamId = session.team_id;
+          const syncTransport = createSyncTransport({
+            mode: SYNC_MODE,
+            remoteBaseUrl: SYNC_REMOTE_BASE_URL,
+            sessionToken: session.session_id,
+            mockPush: (request) => mockRemotePush(dbHandle, request),
+            mockPull: (request) => mockRemotePull(dbHandle, request),
+            onError: (message) => {
+              console.warn(message);
+            },
+          });
+          let runResult;
+          try {
+            runResult = await runSyncOnce({
+              teamId: currentTeamId,
+              clientId,
+              adapter: {
+                listPendingOps: (teamId) => listPendingOutboxOps(dbHandle, teamId),
+                push: (request) => syncTransport.push(request),
+                applyPushResult: (teamId, response) =>
+                  applyOutboxPushResult(dbHandle, teamId, response),
+                getLastAppliedSeq: (teamId) => getLastAppliedSeq(dbHandle, teamId),
+                pull: (request) => syncTransport.pull(request),
+                applyIncoming: (serverSeq, op) => {
+                  const applied = applyRemoteOp(dbHandle, serverSeq, op);
+                  return applied.applied;
+                },
+              },
+            });
+          } catch (error) {
+            const messageText =
+              error instanceof Error ? error.message : String(error);
+            markSendingOutboxFailed(dbHandle, currentTeamId, messageText);
+            console.warn(
+              `[sync] runOnce failed in ${syncTransport.mode} mode: ${messageText}`
+            );
+            throw error;
+          }
+          result = {
+            ok: true,
+            result: {
+              ...runResult,
+              sync_mode: syncTransport.mode,
+            },
+          };
+          break;
+        }
+        case "team.current": {
+          ensureDefaultTeamMembershipFromRegistry(dbHandle);
+          const currentTeamId = getCurrentTeamId(dbHandle);
+          const teamRows = dbHandle.exec({
+            sql: "SELECT team_id, name FROM teams WHERE team_id = ? LIMIT 1;",
+            bind: [currentTeamId],
+            rowMode: "array",
+            returnValue: "resultRows",
+          }) as Array<[string, string]>;
+          const teamName =
+            teamRows.length > 0 && typeof teamRows[0][1] === "string"
+              ? teamRows[0][1]
+              : DEFAULT_TEAM_NAME;
+          result = {
+            ok: true,
+            result: {
+              team: { team_id: currentTeamId, name: teamName },
+              members: readTeamMembers(dbHandle, currentTeamId),
+            },
+          };
+          break;
+        }
+        case "users_list": {
+          ensureDefaultTeamMembershipFromRegistry(dbHandle);
+          const currentTeamId = getCurrentTeamId(dbHandle);
+          const settings = getSettings(dbHandle);
+          const userMap = new Map<string, UserRecord>();
+          for (const member of readTeamMembers(dbHandle, currentTeamId)) {
+            userMap.set(member.user_id, {
+              user_id: member.user_id,
+              display_name: member.display_name,
+              avatar_url: member.avatar_url,
+            });
+          }
+          const rows = dbHandle.exec({
+            sql: `SELECT DISTINCT a.assignee_id
+              FROM item_assignees a
+              JOIN items i ON i.id = a.item_id
+              WHERE i.team_id = ?
+              ORDER BY a.assignee_id ASC;`,
+            rowMode: "array",
+            returnValue: "resultRows",
+            bind: [currentTeamId],
           }) as Array<[string]>;
           for (const row of rows) {
             const id = row[0];
@@ -7459,6 +9213,12 @@ const handleRequest = async (message: RpcRequest): Promise<RpcResponse> => {
                 display_name: `User ${shortId}`,
                 avatar_url: null,
               });
+            }
+          }
+          if (userMap.size === 0) {
+            const registry = normalizeUserList(settings.get(USERS_SETTING_KEY));
+            for (const user of registry) {
+              userMap.set(user.user_id, user);
             }
           }
           const users = Array.from(userMap.values());

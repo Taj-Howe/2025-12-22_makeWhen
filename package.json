@@ -9,7 +9,15 @@
     "build": "vite build",
     "preview": "vite preview",
     "lint": "echo \"TODO: lint\"",
-    "typecheck": "tsc -p tsconfig.json --noEmit"
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "verify": "pnpm -s typecheck && pnpm -s build",
+    "smoke": "node --no-warnings=ExperimentalWarning --experimental-strip-types scripts/smoke.ts",
+    "sync-server:dev": "pnpm --dir apps/sync-server dev",
+    "sync-server:start": "pnpm --dir apps/sync-server start",
+    "sync-server:migrate": "pnpm --dir apps/sync-server migrate",
+    "sync-server:smoke": "pnpm --dir apps/sync-server smoke",
+    "sync-server:e2e": "pnpm --dir apps/sync-server e2e",
+    "sync-server:verify": "pnpm --dir apps/sync-server verify"
   },
   "dependencies": {
     "@radix-ui/colors": "^3.0.0",

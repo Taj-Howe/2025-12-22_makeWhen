@@ -1,0 +1,16 @@
+{
+  "name": "@makewhen/sync-server",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "node --watch --no-warnings=ExperimentalWarning --experimental-strip-types src/server.ts",
+    "start": "node --no-warnings=ExperimentalWarning --experimental-strip-types src/server.ts",
+    "build": "node -e \"console.log('sync-server scaffold uses runtime TS via node --experimental-strip-types')\"",
+    "typecheck": "node -e \"console.log('sync-server typecheck not configured in offline scaffold')\"",
+    "migrate": "node --no-warnings=ExperimentalWarning --experimental-strip-types src/db/migrations.ts",
+    "smoke": "node --no-warnings=ExperimentalWarning --experimental-strip-types scripts/smoke.ts",
+    "e2e": "node --no-warnings=ExperimentalWarning --experimental-strip-types scripts/e2e.ts",
+    "verify": "pnpm -s smoke"
+  }
+}

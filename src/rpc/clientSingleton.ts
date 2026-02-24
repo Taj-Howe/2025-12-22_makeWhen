@@ -1,4 +1,5 @@
 import { createRpcClient } from "./client";
+import type { RpcErrorPayload } from "./types";
 
 const worker = new Worker(new URL("../db-worker/worker.ts", import.meta.url), {
   type: "module",
@@ -8,14 +9,39 @@ const rpc = createRpcClient(worker);
 
 export const request = rpc.request.bind(rpc);
 
+const toClientError = (
+  error: string | RpcErrorPayload | undefined,
+  fallbackMessage: string
+) => {
+  if (typeof error === "string") {
+    return new Error(error);
+  }
+  if (error && typeof error.code === "string" && typeof error.message === "string") {
+    const next = new Error(error.message);
+    (next as Error & { code?: string }).code = error.code;
+    return next;
+  }
+  return new Error(fallbackMessage);
+};
+
 export const query = async <T,>(name: string, args?: unknown): Promise<T> => {
   const result = await request("query", { name, args });
   if (!result || typeof result !== "object" || !("ok" in result)) {
     return result as T;
   }
-  const payload = result as { ok: boolean; result?: T; error?: string };
+  const payload = result as {
+    ok: boolean;
+    result?: T;
+    error?: string | RpcErrorPayload;
+  };
   if (!payload.ok) {
-    throw new Error(payload.error || "Query failed");
+    if (name.startsWith("sync.")) {
+      console.warn("[sync] query failed", {
+        name,
+        error: payload.error,
+      });
+    }
+    throw toClientError(payload.error, "Query failed");
   }
   return payload.result as T;
 };
@@ -40,13 +66,16 @@ export const mutate = async <T,>(
   const payload = result as {
     ok: boolean;
     result?: T;
-    error?: string | { code: string; message: string };
+    error?: string | RpcErrorPayload;
   };
   if (!payload.ok) {
-    if (typeof payload.error === "string") {
-      throw new Error(payload.error);
+    if (op_name.startsWith("sync.")) {
+      console.warn("[sync] mutation failed", {
+        op_name,
+        error: payload.error,
+      });
     }
-    throw new Error(payload.error?.message ?? "Mutation failed");
+    throw toClientError(payload.error, "Mutation failed");
   }
   return payload.result as T;
 };

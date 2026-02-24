@@ -146,6 +146,27 @@ npm run dev
 
 Open the URL printed by Vite.
 
+### Sync transport modes
+
+Use env vars in `.env.local` to switch sync behavior:
+
+- `SYNC_MODE=mock|remote` (default `mock`)
+- `SYNC_REMOTE_BASE_URL` (required when `SYNC_MODE=remote`)
+
+`mock` mode keeps all sync local via the worker's mock remote tables.  
+`remote` mode sends `push/pull` to your sync server over HTTP, includes cookies (`credentials: include`), and also sends `Authorization: Bearer <session_id>` from the active local session.
+
+Sample `.env.local`:
+
+```sh
+# local/default
+SYNC_MODE=mock
+
+# remote server
+# SYNC_MODE=remote
+# SYNC_REMOTE_BASE_URL=http://127.0.0.1:8787
+```
+
 ### Build + preview
 
 ```sh

@@ -139,6 +139,10 @@ body {
   opacity: 0.8;
 }
 
+.sidebar-signed-out {
+  justify-content: flex-start;
+}
+
 .main {
   min-width: 0;
   padding: 20px 20px 20px 0;
@@ -227,6 +231,12 @@ body {
   border-top: 1px solid var(--color-border);
   margin: 0;
   padding: 0;
+}
+
+.top-strip-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: stretch;
 }
 
 .top-strip-tabs {
@@ -330,14 +340,80 @@ body {
   display: flex;
   align-items: center;
   gap: 8px;
-  padding-left: 10px;
+  padding: 4px 0 4px 10px;
   border-left: 1px solid var(--color-border);
   border-bottom: 1px solid var(--color-border);
-  min-height: 32px;
+  min-height: 38px;
+  position: relative;
 }
 
 .top-strip-right button {
   border-radius: 0 !important;
+}
+
+.account-control {
+  position: relative;
+}
+
+.account-trigger {
+  min-width: 220px;
+  justify-content: flex-start;
+}
+
+.account-menu {
+  position: absolute;
+  top: calc(100% + 8px);
+  right: 0;
+  width: min(320px, calc(100vw - 40px));
+  border: 1px solid var(--color-glass-border);
+  background: var(--color-glass-bg);
+  backdrop-filter: blur(var(--glass-blur));
+  -webkit-backdrop-filter: blur(var(--glass-blur));
+  padding: 10px;
+  display: grid;
+  gap: 8px;
+  z-index: 70;
+}
+
+.account-menu-label {
+  font-size: var(--font-size-label);
+  color: var(--color-muted-text);
+}
+
+.account-menu-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.auth-state-message {
+  font-size: var(--font-size-label);
+  color: var(--color-muted-text);
+  margin-bottom: 10px;
+}
+
+.signed-out-panel {
+  max-width: 420px;
+  border: 1px solid var(--color-border);
+  background: var(--color-panel);
+  padding: 14px;
+  display: grid;
+  gap: 10px;
+}
+
+.signed-out-title {
+  font-size: var(--font-size-title);
+  font-weight: var(--font-weight-heading);
+  font-family: var(--font-family-heading, var(--font-family-body));
+}
+
+.signed-out-help {
+  font-size: var(--font-size-label);
+  color: var(--color-muted-text);
+}
+
+.signed-out-field {
+  display: grid;
+  gap: 6px;
 }
 
 .top-title-row {

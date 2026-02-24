@@ -12,8 +12,9 @@ import AddItemForm from "./AddItemForm";
 import RightSheet from "./RightSheet";
 import CommandPalette from "./CommandPalette";
 import SettingsWindow from "./SettingsWindow";
-import { AppButton } from "./controls";
+import { AppButton, AppSelect } from "./controls";
 import { mutate, query } from "../rpc/clientSingleton";
+import { authProvider, getSessionOptions } from "../auth/authProvider";
 import type { ListItem } from "../domain/listTypes";
 import type { Scope } from "../domain/scope";
 import {
@@ -31,6 +32,10 @@ import {
   normalizeTypographySettings,
 } from "../domain/typographySettings";
 import { ScopeProvider } from "./ScopeContext";
+import type {
+  AuthSessionCurrentResult,
+  AuthSessionOptionsResult,
+} from "../rpc/types";
 
 type UserLite = {
   user_id: string;
@@ -38,11 +43,16 @@ type UserLite = {
   avatar_url?: string | null;
 };
 
-// Placeholder current user until real auth/users are wired.
 const DEFAULT_USER: UserLite = {
   user_id: "me",
   display_name: "Me",
   avatar_url: null,
+};
+
+const EMPTY_AUTH_OPTIONS: AuthSessionOptionsResult = {
+  users: [],
+  teams: [],
+  memberships: [],
 };
 
 const App = () => {
@@ -72,6 +82,32 @@ const App = () => {
     "list" | "calendar" | "gantt" | "kanban" | "dashboard"
   >("list");
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [authCurrent, setAuthCurrent] = useState<AuthSessionCurrentResult | null>(
+    null
+  );
+  const [authOptions, setAuthOptions] =
+    useState<AuthSessionOptionsResult>(EMPTY_AUTH_OPTIONS);
+  const [authLoading, setAuthLoading] = useState(true);
+  const [authError, setAuthError] = useState<string | null>(null);
+  const [authActionError, setAuthActionError] = useState<string | null>(null);
+  const [authBusy, setAuthBusy] = useState(false);
+  const [accountOpen, setAccountOpen] = useState(false);
+  const [accountUserId, setAccountUserId] = useState("");
+  const [accountTeamId, setAccountTeamId] = useState("");
+
+  const activeSession = authCurrent?.session ?? null;
+  const activeSessionId = activeSession?.session_id ?? null;
+
+  const refreshAuth = useCallback(async () => {
+    const current = await authProvider.getSession();
+    const options = await getSessionOptions();
+    setAuthCurrent(current);
+    setAuthOptions(options);
+  }, []);
+
+  const triggerRefresh = useCallback(() => {
+    setRefreshToken((value) => value + 1);
+  }, []);
 
   const loadProjectItems = useCallback(async () => {
     if (!selectedProjectId) {
@@ -104,10 +140,6 @@ const App = () => {
       }
     }
     setProjectTitleById(next);
-  }, []);
-
-  const triggerRefresh = useCallback(() => {
-    setRefreshToken((value) => value + 1);
   }, []);
 
   const loadUsers = useCallback(async () => {
@@ -154,22 +186,59 @@ const App = () => {
   }, []);
 
   useEffect(() => {
+    let canceled = false;
+    setAuthLoading(true);
+    setAuthError(null);
+    refreshAuth()
+      .catch((err) => {
+        if (canceled) {
+          return;
+        }
+        const message = err instanceof Error ? err.message : "Unknown error";
+        setAuthError(message);
+      })
+      .finally(() => {
+        if (!canceled) {
+          setAuthLoading(false);
+        }
+      });
+    return () => {
+      canceled = true;
+    };
+  }, [refreshAuth]);
+
+  useEffect(() => {
+    if (!activeSessionId) {
+      setProjectItems([]);
+      setError(null);
+      return;
+    }
     setError(null);
     loadProjectItems().catch((err) => {
       const message = err instanceof Error ? err.message : "Unknown error";
       setError(message);
     });
-  }, [loadProjectItems, refreshToken]);
+  }, [activeSessionId, loadProjectItems, refreshToken]);
 
   useEffect(() => {
+    if (!activeSessionId) {
+      setProjectTitleById({ [UNGROUPED_PROJECT_ID]: UNGROUPED_PROJECT_LABEL });
+      return;
+    }
     loadProjectTitleIndex().catch(() => {
       // Keep current title cache if this refresh fails.
     });
-  }, [loadProjectTitleIndex, refreshToken]);
+  }, [activeSessionId, loadProjectTitleIndex, refreshToken]);
 
   useEffect(() => {
+    if (!activeSessionId) {
+      setUsers([]);
+      setSelectedUserId(null);
+      setUsersError(null);
+      return;
+    }
     void loadUsers();
-  }, [loadUsers, refreshToken]);
+  }, [activeSessionId, loadUsers, refreshToken]);
 
   useEffect(() => {
     let mounted = true;
@@ -221,7 +290,7 @@ const App = () => {
       if (!isOptionK) {
         return;
       }
-      if (sheetOpen) {
+      if (sheetOpen || !activeSessionId) {
         return;
       }
       event.preventDefault();
@@ -229,15 +298,13 @@ const App = () => {
     };
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [sheetOpen]);
+  }, [activeSessionId, sheetOpen]);
 
   const selectedProject = useMemo(() => {
     if (selectedProjectId === UNGROUPED_PROJECT_ID) {
       return { id: UNGROUPED_PROJECT_ID, title: UNGROUPED_PROJECT_LABEL };
     }
-    return (
-      projectItems.find((item) => item.id === selectedProjectId) ?? null
-    );
+    return projectItems.find((item) => item.id === selectedProjectId) ?? null;
   }, [projectItems, selectedProjectId]);
 
   const currentUser = useMemo(() => {
@@ -250,6 +317,46 @@ const App = () => {
     }
     return list[0] ?? DEFAULT_USER;
   }, [selectedUserId, users]);
+
+  useEffect(() => {
+    setAccountUserId((prev) => {
+      if (prev && authOptions.users.some((user) => user.user_id === prev)) {
+        return prev;
+      }
+      if (activeSession?.user_id) {
+        return activeSession.user_id;
+      }
+      return authOptions.users[0]?.user_id ?? "";
+    });
+  }, [activeSession?.user_id, authOptions.users]);
+
+  const accountTeamOptions = useMemo(() => {
+    if (!accountUserId) {
+      return [];
+    }
+    const allowedTeamIds = new Set(
+      authOptions.memberships
+        .filter((membership) => membership.user_id === accountUserId)
+        .map((membership) => membership.team_id)
+    );
+    return authOptions.teams.filter((team) => allowedTeamIds.has(team.team_id));
+  }, [accountUserId, authOptions.memberships, authOptions.teams]);
+
+  useEffect(() => {
+    setAccountTeamId((prev) => {
+      if (
+        activeSession &&
+        activeSession.user_id === accountUserId &&
+        accountTeamOptions.some((team) => team.team_id === activeSession.team_id)
+      ) {
+        return activeSession.team_id;
+      }
+      if (prev && accountTeamOptions.some((team) => team.team_id === prev)) {
+        return prev;
+      }
+      return accountTeamOptions[0]?.team_id ?? "";
+    });
+  }, [accountTeamOptions, accountUserId, activeSession]);
 
   // Scope drives all views; user scope is assignee-only with no parent inference.
   const activeScope = useMemo<Scope>(() => {
@@ -277,6 +384,77 @@ const App = () => {
       "Select a project"
     );
   }, [activeScope, projectTitleById, selectedProject, selectedProjectId]);
+
+  const activeUserLabel = authCurrent?.user?.display_name ?? currentUser.display_name;
+  const activeTeamLabel = authCurrent?.team?.name ?? "No team";
+  const isOauthMode = authProvider.mode === "oauth";
+
+  const canApplySession =
+    !!accountUserId &&
+    !!accountTeamId &&
+    (activeSession?.user_id !== accountUserId ||
+      activeSession?.team_id !== accountTeamId);
+
+  const applySessionSelection = useCallback(async () => {
+    if (!accountUserId || !accountTeamId) {
+      return;
+    }
+    setAuthActionError(null);
+    setAuthBusy(true);
+    try {
+      const signIn = await authProvider.signIn({
+        user_id: accountUserId,
+        team_id: accountTeamId,
+      });
+      if (signIn.status !== "signed_in") {
+        setAccountOpen(true);
+        return;
+      }
+      await refreshAuth();
+      setSelectedUserId(accountUserId);
+      setSelectedProjectId(UNGROUPED_PROJECT_ID);
+      setScope({ kind: "project", projectId: UNGROUPED_PROJECT_ID });
+      setError(null);
+      setDeleteError(null);
+      setPaletteOpen(false);
+      setSheetOpen(false);
+      setAccountOpen(false);
+      triggerRefresh();
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Unknown error";
+      setAuthActionError(message);
+    } finally {
+      setAuthBusy(false);
+    }
+  }, [
+    accountTeamId,
+    accountUserId,
+    refreshAuth,
+    triggerRefresh,
+  ]);
+
+  const handleSignOut = useCallback(async () => {
+    setAuthActionError(null);
+    setAuthBusy(true);
+    try {
+      await authProvider.signOut();
+      await refreshAuth();
+      setSelectedProjectId(UNGROUPED_PROJECT_ID);
+      setScope({ kind: "project", projectId: UNGROUPED_PROJECT_ID });
+      setSelectedUserId(null);
+      setProjectItems([]);
+      setUsers([]);
+      setPaletteOpen(false);
+      setSheetOpen(false);
+      setAccountOpen(false);
+      triggerRefresh();
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Unknown error";
+      setAuthActionError(message);
+    } finally {
+      setAuthBusy(false);
+    }
+  }, [refreshAuth, triggerRefresh]);
 
   useEffect(() => {
     if (scope) {
@@ -346,9 +524,7 @@ const App = () => {
       if (!projectId || projectId === UNGROUPED_PROJECT_ID) {
         return;
       }
-      if (
-        !confirm(`Delete ${projectTitle}? This removes all descendants.`)
-      ) {
+      if (!confirm(`Delete ${projectTitle}? This removes all descendants.`)) {
         return;
       }
       setDeleteError(null);
@@ -406,14 +582,11 @@ const App = () => {
     [activeScope.kind, openTaskEditor, selectedProjectId]
   );
 
-  const handleSeededProject = useCallback(
-    (projectId: string) => {
-      setSelectedProjectId(projectId);
-      setScope({ kind: "project", projectId });
-      setActiveView("list");
-    },
-    []
-  );
+  const handleSeededProject = useCallback((projectId: string) => {
+    setSelectedProjectId(projectId);
+    setScope({ kind: "project", projectId });
+    setActiveView("list");
+  }, []);
 
   const handleSheetOpenChange = useCallback((open: boolean) => {
     setSheetOpen(open);
@@ -433,158 +606,324 @@ const App = () => {
     <ScopeProvider scope={activeScope} setScope={setScope}>
       <div className="app-root">
         <div className="layout">
-        <SidebarProjects
-          scope={activeScope}
-          selectedProjectId={selectedProjectId}
-          onSelect={handleSelectProject}
-          onSetProjectId={handleSetProjectId}
-          refreshToken={refreshToken}
-          onAddProject={() => openSheet("project")}
-          onDeleteProject={handleDeleteProjectById}
-          users={users}
-          usersError={usersError}
-          selectedUserId={selectedUserId ?? currentUser.user_id}
-          onSelectUser={handleSelectUser}
-          currentUserName={currentUser.display_name}
-          onOpenSettings={() => setSettingsOpen(true)}
-        />
-        <main className="main">
-          <div className="top-strip">
-            <div className="top-strip-tabs">
-              <Tabs.Root
-                value={activeView}
-                onValueChange={(value) =>
-                  setActiveView(value as typeof activeView)
-                }
-              >
-                <Tabs.List className="top-tabs">
-                  <Tabs.Trigger value="dashboard">Dashboard</Tabs.Trigger>
-                  <Tabs.Trigger value="list">List</Tabs.Trigger>
-                  <Tabs.Trigger value="calendar">Calendar</Tabs.Trigger>
-                  <Tabs.Trigger value="kanban">Kanban</Tabs.Trigger>
-                  <Tabs.Trigger value="gantt">Gantt</Tabs.Trigger>
-                </Tabs.List>
-              </Tabs.Root>
-            </div>
-          </div>
-          <div className="main-content">
-          <div className="top-title-row">
-            <div className="top-title">
-              {activeView === "dashboard"
-                ? "Dashboard"
-                : activeScope.kind === "user"
-                  ? currentUser.display_name
-                  : activeProjectTitle}
-            </div>
-          </div>
-          {activeScope.kind === "project" && activeView !== "dashboard" ? (
-            <div className="title-actions">
-              <AppButton
-                type="button"
-                variant="surface"
-                onClick={() => openSheet("milestone")}
-              >
-                New Milestone
-              </AppButton>
-            </div>
-          ) : null}
-          {deleteError ? <div className="error">{deleteError}</div> : null}
-          {error ? <div className="error">{error}</div> : null}
-          <div className="view-stack">
-            <section
-              className={`view-panel${activeView === "dashboard" ? " is-active" : ""}`}
-              aria-hidden={activeView !== "dashboard"}
-            >
-              <DashboardView
-                scope={activeScope}
-                refreshToken={refreshToken}
-                onSelectItem={handleDashboardItemSelect}
-              />
-            </section>
-            <section
-              className={`view-panel${activeView === "list" ? " is-active" : ""}`}
-              aria-hidden={activeView !== "list"}
-            >
-              <ListView
-                scope={activeScope}
-                refreshToken={refreshToken}
-                onRefresh={triggerRefresh}
-                onOpenItem={openTaskEditor}
-              />
-            </section>
-            <section
-              className={`view-panel${activeView === "kanban" ? " is-active" : ""}`}
-              aria-hidden={activeView !== "kanban"}
-            >
-              <KanbanView
-                scope={activeScope}
-                refreshToken={refreshToken}
-                onRefresh={triggerRefresh}
-                onOpenItem={openTaskEditor}
-              />
-            </section>
-            <section
-              className={`view-panel${activeView === "calendar" ? " is-active" : ""}`}
-              aria-hidden={activeView !== "calendar"}
-            >
-              <CalendarView
-                scope={activeScope}
-                projectItems={projectItems}
-                refreshToken={refreshToken}
-                onRefresh={triggerRefresh}
-                onOpenItem={openTaskEditor}
-              />
-            </section>
-            <section
-              className={`view-panel${activeView === "gantt" ? " is-active" : ""}`}
-              aria-hidden={activeView !== "gantt"}
-            >
-              <GanttView
-                scope={activeScope}
-                refreshToken={refreshToken}
-                onRefresh={triggerRefresh}
-                onOpenItem={openTaskEditor}
-              />
-            </section>
-          </div>
-          </div>
-          <RightSheet
-            open={sheetOpen}
-            onOpenChange={handleSheetOpenChange}
-            title={sheetMode === "edit" ? "Edit task" : `New ${sheetType}`}
-          >
-            <AddItemForm
-              key={`${sheetMode}-${sheetType}-${selectedProjectId ?? "none"}-${sheetItemId ?? "none"}`}
+          {activeSessionId ? (
+            <SidebarProjects
+              scope={activeScope}
               selectedProjectId={selectedProjectId}
-              items={projectItems}
-              onRefresh={triggerRefresh}
-              initialType={sheetType}
-              initialMode={sheetMode}
-              initialItemId={sheetItemId}
-              autoFocusTitle={sheetFocusTitle}
-              onCreated={() => {
-                handleSheetOpenChange(false);
-              }}
-              onDeleted={() => {
-                handleSheetOpenChange(false);
-              }}
+              onSelect={handleSelectProject}
+              onSetProjectId={handleSetProjectId}
+              refreshToken={refreshToken}
+              onAddProject={() => openSheet("project")}
+              onDeleteProject={handleDeleteProjectById}
+              users={users}
+              usersError={usersError}
+              selectedUserId={selectedUserId ?? currentUser.user_id}
+              onSelectUser={handleSelectUser}
+              currentUserName={activeUserLabel}
+              onOpenSettings={() => setSettingsOpen(true)}
             />
-          </RightSheet>
-          <CommandPalette
-            open={paletteOpen}
-            onOpenChange={setPaletteOpen}
-            selectedProjectId={selectedProjectId}
-            onCreated={triggerRefresh}
-            onOpenProject={handleOpenProjectFromCommand}
-            onOpenView={setActiveView}
-          />
-          <SettingsWindow
-            open={settingsOpen}
-            onOpenChange={setSettingsOpen}
-            onSettingsChanged={triggerRefresh}
-            onSeeded={handleSeededProject}
-          />
-        </main>
+          ) : (
+            <aside className="sidebar sidebar-signed-out">
+              <div className="sidebar-title">Workspace</div>
+              <div className="sidebar-empty">Sign in to view projects and team calendars.</div>
+            </aside>
+          )}
+          <main className="main">
+            <div className="top-strip">
+              <div className="top-strip-row">
+                <div className="top-strip-tabs">
+                  <Tabs.Root
+                    value={activeView}
+                    onValueChange={(value) =>
+                      setActiveView(value as typeof activeView)
+                    }
+                  >
+                    <Tabs.List className="top-tabs">
+                      <Tabs.Trigger value="dashboard">Dashboard</Tabs.Trigger>
+                      <Tabs.Trigger value="list">List</Tabs.Trigger>
+                      <Tabs.Trigger value="calendar">Calendar</Tabs.Trigger>
+                      <Tabs.Trigger value="kanban">Kanban</Tabs.Trigger>
+                      <Tabs.Trigger value="gantt">Gantt</Tabs.Trigger>
+                    </Tabs.List>
+                  </Tabs.Root>
+                </div>
+                <div className="top-strip-right">
+                  <div className="account-control">
+                    <AppButton
+                      type="button"
+                      variant="surface"
+                      className="account-trigger"
+                      onClick={() => {
+                        if (activeSessionId) {
+                          setAccountOpen((open) => !open);
+                          return;
+                        }
+                        setAuthActionError(null);
+                        void authProvider
+                          .signIn()
+                          .then((result) => {
+                            if (
+                              result.status === "picker_required" &&
+                              authProvider.mode === "local"
+                            ) {
+                              setAccountOpen(true);
+                            }
+                          })
+                          .catch((err) => {
+                            const message =
+                              err instanceof Error ? err.message : "Unknown error";
+                            setAuthActionError(message);
+                          });
+                      }}
+                    >
+                      {activeSessionId
+                        ? `${activeUserLabel} · ${activeTeamLabel}`
+                        : "Account"}
+                    </AppButton>
+                    {accountOpen ? (
+                      <div className="account-menu">
+                        <div className="account-menu-label">User</div>
+                        <AppSelect
+                          value={accountUserId}
+                          onChange={setAccountUserId}
+                          options={authOptions.users.map((user) => ({
+                            value: user.user_id,
+                            label: user.display_name,
+                          }))}
+                          placeholder="Choose user"
+                        />
+                        <div className="account-menu-label">Team</div>
+                        <AppSelect
+                          value={accountTeamId}
+                          onChange={setAccountTeamId}
+                          options={accountTeamOptions.map((team) => ({
+                            value: team.team_id,
+                            label: team.name,
+                          }))}
+                          placeholder="Choose team"
+                        />
+                        <div className="account-menu-actions">
+                          <AppButton
+                            type="button"
+                            variant="surface"
+                            onClick={() => {
+                              void applySessionSelection();
+                            }}
+                            disabled={!canApplySession || authBusy}
+                          >
+                            Switch
+                          </AppButton>
+                          <AppButton
+                            type="button"
+                            variant="surface"
+                            onClick={() => {
+                              void handleSignOut();
+                            }}
+                            disabled={!activeSessionId || authBusy}
+                          >
+                            Sign out
+                          </AppButton>
+                        </div>
+                        {authActionError ? (
+                          <div className="error">{authActionError}</div>
+                        ) : null}
+                      </div>
+                    ) : null}
+                  </div>
+                </div>
+              </div>
+            </div>
+            <div className="main-content">
+              {authLoading ? (
+                <div className="auth-state-message">Loading session...</div>
+              ) : null}
+              {authError ? <div className="error">{authError}</div> : null}
+              {!authLoading && !activeSessionId ? (
+                <div className="signed-out-panel">
+                  <div className="signed-out-title">Signed out</div>
+                  <div className="signed-out-help">
+                    {isOauthMode
+                      ? "Sign in with OAuth to open your workspace."
+                      : "Choose a local user and team to start a dev session."}
+                  </div>
+                  {isOauthMode ? null : (
+                    <>
+                      <div className="signed-out-field">
+                        <div className="account-menu-label">User</div>
+                        <AppSelect
+                          value={accountUserId}
+                          onChange={setAccountUserId}
+                          options={authOptions.users.map((user) => ({
+                            value: user.user_id,
+                            label: user.display_name,
+                          }))}
+                          placeholder="Choose user"
+                        />
+                      </div>
+                      <div className="signed-out-field">
+                        <div className="account-menu-label">Team</div>
+                        <AppSelect
+                          value={accountTeamId}
+                          onChange={setAccountTeamId}
+                          options={accountTeamOptions.map((team) => ({
+                            value: team.team_id,
+                            label: team.name,
+                          }))}
+                          placeholder="Choose team"
+                        />
+                      </div>
+                    </>
+                  )}
+                  <AppButton
+                    type="button"
+                    variant="surface"
+                    onClick={() => {
+                      if (isOauthMode) {
+                        setAuthActionError(null);
+                        setAuthBusy(true);
+                        void authProvider
+                          .signIn()
+                          .catch((err) => {
+                            const message =
+                              err instanceof Error ? err.message : "Unknown error";
+                            setAuthActionError(message);
+                          })
+                          .finally(() => setAuthBusy(false));
+                        return;
+                      }
+                      void applySessionSelection();
+                    }}
+                    disabled={
+                      authBusy ||
+                      (!isOauthMode && (!accountUserId || !accountTeamId))
+                    }
+                  >
+                    {isOauthMode ? "Sign in with OAuth" : "Start session"}
+                  </AppButton>
+                  {authActionError ? <div className="error">{authActionError}</div> : null}
+                </div>
+              ) : null}
+              {activeSessionId ? (
+                <>
+                  <div className="top-title-row">
+                    <div className="top-title">
+                      {activeView === "dashboard"
+                        ? "Dashboard"
+                        : activeScope.kind === "user"
+                          ? currentUser.display_name
+                          : activeProjectTitle}
+                    </div>
+                  </div>
+                  {activeScope.kind === "project" && activeView !== "dashboard" ? (
+                    <div className="title-actions">
+                      <AppButton
+                        type="button"
+                        variant="surface"
+                        onClick={() => openSheet("milestone")}
+                      >
+                        New Milestone
+                      </AppButton>
+                    </div>
+                  ) : null}
+                  {deleteError ? <div className="error">{deleteError}</div> : null}
+                  {error ? <div className="error">{error}</div> : null}
+                  <div className="view-stack">
+                    <section
+                      className={`view-panel${activeView === "dashboard" ? " is-active" : ""}`}
+                      aria-hidden={activeView !== "dashboard"}
+                    >
+                      <DashboardView
+                        scope={activeScope}
+                        refreshToken={refreshToken}
+                        onSelectItem={handleDashboardItemSelect}
+                      />
+                    </section>
+                    <section
+                      className={`view-panel${activeView === "list" ? " is-active" : ""}`}
+                      aria-hidden={activeView !== "list"}
+                    >
+                      <ListView
+                        scope={activeScope}
+                        refreshToken={refreshToken}
+                        onRefresh={triggerRefresh}
+                        onOpenItem={openTaskEditor}
+                      />
+                    </section>
+                    <section
+                      className={`view-panel${activeView === "kanban" ? " is-active" : ""}`}
+                      aria-hidden={activeView !== "kanban"}
+                    >
+                      <KanbanView
+                        scope={activeScope}
+                        refreshToken={refreshToken}
+                        onRefresh={triggerRefresh}
+                        onOpenItem={openTaskEditor}
+                      />
+                    </section>
+                    <section
+                      className={`view-panel${activeView === "calendar" ? " is-active" : ""}`}
+                      aria-hidden={activeView !== "calendar"}
+                    >
+                      <CalendarView
+                        scope={activeScope}
+                        projectItems={projectItems}
+                        refreshToken={refreshToken}
+                        onRefresh={triggerRefresh}
+                        onOpenItem={openTaskEditor}
+                      />
+                    </section>
+                    <section
+                      className={`view-panel${activeView === "gantt" ? " is-active" : ""}`}
+                      aria-hidden={activeView !== "gantt"}
+                    >
+                      <GanttView
+                        scope={activeScope}
+                        refreshToken={refreshToken}
+                        onRefresh={triggerRefresh}
+                        onOpenItem={openTaskEditor}
+                      />
+                    </section>
+                  </div>
+                </>
+              ) : null}
+            </div>
+            <RightSheet
+              open={sheetOpen && !!activeSessionId}
+              onOpenChange={handleSheetOpenChange}
+              title={sheetMode === "edit" ? "Edit task" : `New ${sheetType}`}
+            >
+              <AddItemForm
+                key={`${sheetMode}-${sheetType}-${selectedProjectId ?? "none"}-${sheetItemId ?? "none"}`}
+                selectedProjectId={selectedProjectId}
+                items={projectItems}
+                onRefresh={triggerRefresh}
+                initialType={sheetType}
+                initialMode={sheetMode}
+                initialItemId={sheetItemId}
+                autoFocusTitle={sheetFocusTitle}
+                onCreated={() => {
+                  handleSheetOpenChange(false);
+                }}
+                onDeleted={() => {
+                  handleSheetOpenChange(false);
+                }}
+              />
+            </RightSheet>
+            <CommandPalette
+              open={paletteOpen && !!activeSessionId}
+              onOpenChange={setPaletteOpen}
+              selectedProjectId={selectedProjectId}
+              onCreated={triggerRefresh}
+              onOpenProject={handleOpenProjectFromCommand}
+              onOpenView={setActiveView}
+            />
+            <SettingsWindow
+              open={settingsOpen && !!activeSessionId}
+              onOpenChange={setSettingsOpen}
+              onSettingsChanged={triggerRefresh}
+              onSeeded={handleSeededProject}
+            />
+          </main>
         </div>
       </div>
     </ScopeProvider>

@@ -1,4 +1,4 @@
-export type AuthMode = "local" | "oauth";
+export type AuthMode = "local" | "clerk";
 
 const readAuthMode = (): AuthMode => {
   const env = (import.meta.env ?? {}) as Record<string, unknown>;
@@ -8,7 +8,7 @@ const readAuthMode = (): AuthMode => {
       : typeof env.VITE_AUTH_MODE === "string"
         ? env.VITE_AUTH_MODE
         : "local";
-  return raw.trim().toLowerCase() === "oauth" ? "oauth" : "local";
+  return raw.trim().toLowerCase() === "clerk" ? "clerk" : "local";
 };
 
 export const AUTH_MODE: AuthMode = readAuthMode();
@@ -27,17 +27,10 @@ const readAuthRemoteBaseUrl = (): string => {
   );
 };
 
-const readOAuthCallbackPath = (): string => {
+export const AUTH_REMOTE_BASE_URL = readAuthRemoteBaseUrl();
+const readClerkPublishableKey = (): string => {
   const env = (import.meta.env ?? {}) as Record<string, unknown>;
-  const raw =
-    readString(env.AUTH_OAUTH_CALLBACK_PATH) ||
-    readString(env.VITE_AUTH_OAUTH_CALLBACK_PATH) ||
-    "/auth/callback";
-  if (!raw.startsWith("/")) {
-    return `/${raw}`;
-  }
-  return raw;
+  return readString(env.VITE_CLERK_PUBLISHABLE_KEY);
 };
 
-export const AUTH_REMOTE_BASE_URL = readAuthRemoteBaseUrl();
-export const AUTH_OAUTH_CALLBACK_PATH = readOAuthCallbackPath();
+export const CLERK_PUBLISHABLE_KEY = readClerkPublishableKey();

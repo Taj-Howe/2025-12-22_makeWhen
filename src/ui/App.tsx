@@ -14,7 +14,11 @@ import CommandPalette from "./CommandPalette";
 import SettingsWindow from "./SettingsWindow";
 import { AppButton, AppSelect } from "./controls";
 import { mutate, query } from "../rpc/clientSingleton";
-import { authProvider, getSessionOptions } from "../auth/authProvider";
+import {
+  authProvider,
+  getAuthRemoteBaseUrl,
+  getSessionOptions,
+} from "../auth/authProvider";
 import type { ListItem } from "../domain/listTypes";
 import type { Scope } from "../domain/scope";
 import {
@@ -53,6 +57,31 @@ const EMPTY_AUTH_OPTIONS: AuthSessionOptionsResult = {
   users: [],
   teams: [],
   memberships: [],
+};
+
+const parseInviteTokenFromLocation = () => {
+  if (typeof window === "undefined") {
+    return null;
+  }
+  const match = window.location.pathname.match(/^\/invite\/([^/]+)$/);
+  if (!match?.[1]) {
+    return null;
+  }
+  return decodeURIComponent(match[1]);
+};
+
+const readCookie = (name: string) => {
+  if (typeof document === "undefined") {
+    return "";
+  }
+  const entries = document.cookie.split(";").map((part) => part.trim());
+  for (const entry of entries) {
+    if (!entry.startsWith(`${name}=`)) {
+      continue;
+    }
+    return decodeURIComponent(entry.slice(name.length + 1));
+  }
+  return "";
 };
 
 const App = () => {
@@ -94,6 +123,15 @@ const App = () => {
   const [accountOpen, setAccountOpen] = useState(false);
   const [accountUserId, setAccountUserId] = useState("");
   const [accountTeamId, setAccountTeamId] = useState("");
+  const [pendingInviteToken, setPendingInviteToken] = useState<string | null>(
+    () => parseInviteTokenFromLocation()
+  );
+  const [inviteStatusMessage, setInviteStatusMessage] = useState<string | null>(
+    null
+  );
+  const [inviteStatusError, setInviteStatusError] = useState<string | null>(
+    null
+  );
 
   const activeSession = authCurrent?.session ?? null;
   const activeSessionId = activeSession?.session_id ?? null;
@@ -103,6 +141,38 @@ const App = () => {
     const options = await getSessionOptions();
     setAuthCurrent(current);
     setAuthOptions(options);
+  }, []);
+
+  const acceptInviteToken = useCallback(async (token: string) => {
+    const baseUrl = getAuthRemoteBaseUrl();
+    if (!baseUrl) {
+      throw new Error("AUTH_REMOTE_BASE_URL is required to accept team invites.");
+    }
+    const csrf = readCookie("mw_csrf");
+    const headers: Record<string, string> = {
+      "Content-Type": "application/json",
+      Accept: "application/json",
+    };
+    if (csrf) {
+      headers["X-CSRF-Token"] = csrf;
+    }
+    const response = await fetch(
+      `${baseUrl}/invites/${encodeURIComponent(token)}/accept`,
+      {
+        method: "POST",
+        credentials: "include",
+        cache: "no-store",
+        headers,
+      }
+    );
+    if (!response.ok) {
+      const payload = (await response.json().catch(() => null)) as
+        | { message?: string }
+        | null;
+      const message = payload?.message ?? `HTTP ${response.status}`;
+      throw new Error(`Invite accept failed: ${message}`);
+    }
+    return (await response.json()) as Record<string, unknown>;
   }, []);
 
   const triggerRefresh = useCallback(() => {
@@ -206,6 +276,44 @@ const App = () => {
       canceled = true;
     };
   }, [refreshAuth]);
+
+  useEffect(() => {
+    if (!activeSessionId || !pendingInviteToken) {
+      return;
+    }
+    let canceled = false;
+    setInviteStatusError(null);
+    setInviteStatusMessage(null);
+    acceptInviteToken(pendingInviteToken)
+      .then(async () => {
+        if (canceled) {
+          return;
+        }
+        setInviteStatusMessage("Team invite accepted.");
+        setPendingInviteToken(null);
+        if (typeof window !== "undefined" && window.location.pathname.startsWith("/invite/")) {
+          window.history.replaceState({}, "", "/");
+        }
+        await refreshAuth();
+        triggerRefresh();
+      })
+      .catch((err) => {
+        if (canceled) {
+          return;
+        }
+        const message = err instanceof Error ? err.message : "Unknown error";
+        setInviteStatusError(message);
+      });
+    return () => {
+      canceled = true;
+    };
+  }, [
+    acceptInviteToken,
+    activeSessionId,
+    pendingInviteToken,
+    refreshAuth,
+    triggerRefresh,
+  ]);
 
   useEffect(() => {
     if (!activeSessionId) {
@@ -387,7 +495,7 @@ const App = () => {
 
   const activeUserLabel = authCurrent?.user?.display_name ?? currentUser.display_name;
   const activeTeamLabel = authCurrent?.team?.name ?? "No team";
-  const isOauthMode = authProvider.mode === "oauth";
+  const isClerkMode = authProvider.mode === "clerk";
 
   const canApplySession =
     !!accountUserId &&
@@ -396,22 +504,31 @@ const App = () => {
       activeSession?.team_id !== accountTeamId);
 
   const applySessionSelection = useCallback(async () => {
-    if (!accountUserId || !accountTeamId) {
+    if (!accountTeamId && !isClerkMode) {
+      return;
+    }
+    if (!isClerkMode && !accountUserId) {
       return;
     }
     setAuthActionError(null);
     setAuthBusy(true);
     try {
-      const signIn = await authProvider.signIn({
-        user_id: accountUserId,
-        team_id: accountTeamId,
-      });
+      const signIn = await authProvider.signIn(
+        isClerkMode
+          ? { team_id: accountTeamId || undefined }
+          : {
+              user_id: accountUserId,
+              team_id: accountTeamId,
+            }
+      );
       if (signIn.status !== "signed_in") {
         setAccountOpen(true);
         return;
       }
       await refreshAuth();
-      setSelectedUserId(accountUserId);
+      if (accountUserId) {
+        setSelectedUserId(accountUserId);
+      }
       setSelectedProjectId(UNGROUPED_PROJECT_ID);
       setScope({ kind: "project", projectId: UNGROUPED_PROJECT_ID });
       setError(null);
@@ -427,6 +544,7 @@ const App = () => {
       setAuthBusy(false);
     }
   }, [
+    isClerkMode,
     accountTeamId,
     accountUserId,
     refreshAuth,
@@ -682,16 +800,25 @@ const App = () => {
                     </AppButton>
                     {accountOpen ? (
                       <div className="account-menu">
-                        <div className="account-menu-label">User</div>
-                        <AppSelect
-                          value={accountUserId}
-                          onChange={setAccountUserId}
-                          options={authOptions.users.map((user) => ({
-                            value: user.user_id,
-                            label: user.display_name,
-                          }))}
-                          placeholder="Choose user"
-                        />
+                        {isClerkMode ? (
+                          <>
+                            <div className="account-menu-label">User</div>
+                            <div>{activeUserLabel}</div>
+                          </>
+                        ) : (
+                          <>
+                            <div className="account-menu-label">User</div>
+                            <AppSelect
+                              value={accountUserId}
+                              onChange={setAccountUserId}
+                              options={authOptions.users.map((user) => ({
+                                value: user.user_id,
+                                label: user.display_name,
+                              }))}
+                              placeholder="Choose user"
+                            />
+                          </>
+                        )}
                         <div className="account-menu-label">Team</div>
                         <AppSelect
                           value={accountTeamId}
@@ -709,9 +836,9 @@ const App = () => {
                             onClick={() => {
                               void applySessionSelection();
                             }}
-                            disabled={!canApplySession || authBusy}
+                            disabled={authBusy || !canApplySession || !accountTeamId}
                           >
-                            Switch
+                            {isClerkMode ? "Switch team" : "Switch"}
                           </AppButton>
                           <AppButton
                             type="button"
@@ -742,11 +869,16 @@ const App = () => {
                 <div className="signed-out-panel">
                   <div className="signed-out-title">Signed out</div>
                   <div className="signed-out-help">
-                    {isOauthMode
-                      ? "Sign in with OAuth to open your workspace."
+                    {isClerkMode
+                      ? "Sign in with Clerk to open your workspace."
                       : "Choose a local user and team to start a dev session."}
                   </div>
-                  {isOauthMode ? null : (
+                  {pendingInviteToken ? (
+                    <div className="signed-out-help">
+                      Invite detected. Sign in to accept it automatically.
+                    </div>
+                  ) : null}
+                  {isClerkMode ? null : (
                     <>
                       <div className="signed-out-field">
                         <div className="account-menu-label">User</div>
@@ -778,7 +910,7 @@ const App = () => {
                     type="button"
                     variant="surface"
                     onClick={() => {
-                      if (isOauthMode) {
+                      if (isClerkMode) {
                         setAuthActionError(null);
                         setAuthBusy(true);
                         void authProvider
@@ -795,16 +927,20 @@ const App = () => {
                     }}
                     disabled={
                       authBusy ||
-                      (!isOauthMode && (!accountUserId || !accountTeamId))
+                      (!isClerkMode && (!accountUserId || !accountTeamId))
                     }
                   >
-                    {isOauthMode ? "Sign in with OAuth" : "Start session"}
+                    {isClerkMode ? "Sign in with Clerk" : "Start session"}
                   </AppButton>
                   {authActionError ? <div className="error">{authActionError}</div> : null}
                 </div>
               ) : null}
               {activeSessionId ? (
                 <>
+                  {inviteStatusMessage ? (
+                    <div className="auth-state-message">{inviteStatusMessage}</div>
+                  ) : null}
+                  {inviteStatusError ? <div className="error">{inviteStatusError}</div> : null}
                   <div className="top-title-row">
                     <div className="top-title">
                       {activeView === "dashboard"
@@ -922,6 +1058,11 @@ const App = () => {
               onOpenChange={setSettingsOpen}
               onSettingsChanged={triggerRefresh}
               onSeeded={handleSeededProject}
+              authMode={authProvider.mode}
+              activeSession={activeSession}
+              onAuthRefresh={refreshAuth}
+              pendingInviteToken={pendingInviteToken}
+              onInviteTokenHandled={() => setPendingInviteToken(null)}
             />
           </main>
         </div>

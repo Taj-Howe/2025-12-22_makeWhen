@@ -19,7 +19,7 @@ Already in place:
 - role-based checks (owner/editor/viewer)
 - durable local outbox (`op_outbox`) + applied cursor (`op_applied`)
 - mock remote op-log + local sync run loop
-- auth provider UI seam (`AUTH_MODE=local|oauth`)
+- auth provider UI seam (`AUTH_MODE=local|clerk`)
 - server contract and security docs
 
 Not yet production-ready:
@@ -49,7 +49,7 @@ W1. Product + launch scope control
 
 W2. Identity and auth (production)
 - Choose auth provider stack (managed or custom).
-- Implement real OAuth/session flow behind `authProvider` boundary.
+- Implement Clerk/session flow behind `authProvider` boundary.
 - Server-side session verification middleware.
 - Team membership bootstrap flow for first sign-in.
 - Account lifecycle basics: sign-in, sign-out, session expiry, re-auth.

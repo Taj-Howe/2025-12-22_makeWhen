@@ -13,6 +13,10 @@ import {
   handleAuthRoute,
   type AuthRouteDependencies,
 } from "./routes/auth.ts";
+import {
+  handleTeamRoute,
+  type TeamRouteDependencies,
+} from "./routes/team.ts";
 import { applyIpRateLimit } from "./security/rateLimit.ts";
 import { logSecurityEvent } from "./security/logging.ts";
 import { getRequestIp } from "./security/requestMeta.ts";
@@ -48,7 +52,8 @@ export const buildHandler = (
   corsOrigin: string,
   syncDeps: Partial<SyncRouteDependencies> = {},
   adminDeps: Partial<AdminRouteDependencies> = {},
-  authDeps: Partial<AuthRouteDependencies> = {}
+  authDeps: Partial<AuthRouteDependencies> = {},
+  teamDeps: Partial<TeamRouteDependencies> = {}
 ): RequestHandler => {
   return async (request, response) => {
     const method = request.method ?? "GET";
@@ -237,6 +242,27 @@ export const buildHandler = (
             writeJson(res, status, body, corsOrigin);
           },
           authDeps
+        );
+      } catch (error) {
+        writeApiError(error);
+      }
+      return;
+    }
+
+    if (
+      parsedUrl.pathname.startsWith("/teams/") ||
+      parsedUrl.pathname.startsWith("/invites/")
+    ) {
+      try {
+        applyIpRateLimit(ip, `teams:${method}`);
+        await handleTeamRoute(
+          request,
+          response,
+          parsedUrl,
+          (res, status, body) => {
+            writeJson(res, status, body, corsOrigin);
+          },
+          teamDeps
         );
       } catch (error) {
         writeApiError(error);

@@ -72,14 +72,22 @@ import {
   resolveUserColor,
 } from "../domain/userColors";
 import { loadTheme, setTheme, type ThemeName } from "../theme/themeStore";
+import type { AuthMode } from "../auth/authConfig";
+import { getAuthRemoteBaseUrl } from "../auth/authProvider";
 import SampleDataPanel from "./SampleDataPanel";
 import { AppButton, AppIconButton, AppInput, AppSelect } from "./controls";
+import type { AuthSession, TeamRole } from "../rpc/types";
 
 type SettingsWindowProps = {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   onSettingsChanged?: () => void;
   onSeeded: (projectId: string) => void;
+  authMode: AuthMode;
+  activeSession: AuthSession | null;
+  onAuthRefresh?: () => Promise<void> | void;
+  pendingInviteToken?: string | null;
+  onInviteTokenHandled?: () => void;
 };
 
 type UserOption = {
@@ -88,12 +96,30 @@ type UserOption = {
   avatar_url?: string | null;
 };
 
-type SettingsSection = "theme" | "scheduling" | "behavior" | "data";
+type TeamMember = {
+  user_id: string;
+  display_name: string;
+  email: string | null;
+  role: TeamRole;
+};
+
+type TeamInvite = {
+  invite_id: string;
+  invitee_email: string;
+  role: TeamRole;
+  status: "pending" | "accepted" | "revoked" | "expired";
+  expires_at: string;
+  accepted_at: string | null;
+  created_at: string;
+};
+
+type SettingsSection = "theme" | "scheduling" | "behavior" | "collaboration" | "data";
 
 const SETTINGS_SECTIONS: Array<{ id: SettingsSection; label: string }> = [
   { id: "theme", label: "Theme" },
   { id: "scheduling", label: "Scheduling" },
   { id: "behavior", label: "Behavior" },
+  { id: "collaboration", label: "Collaboration" },
   { id: "data", label: "Data" },
 ];
 
@@ -198,6 +224,11 @@ const SettingsWindow: FC<SettingsWindowProps> = ({
   onOpenChange,
   onSettingsChanged,
   onSeeded,
+  authMode,
+  activeSession,
+  onAuthRefresh,
+  pendingInviteToken,
+  onInviteTokenHandled,
 }) => {
   const [activeSection, setActiveSection] = useState<SettingsSection>("theme");
   const [theme, setThemeState] = useState<ThemeName>("light");
@@ -232,6 +263,165 @@ const SettingsWindow: FC<SettingsWindowProps> = ({
   const [colorSelectionMode, setColorSelectionMode] =
     useState<ColorSelectionMode>("picker");
   const [activeColorPanel, setActiveColorPanel] = useState<string | null>(null);
+  const [teamMembers, setTeamMembers] = useState<TeamMember[]>([]);
+  const [teamInvites, setTeamInvites] = useState<TeamInvite[]>([]);
+  const [inviteEmail, setInviteEmail] = useState("");
+  const [inviteRole, setInviteRole] = useState<TeamRole>("editor");
+  const [inviteTokenInput, setInviteTokenInput] = useState("");
+  const [teamLoading, setTeamLoading] = useState(false);
+  const [inviteSaving, setInviteSaving] = useState(false);
+  const [inviteAccepting, setInviteAccepting] = useState(false);
+  const [teamError, setTeamError] = useState<string | null>(null);
+  const [teamNotice, setTeamNotice] = useState<string | null>(null);
+
+  const readCookie = (name: string) => {
+    if (typeof document === "undefined") {
+      return "";
+    }
+    const parts = document.cookie.split(";").map((part) => part.trim());
+    for (const part of parts) {
+      if (!part.startsWith(`${name}=`)) {
+        continue;
+      }
+      return decodeURIComponent(part.slice(name.length + 1));
+    }
+    return "";
+  };
+
+  const resolveRemoteBaseUrl = () => {
+    const explicit = getAuthRemoteBaseUrl();
+    if (explicit) {
+      return explicit;
+    }
+    if (typeof window !== "undefined") {
+      return window.location.origin;
+    }
+    return "";
+  };
+
+  const readApiError = async (response: Response) => {
+    try {
+      const payload = (await response.json()) as { message?: string; error?: string };
+      if (payload.message) {
+        return payload.message;
+      }
+      if (payload.error) {
+        return payload.error;
+      }
+    } catch {
+      // no-op
+    }
+    return `HTTP ${response.status}`;
+  };
+
+  const fetchTeamJson = async (
+    pathname: string,
+    init: RequestInit = {}
+  ): Promise<Record<string, unknown>> => {
+    const baseUrl = resolveRemoteBaseUrl();
+    if (!baseUrl) {
+      throw new Error("AUTH_REMOTE_BASE_URL is required for collaboration endpoints.");
+    }
+    const csrf = readCookie("mw_csrf");
+    const headers = new Headers(init.headers ?? {});
+    headers.set("Accept", "application/json");
+    if (!headers.has("Content-Type") && init.method && init.method !== "GET") {
+      headers.set("Content-Type", "application/json");
+    }
+    if (csrf && init.method && init.method !== "GET") {
+      headers.set("X-CSRF-Token", csrf);
+    }
+    const response = await fetch(`${baseUrl}${pathname}`, {
+      credentials: "include",
+      cache: "no-store",
+      ...init,
+      headers,
+    });
+    if (!response.ok) {
+      const message = await readApiError(response);
+      throw new Error(message);
+    }
+    return (await response.json()) as Record<string, unknown>;
+  };
+
+  const reloadTeamCollaboration = async () => {
+    if (authMode !== "clerk" || !activeSession?.team_id) {
+      setTeamMembers([]);
+      setTeamInvites([]);
+      return;
+    }
+    setTeamLoading(true);
+    setTeamError(null);
+    try {
+      const teamId = encodeURIComponent(activeSession.team_id);
+      const [membersResponse, invitesResponse] = await Promise.all([
+        fetchTeamJson(`/teams/${teamId}/members`, { method: "GET" }),
+        fetchTeamJson(`/teams/${teamId}/invites`, { method: "GET" }),
+      ]);
+      const membersRaw = Array.isArray(membersResponse.members)
+        ? membersResponse.members
+        : [];
+      const invitesRaw = Array.isArray(invitesResponse.invites)
+        ? invitesResponse.invites
+        : [];
+      const members = membersRaw
+        .map((entry) => {
+          if (!entry || typeof entry !== "object") {
+            return null;
+          }
+          const row = entry as Record<string, unknown>;
+          if (
+            typeof row.user_id !== "string" ||
+            typeof row.display_name !== "string" ||
+            (row.role !== "owner" && row.role !== "editor" && row.role !== "viewer")
+          ) {
+            return null;
+          }
+          return {
+            user_id: row.user_id,
+            display_name: row.display_name,
+            email: typeof row.email === "string" ? row.email : null,
+            role: row.role,
+          } as TeamMember;
+        })
+        .filter((row): row is TeamMember => row !== null);
+      const invites = invitesRaw
+        .map((entry) => {
+          if (!entry || typeof entry !== "object") {
+            return null;
+          }
+          const row = entry as Record<string, unknown>;
+          if (
+            typeof row.invite_id !== "string" ||
+            typeof row.invitee_email !== "string" ||
+            (row.role !== "owner" && row.role !== "editor" && row.role !== "viewer") ||
+            (row.status !== "pending" &&
+              row.status !== "accepted" &&
+              row.status !== "revoked" &&
+              row.status !== "expired")
+          ) {
+            return null;
+          }
+          return {
+            invite_id: row.invite_id,
+            invitee_email: row.invitee_email,
+            role: row.role,
+            status: row.status,
+            expires_at: typeof row.expires_at === "string" ? row.expires_at : "",
+            accepted_at: typeof row.accepted_at === "string" ? row.accepted_at : null,
+            created_at: typeof row.created_at === "string" ? row.created_at : "",
+          } as TeamInvite;
+        })
+        .filter((row): row is TeamInvite => row !== null);
+      setTeamMembers(members);
+      setTeamInvites(invites);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Unknown error";
+      setTeamError(message);
+    } finally {
+      setTeamLoading(false);
+    }
+  };
 
   useEffect(() => {
     if (!open) {
@@ -332,6 +522,20 @@ const SettingsWindow: FC<SettingsWindowProps> = ({
       mounted = false;
     };
   }, [open]);
+
+  useEffect(() => {
+    if (!pendingInviteToken) {
+      return;
+    }
+    setInviteTokenInput((current) => current || pendingInviteToken);
+  }, [pendingInviteToken]);
+
+  useEffect(() => {
+    if (!open || authMode !== "clerk" || !activeSession?.team_id) {
+      return;
+    }
+    void reloadTeamCollaboration();
+  }, [activeSession?.team_id, authMode, open]);
 
   useEffect(() => {
     if (!open) {
@@ -725,6 +929,90 @@ const SettingsWindow: FC<SettingsWindowProps> = ({
       setTypographyError(message);
     } finally {
       setSavingTypography(false);
+    }
+  };
+
+  const handleCreateInvite = async () => {
+    if (authMode !== "clerk" || !activeSession?.team_id) {
+      return;
+    }
+    const email = inviteEmail.trim().toLowerCase();
+    if (!email) {
+      setTeamError("Invite email is required.");
+      return;
+    }
+    setInviteSaving(true);
+    setTeamError(null);
+    setTeamNotice(null);
+    try {
+      const teamId = encodeURIComponent(activeSession.team_id);
+      await fetchTeamJson(`/teams/${teamId}/invites`, {
+        method: "POST",
+        body: JSON.stringify({
+          email,
+          role: inviteRole,
+        }),
+      });
+      setInviteEmail("");
+      setTeamNotice("Invite created.");
+      await reloadTeamCollaboration();
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Unknown error";
+      setTeamError(message);
+    } finally {
+      setInviteSaving(false);
+    }
+  };
+
+  const handleRevokeInvite = async (inviteId: string) => {
+    if (authMode !== "clerk" || !activeSession?.team_id) {
+      return;
+    }
+    setTeamError(null);
+    setTeamNotice(null);
+    try {
+      const teamId = encodeURIComponent(activeSession.team_id);
+      await fetchTeamJson(
+        `/teams/${teamId}/invites/${encodeURIComponent(inviteId)}/revoke`,
+        {
+          method: "POST",
+        }
+      );
+      setTeamNotice("Invite revoked.");
+      await reloadTeamCollaboration();
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Unknown error";
+      setTeamError(message);
+    }
+  };
+
+  const handleAcceptInviteToken = async () => {
+    if (authMode !== "clerk") {
+      return;
+    }
+    const token = inviteTokenInput.trim();
+    if (!token) {
+      setTeamError("Invite token is required.");
+      return;
+    }
+    setInviteAccepting(true);
+    setTeamError(null);
+    setTeamNotice(null);
+    try {
+      await fetchTeamJson(`/invites/${encodeURIComponent(token)}/accept`, {
+        method: "POST",
+      });
+      setInviteTokenInput("");
+      onInviteTokenHandled?.();
+      setTeamNotice("Invite accepted.");
+      await onAuthRefresh?.();
+      await reloadTeamCollaboration();
+      onSettingsChanged?.();
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Unknown error";
+      setTeamError(message);
+    } finally {
+      setInviteAccepting(false);
     }
   };
 
@@ -1288,6 +1576,198 @@ const SettingsWindow: FC<SettingsWindowProps> = ({
                   </Flex>
                 </Flex>
               </Card>
+            ) : null}
+
+            {activeSection === "collaboration" ? (
+              <Flex direction="column" gap="4">
+                <Card size="2">
+                  <Flex direction="column" gap="3">
+                    <Heading size="3">Team</Heading>
+                    <Text size="2" color="gray">
+                      Manage team members and invite links for collaboration.
+                    </Text>
+                    <Text size="1" color="gray">
+                      Active team: {activeSession?.team_id ?? "none"}
+                    </Text>
+                    {authMode !== "clerk" ? (
+                      <Text size="1" color="gray">
+                        Collaboration endpoints are available when `VITE_AUTH_MODE=clerk`.
+                      </Text>
+                    ) : (
+                      <AppButton
+                        type="button"
+                        variant="ghost"
+                        onClick={() => void reloadTeamCollaboration()}
+                        disabled={teamLoading}
+                      >
+                        {teamLoading ? "Refreshing..." : "Refresh team data"}
+                      </AppButton>
+                    )}
+                    {teamError ? (
+                      <Text size="1" color="red">
+                        {teamError}
+                      </Text>
+                    ) : null}
+                    {teamNotice ? (
+                      <Text size="1" color="green">
+                        {teamNotice}
+                      </Text>
+                    ) : null}
+                  </Flex>
+                </Card>
+
+                <Card size="2">
+                  <Flex direction="column" gap="3">
+                    <Heading size="3">Invite by Email</Heading>
+                    <Flex align="end" gap="3" wrap="wrap">
+                      <label style={{ display: "grid", gap: 6, minWidth: 260, flex: 1 }}>
+                        <Text size="1" color="gray">
+                          Email
+                        </Text>
+                        <AppInput
+                          value={inviteEmail}
+                          onChange={(event) => setInviteEmail(event.target.value)}
+                          placeholder="teammate@example.com"
+                        />
+                      </label>
+                      <label style={{ display: "grid", gap: 6, minWidth: 160 }}>
+                        <Text size="1" color="gray">
+                          Role
+                        </Text>
+                        <AppSelect
+                          value={inviteRole}
+                          onChange={(value) =>
+                            setInviteRole(
+                              value === "owner" || value === "editor" || value === "viewer"
+                                ? value
+                                : "editor"
+                            )
+                          }
+                          options={[
+                            { value: "editor", label: "Editor" },
+                            { value: "viewer", label: "Viewer" },
+                            { value: "owner", label: "Owner" },
+                          ]}
+                        />
+                      </label>
+                      <AppButton
+                        type="button"
+                        variant="surface"
+                        onClick={() => void handleCreateInvite()}
+                        disabled={authMode !== "clerk" || inviteSaving}
+                      >
+                        {inviteSaving ? "Creating..." : "Create invite"}
+                      </AppButton>
+                    </Flex>
+                  </Flex>
+                </Card>
+
+                <Card size="2">
+                  <Flex direction="column" gap="3">
+                    <Heading size="3">Accept Invite Token</Heading>
+                    <Flex align="end" gap="3" wrap="wrap">
+                      <label style={{ display: "grid", gap: 6, minWidth: 320, flex: 1 }}>
+                        <Text size="1" color="gray">
+                          Token
+                        </Text>
+                        <AppInput
+                          value={inviteTokenInput}
+                          onChange={(event) => setInviteTokenInput(event.target.value)}
+                          placeholder="Paste invite token"
+                        />
+                      </label>
+                      <AppButton
+                        type="button"
+                        variant="surface"
+                        onClick={() => void handleAcceptInviteToken()}
+                        disabled={authMode !== "clerk" || inviteAccepting}
+                      >
+                        {inviteAccepting ? "Accepting..." : "Accept invite"}
+                      </AppButton>
+                    </Flex>
+                  </Flex>
+                </Card>
+
+                <Card size="2">
+                  <Flex direction="column" gap="3">
+                    <Heading size="3">Members</Heading>
+                    {teamMembers.length === 0 ? (
+                      <Text size="1" color="gray">
+                        No team members loaded.
+                      </Text>
+                    ) : (
+                      teamMembers.map((member) => (
+                        <Flex
+                          key={member.user_id}
+                          align="center"
+                          justify="between"
+                          gap="3"
+                          style={{
+                            padding: "8px 10px",
+                            border: "1px solid var(--color-border)",
+                            borderRadius: "var(--radius)",
+                          }}
+                        >
+                          <div>
+                            <Text size="2">{member.display_name}</Text>
+                            <Text size="1" color="gray" style={{ display: "block" }}>
+                              {member.email ?? member.user_id}
+                            </Text>
+                          </div>
+                          <Text size="1" color="gray">
+                            {member.role}
+                          </Text>
+                        </Flex>
+                      ))
+                    )}
+                  </Flex>
+                </Card>
+
+                <Card size="2">
+                  <Flex direction="column" gap="3">
+                    <Heading size="3">Invites</Heading>
+                    {teamInvites.length === 0 ? (
+                      <Text size="1" color="gray">
+                        No invites found.
+                      </Text>
+                    ) : (
+                      teamInvites.map((invite) => (
+                        <Flex
+                          key={invite.invite_id}
+                          align="center"
+                          justify="between"
+                          gap="3"
+                          style={{
+                            padding: "8px 10px",
+                            border: "1px solid var(--color-border)",
+                            borderRadius: "var(--radius)",
+                          }}
+                        >
+                          <div>
+                            <Text size="2">{invite.invitee_email}</Text>
+                            <Text size="1" color="gray" style={{ display: "block" }}>
+                              {invite.role} · {invite.status}
+                            </Text>
+                          </div>
+                          {invite.status === "pending" ? (
+                            <AppButton
+                              type="button"
+                              variant="ghost"
+                              onClick={() => void handleRevokeInvite(invite.invite_id)}
+                            >
+                              Revoke
+                            </AppButton>
+                          ) : (
+                            <Text size="1" color="gray">
+                              {invite.status}
+                            </Text>
+                          )}
+                        </Flex>
+                      ))
+                    )}
+                  </Flex>
+                </Card>
+              </Flex>
             ) : null}
 
             {activeSection === "data" ? (

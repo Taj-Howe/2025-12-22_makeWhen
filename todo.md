@@ -6,6 +6,31 @@ git procedure:
 - [ ] Fix the asignee menu not having enough space to click if its the last task in the list. 
 - [ ] Highlight item that corresponds to scope. Make page titles more expressive. 
 
+# Current UI Polish
+- [ ] Clean up tabs UI styling and behavior.
+- [ ] Clean up reload behavior and remove janky/visible reload states.
+- [ ] Add transition animations between key view/state changes.
+- [ ] Add ability to reorder project list and sort/group projects.
+- [ ] Add info/help text in Settings explaining how the command line interface works.
+- [ ] Increase min height for unscheduled tasks panel/cards (current min height is too small).
+- [ ] Fix spacing between fields and standardize layout so inputs do not jump around.
+- [ ] Use dropdown/modal input for long field values where inline input is unstable.
+- [ ] Ensure dropdown menus have internal scrollbars when content is long.
+- [ ] Standardize button heights across the app.
+- [ ] Standardize button corner radius tokens across all button variants (including user buttons).
+- [ ] Remove component/background styling from project list rows; render as plain text list styling.
+- [ ] Fix spacing for milestone titles and render as text-only (no component background).
+- [ ] Formalize design system and tokenize all core UI primitives (spacing, radius, typography, color, control sizes).
+
+## Mobile UI
+- [ ] Design mobile UI pass for core views (Dashboard, List, Calendar, Settings) with responsive layout rules.
+
+## Date/Time Input
+- [ ] Make all date/time fields highly flexible for natural-language and formatted input (e.g. `friday at noon`, `01/07/2026 12:00pm`).
+- [ ] Add date/time picker dropdown button next to text input for assisted selection.
+- [ ] Parse flexible date/time input to a standardized format configured in Settings.
+- [ ] Dependencies should use a dropdown menu instead of expanding the row.
+
 
 # Upcoming Features:
 

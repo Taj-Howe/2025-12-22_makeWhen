@@ -2373,6 +2373,135 @@ const runMigrations = (db: any) => {
   return currentVersion;
 };
 
+const tableExists = (db: any, tableName: string) => {
+  const rows = db.exec({
+    sql: "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ? LIMIT 1;",
+    rowMode: "array",
+    returnValue: "resultRows",
+    bind: [tableName],
+  }) as Array<[number]>;
+  return rows.length > 0;
+};
+
+const columnExists = (db: any, tableName: string, columnName: string) => {
+  const rows = db.exec({
+    sql: `PRAGMA table_info(${tableName});`,
+    rowMode: "array",
+    returnValue: "resultRows",
+  }) as Array<[number, string, string, number, unknown, number]>;
+  return rows.some((row) => row[1] === columnName);
+};
+
+const ensureAuthSyncFoundationSchema = (db: any) => {
+  // Repair missing team/auth/sync tables in stale or partially mutated local DBs.
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS teams (
+      team_id TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS team_members (
+      team_id TEXT NOT NULL,
+      user_id TEXT NOT NULL,
+      role TEXT NOT NULL DEFAULT 'member',
+      invited_by TEXT,
+      created_at INTEGER NOT NULL,
+      PRIMARY KEY (team_id, user_id)
+    );
+
+    CREATE TABLE IF NOT EXISTS users (
+      user_id TEXT PRIMARY KEY,
+      display_name TEXT NOT NULL,
+      avatar_url TEXT,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS project_members (
+      project_id TEXT NOT NULL,
+      user_id TEXT NOT NULL,
+      role TEXT NOT NULL DEFAULT 'member',
+      created_at INTEGER NOT NULL,
+      PRIMARY KEY (project_id, user_id)
+    );
+
+    CREATE TABLE IF NOT EXISTS sessions (
+      session_id TEXT PRIMARY KEY,
+      user_id TEXT NOT NULL,
+      team_id TEXT NOT NULL,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL,
+      is_active INTEGER NOT NULL DEFAULT 1,
+      FOREIGN KEY (user_id) REFERENCES users(user_id),
+      FOREIGN KEY (team_id) REFERENCES teams(team_id)
+    );
+
+    CREATE TABLE IF NOT EXISTS client_info (
+      client_id TEXT PRIMARY KEY,
+      created_at INTEGER NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS op_outbox (
+      op_id TEXT PRIMARY KEY,
+      team_id TEXT NOT NULL,
+      actor_user_id TEXT NOT NULL,
+      created_at INTEGER NOT NULL,
+      op_name TEXT NOT NULL,
+      payload_json TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'queued',
+      last_error TEXT,
+      server_seq INTEGER
+    );
+
+    CREATE TABLE IF NOT EXISTS op_applied (
+      team_id TEXT NOT NULL,
+      server_seq INTEGER NOT NULL,
+      applied_at INTEGER NOT NULL,
+      PRIMARY KEY(team_id, server_seq)
+    );
+
+    CREATE TABLE IF NOT EXISTS mock_remote_oplog (
+      team_id TEXT NOT NULL,
+      server_seq INTEGER NOT NULL,
+      op_id TEXT NOT NULL,
+      op_json TEXT NOT NULL,
+      created_at INTEGER NOT NULL,
+      PRIMARY KEY(team_id, server_seq)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_items_team_id ON items(team_id);
+    CREATE INDEX IF NOT EXISTS idx_team_members_user_id ON team_members(user_id);
+    CREATE INDEX IF NOT EXISTS idx_project_members_user_id ON project_members(user_id);
+    CREATE INDEX IF NOT EXISTS idx_users_display_name ON users(display_name);
+    CREATE INDEX IF NOT EXISTS idx_sessions_active ON sessions(is_active);
+    CREATE INDEX IF NOT EXISTS idx_sessions_user_team ON sessions(user_id, team_id);
+    CREATE INDEX IF NOT EXISTS idx_op_outbox_team_status_created ON op_outbox(team_id, status, created_at);
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_mock_remote_oplog_team_op_id ON mock_remote_oplog(team_id, op_id);
+  `);
+
+  if (tableExists(db, "items") && !columnExists(db, "items", "team_id")) {
+    db.exec("ALTER TABLE items ADD COLUMN team_id TEXT NOT NULL DEFAULT 'team_default';");
+  }
+
+  if (tableExists(db, "items") && columnExists(db, "items", "team_id")) {
+    db.exec(`
+      UPDATE items
+      SET team_id = 'team_default'
+      WHERE team_id IS NULL OR team_id = '';
+    `);
+  }
+
+  const now = Date.now();
+  db.exec(
+    "INSERT OR IGNORE INTO teams (team_id, name, created_at, updated_at) VALUES (?, ?, ?, ?);",
+    {
+      bind: [DEFAULT_TEAM_ID, DEFAULT_TEAM_NAME, now, now],
+    }
+  );
+};
+
 const loadScheduledBlocksSchema = (db: any) => {
   const rows = db.exec({
     sql: "PRAGMA table_info(scheduled_blocks);",
@@ -2433,6 +2562,7 @@ const initDb = async () => {
       const db = new poolUtil.OpfsSAHPoolDb(DB_FILENAME);
       dbHandle = db;
       const schemaVersion = runMigrations(db);
+      ensureAuthSyncFoundationSchema(db);
       ensureDefaultTeamMembershipFromRegistry(db);
       ensureBootstrapSession(db);
       ensureScheduledBlocksDurationColumn(db);

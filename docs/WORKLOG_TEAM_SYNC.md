@@ -22,6 +22,9 @@ Single source of truth for:
 - `0009_ui_snippets.sql`
 - `0010_archived_at.sql`
 - `0011_team_permissions_foundation.sql`
+- `0012_session_foundation.sql`
+- `0013_op_outbox.sql`
+- `0014_mock_remote.sql`
 
 ## Migrations Wired In Worker Init
 - `0001_init.sql`
@@ -34,6 +37,13 @@ Single source of truth for:
 - `0008_completed_at.sql`
 - `0010_archived_at.sql`
 - `0011_team_permissions_foundation.sql`
+- `0012_session_foundation.sql`
+- `0013_op_outbox.sql`
+- `0014_mock_remote.sql`
+
+## Sync Server Migrations
+- `0001_sync_schema.sql`
+- `0002_team_invites.sql`
 
 ## Invariants Checklist
 - [ ] Team boundary is enforced: items cannot be mutated/read across team scope.
@@ -66,3 +76,4 @@ pnpm -s smoke
 | Date (UTC) | Prompt/Pass | Result | Notes |
 |---|---|---|---|
 | 2026-02-22 | Prompt 0 baseline safety rails | Complete | Added verify/smoke workflow, smoke harness, and deterministic worklog. |
+| 2026-03-01 | Clerk + Neon browser beta wave | In progress | Added Clerk exchange/session flow, invite routes + migration, and Clerk-mode UI auth boundary wiring. |

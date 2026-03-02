@@ -150,6 +150,9 @@ Open the URL printed by Vite.
 
 Use env vars in `.env.local` to switch sync behavior:
 
+- `VITE_AUTH_MODE=local|clerk` (default `local`)
+- `VITE_CLERK_PUBLISHABLE_KEY` (required when `VITE_AUTH_MODE=clerk`)
+- `VITE_AUTH_REMOTE_BASE_URL` (required when `VITE_AUTH_MODE=clerk`)
 - `SYNC_MODE=mock|remote` (default `mock`)
 - `SYNC_REMOTE_BASE_URL` (required when `SYNC_MODE=remote`)
 
@@ -160,9 +163,13 @@ Sample `.env.local`:
 
 ```sh
 # local/default
+VITE_AUTH_MODE=local
 SYNC_MODE=mock
 
 # remote server
+# VITE_AUTH_MODE=clerk
+# VITE_CLERK_PUBLISHABLE_KEY=pk_test_...
+# VITE_AUTH_REMOTE_BASE_URL=http://127.0.0.1:8787
 # SYNC_MODE=remote
 # SYNC_REMOTE_BASE_URL=http://127.0.0.1:8787
 ```

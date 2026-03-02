@@ -7,12 +7,8 @@ import type {
   AuthSessionSetArgs,
   TeamRole,
 } from "../rpc/types";
-import {
-  AUTH_MODE,
-  AUTH_OAUTH_CALLBACK_PATH,
-  AUTH_REMOTE_BASE_URL,
-  type AuthMode,
-} from "./authConfig";
+import { AUTH_MODE, AUTH_REMOTE_BASE_URL, type AuthMode } from "./authConfig";
+import { readClerkBridge } from "./clerkBridge";
 
 export type SignInArgs = {
   user_id?: string;
@@ -80,6 +76,20 @@ const toRecord = (value: unknown): Record<string, unknown> | null => {
     return null;
   }
   return value as Record<string, unknown>;
+};
+
+const readCookie = (name: string) => {
+  if (typeof document === "undefined") {
+    return "";
+  }
+  const entries = document.cookie.split(";").map((part) => part.trim());
+  for (const entry of entries) {
+    if (!entry.startsWith(`${name}=`)) {
+      continue;
+    }
+    return decodeURIComponent(entry.slice(name.length + 1));
+  }
+  return "";
 };
 
 const parseTeamRole = (value: unknown): TeamRole => {
@@ -155,15 +165,23 @@ const parseRemoteSession = (value: unknown): RemoteSessionResponse | null => {
   };
 };
 
-const fetchRemoteSession = async (): Promise<RemoteSessionResponse> => {
+const fetchRemoteSession = async (
+  teamId?: string | null
+): Promise<RemoteSessionResponse> => {
   const baseUrl = resolveAuthBaseUrl();
   if (!baseUrl) {
     throw new Error(
-      "AUTH_REMOTE_BASE_URL is required for AUTH_MODE=oauth when not running in a browser origin context."
+      "AUTH_REMOTE_BASE_URL is required for AUTH_MODE=clerk when not running in a browser origin context."
     );
   }
 
-  const response = await fetch(`${baseUrl}/auth/session`, {
+  const search = new URLSearchParams();
+  const normalizedTeamId = typeof teamId === "string" ? teamId.trim() : "";
+  if (normalizedTeamId) {
+    search.set("team_id", normalizedTeamId);
+  }
+  const suffix = search.toString();
+  const response = await fetch(`${baseUrl}/auth/session${suffix ? `?${suffix}` : ""}`, {
     method: "GET",
     credentials: "include",
     cache: "no-store",
@@ -173,33 +191,39 @@ const fetchRemoteSession = async (): Promise<RemoteSessionResponse> => {
   });
 
   if (!response.ok) {
-    throw new Error(`OAuth session request failed (${response.status}).`);
+    throw new Error(`Clerk session request failed (${response.status}).`);
   }
 
   const parsed = parseRemoteSession((await response.json()) as unknown);
   if (!parsed) {
-    throw new Error("Invalid OAuth session response shape.");
+    throw new Error("Invalid Clerk session response shape.");
   }
   return parsed;
 };
 
-const toSafePath = (candidate: string | null) => {
-  if (!candidate || !candidate.startsWith("/") || candidate.startsWith("//")) {
-    return "/";
+const exchangeClerkSession = async (token: string): Promise<void> => {
+  const baseUrl = resolveAuthBaseUrl();
+  if (!baseUrl) {
+    throw new Error("AUTH_REMOTE_BASE_URL is required for Clerk session exchange.");
   }
-  return candidate;
-};
 
-const finalizeOAuthCallbackRoute = () => {
-  if (!isBrowser()) {
-    return;
+  const response = await fetch(`${baseUrl}/auth/clerk/exchange`, {
+    method: "POST",
+    credentials: "include",
+    cache: "no-store",
+    headers: {
+      Authorization: `Bearer ${token}`,
+      "Content-Type": "application/json",
+    },
+  });
+
+  if (!response.ok) {
+    const payload = (await response.json().catch(() => null)) as
+      | { message?: string }
+      | null;
+    const message = payload?.message ?? `HTTP ${response.status}`;
+    throw new Error(`Clerk session exchange failed: ${message}`);
   }
-  if (window.location.pathname !== AUTH_OAUTH_CALLBACK_PATH) {
-    return;
-  }
-  const params = new URLSearchParams(window.location.search);
-  const next = toSafePath(params.get("next"));
-  window.history.replaceState({}, "", next);
 };
 
 const bootstrapLocalSessionFromRemote = async (remote: RemoteSessionResponse) => {
@@ -252,64 +276,80 @@ const localProvider: AuthProvider = {
   signOut: () => mutate<AuthLogoutResult>("auth.logout", {}),
 };
 
-const oauthProvider: AuthProvider = {
-  mode: "oauth",
+const clerkProvider: AuthProvider = {
+  mode: "clerk",
   getSession: async () => {
-    const remote = await fetchRemoteSession();
+    const bridge = readClerkBridge();
+    if (!bridge || !bridge.isLoaded) {
+      return getLocalSession();
+    }
+
+    if (!bridge.isSignedIn) {
+      await mutate<AuthLogoutResult>("auth.logout", {});
+      return getLocalSession();
+    }
+
+    const token = await bridge.getToken();
+    if (!token) {
+      await mutate<AuthLogoutResult>("auth.logout", {});
+      return getLocalSession();
+    }
+
+    await exchangeClerkSession(token);
+    const local = await getLocalSession();
+    const remote = await fetchRemoteSession(local.session?.team_id ?? null);
     await bootstrapLocalSessionFromRemote(remote);
-    finalizeOAuthCallbackRoute();
     return getLocalSession();
   },
   signIn: async (args) => {
-    const userId =
-      typeof args?.user_id === "string" ? args.user_id.trim() : "";
-    const teamId =
-      typeof args?.team_id === "string" ? args.team_id.trim() : "";
+    const bridge = readClerkBridge();
+    if (!bridge || !bridge.isLoaded) {
+      throw new Error("Clerk is not initialized yet.");
+    }
 
-    if (userId && teamId) {
-      await mutate("auth.session.set", {
-        user_id: userId,
-        team_id: teamId,
-      } satisfies AuthSessionSetArgs);
+    if (!bridge.isSignedIn) {
+      bridge.openSignIn();
       return {
-        status: "signed_in",
+        status: "picker_required",
         session: await getLocalSession(),
       };
     }
 
-    if (!isBrowser()) {
-      throw new Error("OAuth sign-in requires a browser runtime.");
+    const token = await bridge.getToken();
+    if (!token) {
+      bridge.openSignIn();
+      return {
+        status: "picker_required",
+        session: await getLocalSession(),
+      };
     }
 
-    const baseUrl = resolveAuthBaseUrl();
-    if (!baseUrl) {
-      throw new Error("AUTH_REMOTE_BASE_URL is required for OAuth sign-in.");
-    }
-
-    const currentPath = `${window.location.pathname}${window.location.search}${window.location.hash}`;
-    const callbackUrl = `${window.location.origin}${AUTH_OAUTH_CALLBACK_PATH}?next=${encodeURIComponent(
-      toSafePath(currentPath)
-    )}`;
-    const startUrl = `${baseUrl}/auth/oauth/start?return_to=${encodeURIComponent(
-      callbackUrl
-    )}`;
-
-    window.location.assign(startUrl);
-
+    await exchangeClerkSession(token);
+    const requestedTeamId =
+      typeof args?.team_id === "string" ? args.team_id.trim() : "";
+    const remote = await fetchRemoteSession(requestedTeamId || null);
+    await bootstrapLocalSessionFromRemote(remote);
     return {
-      status: "picker_required",
+      status: "signed_in",
       session: await getLocalSession(),
     };
   },
   signOut: async () => {
+    const bridge = readClerkBridge();
+    if (bridge?.isLoaded) {
+      await bridge.signOut();
+    }
+
     const baseUrl = resolveAuthBaseUrl();
     if (baseUrl) {
+      const csrf = readCookie("mw_csrf");
       await fetch(`${baseUrl}/auth/logout`, {
         method: "POST",
         credentials: "include",
         cache: "no-store",
         headers: {
           "Content-Type": "application/json",
+          ...(csrf ? { "X-CSRF-Token": csrf } : {}),
         },
       }).catch(() => {
         // Keep local sign-out resilient even if remote sign-out fails.
@@ -320,7 +360,9 @@ const oauthProvider: AuthProvider = {
 };
 
 export const authProvider: AuthProvider =
-  AUTH_MODE === "oauth" ? oauthProvider : localProvider;
+  AUTH_MODE === "clerk" ? clerkProvider : localProvider;
 
 export const getSessionOptions = async (): Promise<AuthSessionOptionsResult> =>
   query<AuthSessionOptionsResult>("auth.session.options", {});
+
+export const getAuthRemoteBaseUrl = () => resolveAuthBaseUrl();

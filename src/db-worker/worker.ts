@@ -3086,6 +3086,44 @@ const handleMutate = (
           };
           break;
         }
+        case "gantt.shift_subtree": {
+          const currentTeamId = getCurrentTeamId(dbHandle);
+          const itemId = ensureString(args.item_id, "item_id");
+          const deltaMinutes = ensureInteger(args.delta_minutes, "delta_minutes");
+          ensureItemInTeam(dbHandle, itemId, currentTeamId);
+          if (deltaMinutes === 0) {
+            result = {
+              ok: true,
+              result: { item_id: itemId, shifted_item_ids: [], delta_minutes: 0 },
+            };
+            break;
+          }
+          const subtreeIds = getSubtreeIds(dbHandle, [itemId], currentTeamId);
+          if (subtreeIds.length === 0) {
+            result = { ok: false, error: "item not found" };
+            break;
+          }
+          const placeholders = buildPlaceholders(subtreeIds.length);
+          const deltaMs = deltaMinutes * 60_000;
+          dbHandle.exec(
+            `UPDATE scheduled_blocks
+             SET start_at = start_at + ?
+             WHERE item_id IN (${placeholders});`,
+            {
+              bind: [deltaMs, ...subtreeIds],
+            }
+          );
+          result = {
+            ok: true,
+            result: {
+              item_id: itemId,
+              shifted_item_ids: subtreeIds,
+              delta_minutes: deltaMinutes,
+            },
+            invalidate: ["blocks", "items", `item:${itemId}`],
+          };
+          break;
+        }
         case "delete_block": {
           const currentTeamId = getCurrentTeamId(dbHandle);
           const blockId = ensureString(args.block_id, "block_id");

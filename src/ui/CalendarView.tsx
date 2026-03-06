@@ -118,6 +118,7 @@ const CalendarView: FC<CalendarViewProps> = ({
   const [blocks, setBlocks] = useState<CalendarBlock[]>([]);
   const [calendarItems, setCalendarItems] = useState<CalendarItem[]>([]);
   const [loading, setLoading] = useState(false);
+  const [hasLoadedOnce, setHasLoadedOnce] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [viewMode, setViewMode] = useState<"week" | "month">("week");
   const [focusDate, setFocusDate] = useState(() => new Date());
@@ -374,13 +375,24 @@ const CalendarView: FC<CalendarViewProps> = ({
           settings["ui.workday_start_hour"],
           settings["ui.workday_end_hour"]
         );
-        setWorkStartHour(normalized.startHour);
-        setWorkEndHour(normalized.endHour);
-        setShowAssignedOnly(settings["ui.calendar_assigned_only"] === true);
-        setShowUserCalendars(
-          settings["ui.calendar_show_user_calendars"] === true
+        setWorkStartHour((prev) =>
+          prev === normalized.startHour ? prev : normalized.startHour
         );
-        setUserColorMap(normalizeUserColorMap(settings["ui.user_colors"]));
+        setWorkEndHour((prev) =>
+          prev === normalized.endHour ? prev : normalized.endHour
+        );
+        setShowAssignedOnly((prev) => {
+          const next = settings["ui.calendar_assigned_only"] === true;
+          return prev === next ? prev : next;
+        });
+        setShowUserCalendars((prev) => {
+          const next = settings["ui.calendar_show_user_calendars"] === true;
+          return prev === next ? prev : next;
+        });
+        setUserColorMap((prev) => {
+          const next = normalizeUserColorMap(settings["ui.user_colors"]);
+          return JSON.stringify(prev) === JSON.stringify(next) ? prev : next;
+        });
       })
       .catch(() => {
         if (!isMounted) {
@@ -451,6 +463,7 @@ const CalendarView: FC<CalendarViewProps> = ({
             : result.items;
           setBlocks(nextBlocks);
           setCalendarItems(nextItems);
+          setHasLoadedOnce(true);
         })
         .catch((err) => {
           if (!isMounted) {
@@ -479,6 +492,7 @@ const CalendarView: FC<CalendarViewProps> = ({
         }
         setBlocks(result.blocks);
         setCalendarItems(result.items);
+        setHasLoadedOnce(true);
       })
       .catch((err) => {
         if (!isMounted) {
@@ -1720,6 +1734,9 @@ const CalendarView: FC<CalendarViewProps> = ({
     ]
   );
 
+  const isRefreshing = loading && hasLoadedOnce;
+  const showInitialLoading = loading && !hasLoadedOnce;
+
   return (
     <div className="calendar-view">
       {error ? <div className="error">{error}</div> : null}
@@ -1767,9 +1784,10 @@ const CalendarView: FC<CalendarViewProps> = ({
           ) : null}
         </div>
       </div>
-      {loading && blocks.length === 0 && calendarItems.length === 0 ? (
+      {showInitialLoading ? (
         <div className="list-empty">Loading…</div>
       ) : null}
+      {isRefreshing ? <div className="view-refreshing">Refreshing…</div> : null}
       {viewMode === "week" ? (
         <div className="calendar-week-shell">
           <aside className="calendar-task-rail">

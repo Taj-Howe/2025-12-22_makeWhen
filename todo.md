@@ -3,12 +3,14 @@ git procedure:
 
 
 # Bug Fixes
-- [ ] Fix the asignee menu not having enough space to click if its the last task in the list. 
-- [ ] Highlight item that corresponds to scope. Make page titles more expressive. 
+- [x] Fix the asignee menu not having enough space to click if its the last task in the list. 
+- [x] Highlight item that corresponds to scope. Make page titles more expressive. 
+- [x] Fix drag/drop occasionally making a task appear to disappear from the current view/scope.
 
 # Current UI Polish
-- [ ] Clean up tabs UI styling and behavior.
-- [ ] Clean up reload behavior and remove janky/visible reload states.
+- [x] Clean up tabs UI styling and behavior.
+- [x] Clean up reload behavior and remove janky/visible reload states.
+- [x] Make scroll nice and fluid
 - [ ] Add transition animations between key view/state changes.
 - [ ] Add ability to reorder project list and sort/group projects.
 - [ ] Add info/help text in Settings explaining how the command line interface works.
@@ -19,7 +21,7 @@ git procedure:
 - [ ] Standardize button heights across the app.
 - [ ] Standardize button corner radius tokens across all button variants (including user buttons).
 - [ ] Remove component/background styling from project list rows; render as plain text list styling.
-- [ ] Fix spacing for milestone titles and render as text-only (no component background).
+- [x] Fix spacing for milestone titles and render as text-only (no component background).
 - [ ] Formalize design system and tokenize all core UI primitives (spacing, radius, typography, color, control sizes).
 
 ## Mobile UI
@@ -196,6 +198,8 @@ Interactions:
 
 
 ### 4.4 Gantt view
+- [ ] Work on Gantt view so setting dependencies is easy and flow-based directly in the UI.
+
 Okay, so that app is working great. List view and calendar view seem to be in synch. The features are working correctly. it's usable. 
 
 Next big task is Gantt view. Look back at this context to understand the design philosophy around the dependencies. I want Gantt to work even if the dependency logic hasn't been set up. Instead, it would just show a horizontal view of time, basically the order someone will do projects based on the order they are in the calendar. Then, when dependency logic is added, the lines will be drawn per usual gantt chart behavior. I would like dependency logic to be able to be added by interacting with the UI. 

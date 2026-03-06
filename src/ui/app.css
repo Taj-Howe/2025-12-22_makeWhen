@@ -255,6 +255,9 @@ body {
   border-radius: 0 !important;
   padding-top: 6px;
   position: relative;
+  scroll-behavior: smooth;
+  -webkit-overflow-scrolling: touch;
+  overscroll-behavior-x: contain;
 }
 
 .top-tabs [role="tab"] {
@@ -285,10 +288,6 @@ body {
   background: color-mix(in srgb, var(--color-accent-border) 60%, var(--color-border) 40%);
 }
 
-.top-tabs [role="tab"][data-state="inactive"]:has(+ [role="tab"][data-state="active"])::after {
-  display: none;
-}
-
 .top-tabs [role="tab"][data-state="active"] {
   background: var(--color-bg);
   color: var(--color-text);
@@ -301,31 +300,6 @@ body {
   padding-right: 14px;
   z-index: 2;
   box-shadow: 0 1px 0 var(--color-bg);
-}
-
-.top-tabs [role="tab"][data-state="active"]::before,
-.top-tabs [role="tab"][data-state="active"]::after {
-  content: "";
-  position: absolute;
-  bottom: -1px;
-  width: 8px;
-  height: 8px;
-  background: var(--color-bg);
-  pointer-events: none;
-}
-
-.top-tabs [role="tab"][data-state="active"]::before {
-  left: -8px;
-  border-right: 1px solid var(--color-accent-border);
-  border-bottom: 1px solid var(--color-accent-border);
-  border-bottom-right-radius: var(--radius);
-}
-
-.top-tabs [role="tab"][data-state="active"]::after {
-  right: -8px;
-  border-left: 1px solid var(--color-accent-border);
-  border-bottom: 1px solid var(--color-accent-border);
-  border-bottom-left-radius: var(--radius);
 }
 
 .top-title {
@@ -672,6 +646,10 @@ body {
   color: var(--color-text);
 }
 
+.gantt-root.is-gesture-active {
+  user-select: none;
+}
+
 .gantt-toolbar {
   display: flex;
   align-items: center;
@@ -683,6 +661,21 @@ body {
 .gantt-toolbar-right {
   display: flex;
   gap: 8px;
+  align-items: center;
+}
+
+.gantt-toolbar-tip {
+  font-size: 12px;
+  color: var(--color-muted-text);
+}
+
+.gantt-edge-editor-inline {
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius);
+  background: var(--color-panel);
+  padding: 6px 10px;
+  font-size: 12px;
+  color: var(--color-muted-text);
 }
 
 .gantt-edge-editor {
@@ -792,6 +785,9 @@ body {
   overflow-x: auto;
   overflow-y: hidden;
   position: relative;
+  scroll-behavior: smooth;
+  -webkit-overflow-scrolling: touch;
+  overscroll-behavior-x: contain;
 }
 
 .gantt-timeline-scroll--header {
@@ -809,13 +805,58 @@ body {
   top: 0;
   left: 0;
   overflow: visible;
-  pointer-events: none;
 }
 
 .gantt-edge-line {
-  stroke: var(--color-border);
-  stroke-width: 1;
+  stroke: color-mix(in srgb, var(--color-accent-border) 60%, var(--color-border));
+  stroke-width: 1.5;
   fill: none;
+}
+
+.gantt-edge-line.is-selected {
+  stroke: var(--color-accent);
+}
+
+.gantt-edge-hit {
+  fill: none;
+  stroke: transparent;
+  stroke-width: 10;
+  cursor: pointer;
+  pointer-events: stroke;
+}
+
+.gantt-edge-preview {
+  fill: none;
+  stroke: var(--color-accent);
+  stroke-width: 1.5;
+  stroke-dasharray: 4 3;
+}
+
+.gantt-edge-popover {
+  position: absolute;
+  min-width: 240px;
+  max-width: 280px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius);
+  background: var(--color-panel);
+  box-shadow: var(--shadow-panel);
+  padding: 8px;
+  display: grid;
+  gap: 8px;
+  z-index: 6;
+}
+
+.gantt-edge-popover label {
+  display: grid;
+  gap: 4px;
+  font-size: 11px;
+  color: var(--color-muted-text);
+}
+
+.gantt-edge-popover-actions {
+  display: flex;
+  gap: 6px;
+  justify-content: flex-end;
 }
 
 .gantt-row {
@@ -839,17 +880,70 @@ body {
   align-items: center;
   gap: 6px;
   cursor: pointer;
+  appearance: none;
+  text-align: left;
+  user-select: none;
   overflow: visible;
   white-space: nowrap;
 }
 
 .gantt-bar-title {
   white-space: nowrap;
+  pointer-events: none;
 }
 
-.gantt-bar.is-pending {
-  outline: 2px solid var(--color-accent-border);
-  outline-offset: 2px;
+.gantt-bar.is-dragging {
+  opacity: 0.9;
+  cursor: grabbing;
+}
+
+.gantt-resize-handle {
+  position: absolute;
+  top: 50%;
+  width: 8px;
+  height: 16px;
+  border-radius: 999px;
+  transform: translateY(-50%);
+  background: color-mix(in srgb, var(--color-accent-text) 75%, transparent);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 100ms ease;
+}
+
+.gantt-resize-handle--start {
+  left: -4px;
+  cursor: ew-resize;
+}
+
+.gantt-resize-handle--end {
+  right: -4px;
+  cursor: ew-resize;
+}
+
+.gantt-bar:hover .gantt-resize-handle,
+.gantt-bar.is-dragging .gantt-resize-handle {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.gantt-connect-handle {
+  position: absolute;
+  top: 50%;
+  width: 10px;
+  height: 10px;
+  border-radius: 999px;
+  border: 1px solid var(--color-accent-border);
+  background: var(--color-panel);
+  transform: translateY(-50%);
+}
+
+.gantt-connect-handle--in {
+  left: -7px;
+}
+
+.gantt-connect-handle--out {
+  right: -7px;
+  cursor: crosshair;
 }
 
 .gantt-unscheduled {
@@ -866,11 +960,12 @@ body {
   width: 2px;
   height: 24px;
   background: var(--color-warning);
-  border: none;
+  border: 0;
   padding: 0;
   cursor: pointer;
   min-width: 2px;
   overflow: visible;
+  appearance: none;
 }
 
 .gantt-due-dot {
@@ -1045,16 +1140,23 @@ body {
 }
 
 .user-select-popover {
-  position: absolute;
-  top: calc(100% + 6px);
-  left: 0;
-  right: 0;
+  position: fixed;
   border-radius: var(--radius);
   border: 1px solid var(--color-glass-border);
   background: var(--color-glass-bg);
   padding: 8px;
   z-index: 60;
   box-shadow: none;
+  display: grid;
+  gap: 8px;
+}
+
+.user-select-popover--down {
+  transform-origin: top center;
+}
+
+.user-select-popover--up {
+  transform-origin: bottom center;
 }
 
 .user-select-input {
@@ -1062,7 +1164,6 @@ body {
   border: 1px solid var(--color-border);
   border-radius: var(--radius);
   padding: 6px 8px;
-  margin-bottom: 8px;
   background: var(--color-panel-2);
   color: var(--color-text);
 }
@@ -1071,6 +1172,7 @@ body {
   display: grid;
   gap: 6px;
   max-height: 220px;
+  min-height: 0;
   overflow: auto;
 }
 
@@ -1547,6 +1649,8 @@ body {
   overflow-y: auto;
   overscroll-behavior: contain;
   padding-right: 2px;
+  scroll-behavior: smooth;
+  -webkit-overflow-scrolling: touch;
 }
 
 .calendar-task-empty {
@@ -1910,6 +2014,9 @@ body {
   overflow-y: hidden;
   max-width: 100%;
   width: 100%;
+  scroll-behavior: smooth;
+  -webkit-overflow-scrolling: touch;
+  overscroll-behavior-x: contain;
 }
 
 .list-table {
@@ -2034,13 +2141,23 @@ body {
 }
 
 .group-toggle {
+  appearance: none;
+  -webkit-appearance: none;
   background: transparent;
   border: none;
   color: inherit;
   font: inherit;
+  font-size: 13px;
+  line-height: 1;
   text-align: left;
   cursor: pointer;
   padding: 0;
+}
+
+.group-title-toggle {
+  font-size: 16px;
+  font-weight: 700;
+  line-height: 1.2;
 }
 
 .cell-title {
@@ -2187,6 +2304,40 @@ body {
 .cell-title-label {
   display: inline-block;
   padding-left: 4px;
+  font-weight: 650;
+  font-size: 16px;
+  line-height: 1.2;
+  color: var(--color-text);
+}
+
+.cell-title-label--level-0 {
+  color: var(--color-hierarchy-level-0, var(--color-milestone));
+  font-size: 19px;
+  font-weight: 760;
+}
+
+.cell-title-label--level-1 {
+  color: var(--color-hierarchy-level-1, var(--color-task));
+  font-size: 17px;
+  font-weight: 710;
+}
+
+.cell-title-label--level-2 {
+  color: var(--color-hierarchy-level-2, var(--color-primary));
+  font-size: 16px;
+  font-weight: 660;
+}
+
+.cell-title-label--level-3 {
+  color: var(--color-hierarchy-level-3, var(--color-secondary));
+  font-size: 15px;
+  font-weight: 620;
+}
+
+.cell-title-label--level-4 {
+  color: var(--color-hierarchy-level-4, var(--color-tertiary));
+  font-size: 14px;
+  font-weight: 580;
 }
 
 .title-header {
@@ -2289,6 +2440,28 @@ body {
 .list-empty {
   padding: 18px 6px;
   opacity: 0.7;
+}
+
+.view-refreshing {
+  margin-bottom: 10px;
+  font-size: 12px;
+  color: var(--color-muted-text);
+}
+
+.top-tabs::-webkit-scrollbar,
+.list-scroll::-webkit-scrollbar,
+.calendar-task-list::-webkit-scrollbar,
+.gantt-timeline-scroll::-webkit-scrollbar {
+  height: 8px;
+  width: 8px;
+}
+
+.top-tabs::-webkit-scrollbar-thumb,
+.list-scroll::-webkit-scrollbar-thumb,
+.calendar-task-list::-webkit-scrollbar-thumb,
+.gantt-timeline-scroll::-webkit-scrollbar-thumb {
+  background: color-mix(in srgb, var(--color-border) 70%, transparent);
+  border-radius: var(--radius-pill);
 }
 
 .hint {

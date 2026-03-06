@@ -1,32 +1,63 @@
-# 1) update main and create a new branch
-git switch main
+# Safe Branch Flow (uses `master` in this repo)
+
+## 0) Preflight before coding
+
+```sh
+bash scripts/git/branch-safety.sh preflight
+```
+
+Checks current branch cleanliness and divergence against `master` and upstream.
+
+## 1) Start a new branch from up-to-date `master`
+
+```sh
+bash scripts/git/branch-safety.sh start feat/my-change
+```
+
+Equivalent guarded sequence:
+
+```sh
+git fetch --all --prune
+git switch master
 git pull --ff-only
 git switch -c feat/my-change
+```
 
-# 2) stage + commit your work
+## 2) Commit and push
+
+```sh
 git add -A
 git commit -m "Describe the change"
+git push -u origin feat/my-change
+```
 
-# 3) push branch to origin
-git push -u origin HEAD
+## 3) Open PR to `master`
 
-# 4) open a PR for review (pick ONE option)
+```sh
+gh pr create --base master --head feat/my-change --title "Describe the change" --body "What changed + how to test"
+```
 
-# Option A (GitHub CLI):
-gh pr create --base main --head HEAD --title "Describe the change" --body "What changed + how to test"
+## 4) Before merge, run checks and re-sync
 
-# Option B (no CLI):
-# Open GitHub/GitLab in the browser → “Compare & pull request” / “New merge request”
+```sh
+bash scripts/git/branch-safety.sh preflight
+pnpm -s verify
+git fetch --all --prune
+git rebase origin/master
+```
 
-# 5) after review is approved + checks pass, merge (pick ONE option)
+## 5) Merge + cleanup
 
-# Option A (GitHub CLI):
+```sh
 gh pr merge --merge --delete-branch
-
-# Option B (browser):
-# Click “Merge” / “Squash and merge” / “Rebase and merge”
-
-# 6) sync local main and clean up
-git switch main
+git switch master
 git pull --ff-only
 git branch -d feat/my-change
+```
+
+## 6) Weekly hygiene
+
+```sh
+bash scripts/git/branch-safety.sh status
+bash scripts/git/branch-safety.sh brief-non-master
+```

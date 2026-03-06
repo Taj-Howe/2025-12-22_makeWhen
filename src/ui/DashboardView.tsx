@@ -271,6 +271,8 @@ const DashboardView: FC<DashboardViewProps> = ({
     [loadWidgets, onSelectItem]
   );
 
+  const isRefreshing = loading && hasLoadedOnce;
+
   return (
     <div className="dashboard-view">
       <ContributionsHeatmap scope={scope} refreshToken={refreshToken} />
@@ -286,6 +288,7 @@ const DashboardView: FC<DashboardViewProps> = ({
       </div>
       {error ? <div className="error">{error}</div> : null}
       {loading && !hasLoadedOnce ? <div className="list-empty">Loading…</div> : null}
+      {isRefreshing ? <div className="view-refreshing">Refreshing…</div> : null}
       <div className="dashboard-grid">
         <section className="dashboard-card">
           <h3>Execution</h3>

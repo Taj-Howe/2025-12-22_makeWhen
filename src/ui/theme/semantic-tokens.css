@@ -23,6 +23,11 @@
   --color-tertiary: #00a2c7;
   --color-milestone: #6e6ade;
   --color-task: #27b08b;
+  --color-hierarchy-level-0: var(--color-milestone);
+  --color-hierarchy-level-1: var(--color-task);
+  --color-hierarchy-level-2: var(--color-primary);
+  --color-hierarchy-level-3: var(--color-secondary);
+  --color-hierarchy-level-4: var(--color-tertiary);
   --color-scheduled: #0090ff;
   --color-deadline: #e5484d;
   --color-danger: #e5484d;

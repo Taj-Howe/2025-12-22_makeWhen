@@ -114,6 +114,8 @@ const KanbanView: FC<KanbanViewProps> = ({
     return map;
   }, [lanes]);
 
+  const isRefreshing = loading && hasLoadedOnce;
+
   const cardLaneMap = useMemo(() => {
     const map = new Map<string, string>();
     for (const lane of lanes) {
@@ -296,6 +298,7 @@ const KanbanView: FC<KanbanViewProps> = ({
 
       {error ? <div className="error">{error}</div> : null}
       {loading && !hasLoadedOnce ? <div className="loading">Loading…</div> : null}
+      {isRefreshing ? <div className="view-refreshing">Refreshing…</div> : null}
 
       <div className="kanban-board">
         {lanes.map((lane) => (

@@ -135,6 +135,11 @@ const SEMANTIC_COLOR_LABELS: Array<{ key: SemanticColorKey; label: string }> = [
   { key: "tertiary", label: "Tertiary" },
   { key: "milestone", label: "Milestone" },
   { key: "task", label: "Task" },
+  { key: "hierarchyLevel0", label: "Hierarchy L0 (Milestone)" },
+  { key: "hierarchyLevel1", label: "Hierarchy L1 (Task)" },
+  { key: "hierarchyLevel2", label: "Hierarchy L2 (Subtask)" },
+  { key: "hierarchyLevel3", label: "Hierarchy L3 (Nested)" },
+  { key: "hierarchyLevel4", label: "Hierarchy L4 (Deepest)" },
   { key: "scheduled", label: "Scheduled" },
   { key: "deadline", label: "Deadline" },
 ];
@@ -1408,8 +1413,9 @@ const SettingsWindow: FC<SettingsWindowProps> = ({
                   <Flex direction="column" gap="3">
                     <Heading size="3">Semantic Colors</Heading>
                     <Text size="2" color="gray">
-                      Control task, milestone, scheduled block, and deadline role
-                      colors.
+                      Control role colors including list hierarchy levels
+                      (milestone, task, subtask, nested), scheduled blocks, and
+                      deadlines.
                     </Text>
                     <Flex direction="column" gap="2">
                       {SEMANTIC_COLOR_LABELS.map((entry) => (

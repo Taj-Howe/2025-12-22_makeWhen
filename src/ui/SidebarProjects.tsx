@@ -26,7 +26,6 @@ type SidebarProjectsProps = {
   onDeleteProject: (projectId: string, projectTitle: string) => void;
   users: UserLite[];
   usersError: string | null;
-  selectedUserId: string | null;
   onSelectUser: (userId: string) => void;
   currentUserName: string;
   onOpenSettings: () => void;
@@ -42,7 +41,6 @@ const SidebarProjects: FC<SidebarProjectsProps> = ({
   onDeleteProject,
   users,
   usersError,
-  selectedUserId,
   onSelectUser,
   currentUserName,
   onOpenSettings,
@@ -156,7 +154,7 @@ const SidebarProjects: FC<SidebarProjectsProps> = ({
             key={UNGROUPED_PROJECT_ID}
             className={
               scope.kind === "project" &&
-              selectedProjectId === UNGROUPED_PROJECT_ID
+              scope.projectId === UNGROUPED_PROJECT_ID
                 ? "sidebar-item is-active"
                 : "sidebar-item"
             }
@@ -175,7 +173,7 @@ const SidebarProjects: FC<SidebarProjectsProps> = ({
                   <AppButton
                     className={
                       scope.kind === "project" &&
-                      project.id === selectedProjectId
+                      project.id === scope.projectId
                         ? "sidebar-item is-active"
                         : "sidebar-item"
                     }
@@ -215,7 +213,7 @@ const SidebarProjects: FC<SidebarProjectsProps> = ({
                 key={user.user_id}
                 className={
                   scope.kind === "user" &&
-                  user.user_id === selectedUserId
+                  user.user_id === scope.userId
                     ? "sidebar-item is-active"
                     : "sidebar-item"
                 }

@@ -493,6 +493,46 @@ const App = () => {
     );
   }, [activeScope, projectTitleById, selectedProject, selectedProjectId]);
 
+  const activeScopeLabel = useMemo(() => {
+    if (activeScope.kind === "project") {
+      return `Project: ${activeProjectTitle}`;
+    }
+    const userLabel =
+      users.find((user) => user.user_id === activeScope.userId)?.display_name ??
+      (activeScope.userId === currentUser.user_id
+        ? currentUser.display_name
+        : activeScope.userId);
+    return `User: ${userLabel}`;
+  }, [activeProjectTitle, activeScope, currentUser.display_name, currentUser.user_id, users]);
+
+  const activeViewLabel = useMemo(() => {
+    switch (activeView) {
+      case "dashboard":
+        return "Dashboard";
+      case "list":
+        return "List";
+      case "calendar":
+        return "Calendar";
+      case "kanban":
+        return "Kanban";
+      case "gantt":
+        return "Gantt";
+      default:
+        return "View";
+    }
+  }, [activeView]);
+
+  useEffect(() => {
+    if (typeof document === "undefined") {
+      return;
+    }
+    if (!activeSessionId) {
+      document.title = "makewhen";
+      return;
+    }
+    document.title = `${activeViewLabel} · ${activeScopeLabel} · makewhen`;
+  }, [activeScopeLabel, activeSessionId, activeViewLabel]);
+
   const activeUserLabel = authCurrent?.user?.display_name ?? currentUser.display_name;
   const activeTeamLabel = authCurrent?.team?.name ?? "No team";
   const isClerkMode = authProvider.mode === "clerk";
@@ -735,7 +775,6 @@ const App = () => {
               onDeleteProject={handleDeleteProjectById}
               users={users}
               usersError={usersError}
-              selectedUserId={selectedUserId ?? currentUser.user_id}
               onSelectUser={handleSelectUser}
               currentUserName={activeUserLabel}
               onOpenSettings={() => setSettingsOpen(true)}
@@ -943,11 +982,7 @@ const App = () => {
                   {inviteStatusError ? <div className="error">{inviteStatusError}</div> : null}
                   <div className="top-title-row">
                     <div className="top-title">
-                      {activeView === "dashboard"
-                        ? "Dashboard"
-                        : activeScope.kind === "user"
-                          ? currentUser.display_name
-                          : activeProjectTitle}
+                      {activeViewLabel} · {activeScopeLabel}
                     </div>
                   </div>
                   {activeScope.kind === "project" && activeView !== "dashboard" ? (
